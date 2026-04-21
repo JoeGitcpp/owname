@@ -1,0 +1,362 @@
+//! Phase 5H: Semantic Readiness Contract tests.
+//!
+//! Contracts verified:
+//!   1. Stable cross-modal slots become semantic-ready.
+//!   2. Unstable / single-spike slots stay below the readiness threshold.
+//!   3. Stable, recurring relation patterns become edge-ready.
+//!   4. global_semantic_readiness rises with the count/strength of ready entries.
+//!   5. Snapshot roundtrip preserves SemanticReadinessState exactly.
+//!   6. Ordered global refresh contract still holds with semantic readiness step.
+//!   7. Claim / scoring architecture remains unchanged after semantic readiness.
+
+use std::sync::Arc;
+
+use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
+use bionic_v0::viewport::{EventEvidence, SlotClaim, Viewport};
+use bionic_v0::{
+    MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES, PHOT_BANDS, SEMANTIC_READY_SLOT_MIN_SCORE,
+    VIB_BANDS,
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn tick_joint_stable(vp: &Arc<Viewport>, slot_id: usize, t_us: u64) {
+    let vib_obs = [0.10f64; VIB_BANDS];
+    let vib_pred = [0.09f64; VIB_BANDS];
+    let vib_err = [0.01f64; VIB_BANDS];
+    let vib_prec = [0.5f64; VIB_BANDS];
+    vp.write_slot_vib(slot_id, t_us, &vib_obs, &vib_pred, &vib_err, &vib_prec);
+    vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
+
+    let phot_obs = vec![0.20f64; PHOT_BANDS];
+    let phot_pred = vec![0.18f64; PHOT_BANDS];
+    let phot_err = vec![0.02f64; PHOT_BANDS];
+    let phot_prec = vec![0.4f64; PHOT_BANDS];
+    vp.write_slot_phot(slot_id, t_us, &phot_obs, &phot_pred, &phot_err, &phot_prec);
+    vp.refresh_slot_fusion(slot_id, MOD_PHOT, t_us);
+
+    vp.refresh_slot_high_layer(slot_id, t_us);
+}
+
+fn tick_vib_only_unstable(vp: &Arc<Viewport>, slot_id: usize, t_us: u64, jitter: f64) {
+    let v = 0.10f64 + jitter;
+    let vib_obs = [v; VIB_BANDS];
+    let vib_pred = [0.09f64; VIB_BANDS];
+    let vib_err = [v - 0.09; VIB_BANDS];
+    let vib_prec = [0.05f64; VIB_BANDS];
+    vp.write_slot_vib(slot_id, t_us, &vib_obs, &vib_pred, &vib_err, &vib_prec);
+    vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
+    vp.refresh_slot_high_layer(slot_id, t_us);
+}
+
+fn full_global_cycle(vp: &Arc<Viewport>, t_us: u64) {
+    vp.refresh_global_attention(t_us);
+    vp.refresh_global_relations(t_us);
+    vp.refresh_global_relation_predictor(t_us);
+    vp.refresh_global_reasoning(t_us);
+    vp.refresh_global_reasoning_history(t_us);
+    vp.refresh_semantic_readiness(t_us);
+}
+
+// ---------------------------------------------------------------------------
+// Test 1: stable_cross_modal_object_becomes_semantic_ready
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stable_cross_modal_object_becomes_semantic_ready() {
+    let vp = Arc::new(Viewport::new());
+    let t0 = 10_000_000u64;
+    let dt = 10_000u64;
+
+    // Two cross-modal slots so attention has more than one option and the
+    // attention shares are non-degenerate.
+    let slot_a = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc a");
+    let slot_b = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc b");
+
+    for i in 0..40u64 {
+        let t = t0 + i * dt;
+        tick_joint_stable(&vp, slot_a, t);
+        tick_joint_stable(&vp, slot_b, t);
+        full_global_cycle(&vp, t);
+    }
+
+    let sr = vp.read_semantic_readiness();
+    assert!(
+        sr.slot_readiness_scores[slot_a] > SEMANTIC_READY_SLOT_MIN_SCORE,
+        "stable cross-modal slot_a must clear readiness threshold; got {}",
+        sr.slot_readiness_scores[slot_a]
+    );
+    assert!(
+        sr.slot_readiness_scores[slot_b] > SEMANTIC_READY_SLOT_MIN_SCORE,
+        "stable cross-modal slot_b must clear readiness threshold; got {}",
+        sr.slot_readiness_scores[slot_b]
+    );
+    assert!(sr.n_ready_slots >= 2, "at least 2 ready slots, got {}", sr.n_ready_slots);
+    assert!(
+        sr.semantic_ready_slots[..sr.n_ready_slots as usize].contains(&(slot_a as i8)),
+        "ready slot list must include slot_a"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 2: unstable_object_does_not_become_semantic_ready
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unstable_object_does_not_become_semantic_ready() {
+    let vp = Arc::new(Viewport::new());
+    let t0 = 11_000_000u64;
+    let dt = 10_000u64;
+
+    // Allocate a stable slot just to give attention some baseline.
+    let stable_slot = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc stable");
+    let unstable_slot = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc unstable");
+
+    for i in 0..40u64 {
+        let t = t0 + i * dt;
+        tick_joint_stable(&vp, stable_slot, t);
+        // Big alternating jitter — VIB-only, no PHOT (so cross_modal_confidence
+        // stays capped) and high-amplitude error.
+        let jitter = if i % 2 == 0 { 0.30 } else { -0.30 };
+        tick_vib_only_unstable(&vp, unstable_slot, t, jitter);
+        full_global_cycle(&vp, t);
+    }
+
+    let sr = vp.read_semantic_readiness();
+    assert!(
+        sr.slot_readiness_scores[unstable_slot] < SEMANTIC_READY_SLOT_MIN_SCORE,
+        "unstable VIB-only jitter slot must NOT clear readiness threshold; got {}",
+        sr.slot_readiness_scores[unstable_slot]
+    );
+    assert!(
+        !sr.semantic_ready_slots[..sr.n_ready_slots as usize]
+            .contains(&(unstable_slot as i8)),
+        "unstable slot must not appear in ready list"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: stable_relation_pattern_becomes_edge_ready
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stable_relation_pattern_becomes_edge_ready() {
+    let vp = Arc::new(Viewport::new());
+    let t0 = 12_000_000u64;
+    let dt = 10_000u64;
+
+    let slot_a = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc a");
+    let slot_b = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc b");
+
+    // Long stable run so relation predictor warms up and pattern recurrence rises.
+    for i in 0..80u64 {
+        let t = t0 + i * dt;
+        tick_joint_stable(&vp, slot_a, t);
+        tick_joint_stable(&vp, slot_b, t);
+        full_global_cycle(&vp, t);
+    }
+
+    let sr = vp.read_semantic_readiness();
+    let any_edge_ready = sr.n_ready_edges > 0;
+    let max_edge_score = sr
+        .edge_readiness_scores
+        .iter()
+        .cloned()
+        .fold(0.0f64, f64::max);
+    assert!(
+        any_edge_ready || max_edge_score > 0.4,
+        "stable, recurring relation pattern should produce non-trivial edge readiness; \
+         n_ready_edges={}, max_edge_score={}",
+        sr.n_ready_edges,
+        max_edge_score
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: global_semantic_readiness_tracks_number_of_ready_patterns
+// ---------------------------------------------------------------------------
+
+#[test]
+fn global_semantic_readiness_tracks_number_of_ready_patterns() {
+    // Empty viewport: gsr must be 0.0.
+    let vp_empty = Arc::new(Viewport::new());
+    full_global_cycle(&vp_empty, 0);
+    let sr_empty = vp_empty.read_semantic_readiness();
+    assert_eq!(sr_empty.n_ready_slots, 0);
+    assert_eq!(sr_empty.n_ready_edges, 0);
+    assert_eq!(sr_empty.global_semantic_readiness, 0.0);
+
+    // Populated viewport with stable cross-modal slots: gsr must rise.
+    let vp = Arc::new(Viewport::new());
+    let t0 = 13_000_000u64;
+    let dt = 10_000u64;
+    let slot_a = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc a");
+    let slot_b = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc b");
+    for i in 0..80u64 {
+        let t = t0 + i * dt;
+        tick_joint_stable(&vp, slot_a, t);
+        tick_joint_stable(&vp, slot_b, t);
+        full_global_cycle(&vp, t);
+    }
+    let sr = vp.read_semantic_readiness();
+    assert!(
+        sr.global_semantic_readiness > sr_empty.global_semantic_readiness,
+        "populated viewport must produce higher global_semantic_readiness; \
+         got {} vs empty {}",
+        sr.global_semantic_readiness,
+        sr_empty.global_semantic_readiness
+    );
+    assert!(
+        sr.n_ready_slots > 0,
+        "at least one slot must be ready when stable patterns exist"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: snapshot_roundtrip_preserves_semantic_readiness
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snapshot_roundtrip_preserves_semantic_readiness() {
+    let vp = Arc::new(Viewport::new());
+    let t0 = 14_000_000u64;
+    let dt = 10_000u64;
+    let slot_a = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc a");
+    let slot_b = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc b");
+    for i in 0..50u64 {
+        let t = t0 + i * dt;
+        tick_joint_stable(&vp, slot_a, t);
+        tick_joint_stable(&vp, slot_b, t);
+        full_global_cycle(&vp, t);
+    }
+
+    let dir = std::env::temp_dir().join("bionic_v0_5h_semantic_readiness_snap");
+    std::fs::create_dir_all(&dir).ok();
+    let paths = SnapshotPaths::new(&dir);
+    write_snapshot(&vp, &paths).expect("write snapshot");
+    let data = read_snapshot(&paths.final_path).expect("read snapshot");
+
+    let live = vp.read_semantic_readiness();
+    let file = data.semantic_readiness;
+
+    for i in 0..N_OBJECT_SLOTS {
+        assert!(
+            (file.slot_readiness_scores[i] - live.slot_readiness_scores[i]).abs() < 1e-12,
+            "slot_readiness_scores[{}] roundtrip mismatch", i
+        );
+        assert_eq!(
+            file.semantic_ready_slots[i], live.semantic_ready_slots[i],
+            "semantic_ready_slots[{}] roundtrip mismatch", i
+        );
+    }
+    for i in 0..N_REL_EDGES {
+        assert!(
+            (file.edge_readiness_scores[i] - live.edge_readiness_scores[i]).abs() < 1e-12,
+            "edge_readiness_scores[{}] roundtrip mismatch", i
+        );
+        assert_eq!(
+            file.semantic_ready_edges[i], live.semantic_ready_edges[i],
+            "semantic_ready_edges[{}] roundtrip mismatch", i
+        );
+    }
+    assert_eq!(file.n_ready_slots, live.n_ready_slots);
+    assert_eq!(file.n_ready_edges, live.n_ready_edges);
+    assert!(
+        (file.global_semantic_readiness - live.global_semantic_readiness).abs() < 1e-12,
+        "global_semantic_readiness roundtrip mismatch"
+    );
+    assert_eq!(file.last_update_t_us, live.last_update_t_us);
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: ordered_refresh_contract_remains_intact_with_semantic_readiness
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ordered_refresh_contract_remains_intact_with_semantic_readiness() {
+    let vp = Arc::new(Viewport::new());
+    let t0 = 15_000_000u64;
+    let dt = 10_000u64;
+    let slot_a = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc a");
+    let slot_b = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc b");
+    for i in 0..30u64 {
+        let t = t0 + i * dt;
+        tick_joint_stable(&vp, slot_a, t);
+        tick_joint_stable(&vp, slot_b, t);
+        full_global_cycle(&vp, t);
+    }
+
+    let t_cycle = t0 + 30 * dt;
+    full_global_cycle(&vp, t_cycle);
+
+    // Snapshot must reflect the post-cycle state of every layer.
+    let dir = std::env::temp_dir().join("bionic_v0_5h_ordered_refresh_snap");
+    std::fs::create_dir_all(&dir).ok();
+    let paths = SnapshotPaths::new(&dir);
+    write_snapshot(&vp, &paths).expect("write snapshot");
+    let data = read_snapshot(&paths.final_path).expect("read snapshot");
+
+    // Each downstream layer must have been written with the same t_cycle.
+    assert_eq!(data.global_relations.last_update_t_us, t_cycle);
+    assert_eq!(data.global_reasoning.last_update_t_us, t_cycle);
+    assert_eq!(data.global_reasoning_memory.last_update_t_us, t_cycle);
+    assert_eq!(
+        data.semantic_readiness.last_update_t_us, t_cycle,
+        "semantic readiness must be written within the same ordered cycle"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: claim_architecture_remains_unchanged_after_semantic_readiness
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claim_architecture_remains_unchanged_after_semantic_readiness() {
+    let vp = Arc::new(Viewport::new());
+    let t0 = 16_000_000u64;
+
+    let ev1 = EventEvidence {
+        modality_bit: MOD_VIB,
+        event_t_us: t0,
+        event_energy: 0.1,
+        surprise: 0.1,
+        spatial: None,
+        nomination_seq_hint: 1,
+    };
+    let claim1 = vp.claim_slot_for_event(&ev1);
+    assert!(matches!(claim1, SlotClaim::Allocated(_)));
+    let slot_id = claim1.slot_id().unwrap();
+
+    for i in 0..20u64 {
+        let t = t0 + i * 10_000;
+        tick_joint_stable(&vp, slot_id, t);
+        full_global_cycle(&vp, t);
+    }
+
+    let ev2 = EventEvidence {
+        modality_bit: MOD_VIB,
+        event_t_us: t0 + 200_000,
+        event_energy: 0.1,
+        surprise: 0.1,
+        spatial: None,
+        nomination_seq_hint: 1,
+    };
+    let claim2 = vp.claim_slot_for_event(&ev2);
+    assert!(
+        matches!(claim2, SlotClaim::Reused(_)),
+        "same-modality within window must reuse after semantic readiness; got {:?}",
+        claim2
+    );
+    assert_eq!(claim2.slot_id(), claim1.slot_id());
+
+    let active = (0..N_OBJECT_SLOTS)
+        .filter(|&i| vp.read_slot(i).map(|s| s.active).unwrap_or(false))
+        .count();
+    assert_eq!(
+        active, 1,
+        "semantic-readiness step must not change slot count; got {} active",
+        active
+    );
+}

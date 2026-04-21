@@ -1,0 +1,23 @@
+[package]
+name = "bionic_v0"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "body"
+path = "src/bin/body.rs"
+
+[[bin]]
+name = "observer"
+path = "src/bin/observer.rs"
+
+[dependencies]
+cpal = "0.15"
+nokhwa = { version = "0.10", features = ["input-avfoundation"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
