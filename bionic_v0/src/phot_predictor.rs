@@ -16,6 +16,8 @@ use crate::{
     PHOT_PRED_PRECISION_MIN, PHOT_PRED_WARMUP_MIN,
 };
 
+pub const VPC_FAMILY_PHOT: u8 = 2;
+
 /// Output of one predictor update step.
 pub struct PhotPrediction {
     pub predicted: Vec<f64>,

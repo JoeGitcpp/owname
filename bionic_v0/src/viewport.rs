@@ -5,7 +5,7 @@ use crate::action_consequence::ActionConsequenceState;
 use crate::action_output::ActionOutputState;
 use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, LanguageBindingState};
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
-use crate::phot_predictor::PhotSlotPredictor;
+use crate::phot_predictor::{PhotSlotPredictor, VPC_FAMILY_PHOT};
 use crate::probe_law::ProbeLawState;
 use crate::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
@@ -20,9 +20,10 @@ use crate::{
     CROSS_MODAL_SPATIAL_DIST, CROSS_MODAL_WINDOW_US, HEALTH_FAULT, HEALTH_OK, HEALTH_QUIET,
     HEALTH_STALE, HISTORY_CAP, MOD_MECH, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES,
     N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES,
-    QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REASONING_HISTORY_ALPHA, REASONING_HISTORY_RING_CAP,
-    REASONING_INTENSITY_THRESHOLD, REPLAY_ALPHA, REL_ALPHA, REL_PRED_ALPHA, REL_PRED_MSE_ALPHA,
-    REL_PRED_PRECISION_MAX, REL_PRED_WARMUP_MIN, SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS,
+    PHOT_PRED_WARMUP_MIN, QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REASONING_HISTORY_ALPHA,
+    REASONING_HISTORY_RING_CAP, REASONING_INTENSITY_THRESHOLD, REPLAY_ALPHA, REL_ALPHA,
+    REL_PRED_ALPHA, REL_PRED_MSE_ALPHA, REL_PRED_PRECISION_MAX, REL_PRED_WARMUP_MIN,
+    SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS,
 };
 
 /// First-class viewport health state. Stored as a numeric atomic; observers
@@ -1467,23 +1468,39 @@ impl Viewport {
         if n == 0 {
             return;
         }
-        let mut s = self.slots[slot_id].write().unwrap();
-        if !s.active {
-            return;
-        }
-        if s.phot_pred.is_none() {
-            s.phot_pred = Some(PhotSlotPredictor::new(n));
-        }
-        let out = s.phot_pred.as_mut().unwrap().update(observed);
-        s.last_update_t_us = t_us;
-        s.source_modality |= MOD_PHOT;
-        s.phot = Some(BandFamilyState {
-            n_bands: n as u16,
-            observed: observed.to_vec(),
-            predicted: out.predicted,
-            err: out.err,
-            precision: out.precision,
-        });
+        let lifecycle = {
+            let mut s = self.slots[slot_id].write().unwrap();
+            if !s.active {
+                return;
+            }
+            if s.phot_pred.is_none() {
+                s.phot_pred = Some(PhotSlotPredictor::new(n));
+            }
+            let out = s.phot_pred.as_mut().unwrap().update(observed);
+            let lifecycle = if s.phot_pred.as_ref().unwrap().n_updates <= PHOT_PRED_WARMUP_MIN {
+                PredictorLifecycleState::Warmup
+            } else {
+                PredictorLifecycleState::ResolvedPublication
+            };
+            s.last_update_t_us = t_us;
+            s.source_modality |= MOD_PHOT;
+            s.phot = Some(BandFamilyState {
+                n_bands: n as u16,
+                observed: observed.to_vec(),
+                predicted: out.predicted,
+                err: out.err,
+                precision: out.precision,
+            });
+            lifecycle
+        };
+        self.record_vpc_slot_family_predictor_trace(
+            VPC_FAMILY_PHOT,
+            slot_id,
+            MOD_PHOT as u16,
+            t_us,
+            t_us,
+            lifecycle,
+        );
     }
 
     /// Write MECH band data into slot's `mech` sub-state. Placeholder path.
@@ -2374,6 +2391,30 @@ impl Viewport {
             kind: ObservationDomainKind::Axis,
             primary: axis as u16,
             secondary: 0,
+            tertiary: 0,
+        };
+        let horizon = PredictionHorizon {
+            kind: HorizonKind::Point,
+            publish_t_us,
+            target_start_t_us: target_t_us,
+            target_end_t_us: target_t_us,
+        };
+        self.record_vpc_predictor_trace(predictor_family, domain, horizon, lifecycle);
+    }
+
+    pub fn record_vpc_slot_family_predictor_trace(
+        &self,
+        predictor_family: u8,
+        slot_id: usize,
+        family_locator: u16,
+        publish_t_us: u64,
+        target_t_us: u64,
+        lifecycle: PredictorLifecycleState,
+    ) {
+        let domain = ObservationDomainRef {
+            kind: ObservationDomainKind::SlotFamily,
+            primary: slot_id as u16,
+            secondary: family_locator,
             tertiary: 0,
         };
         let horizon = PredictionHorizon {
