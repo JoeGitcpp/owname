@@ -1011,6 +1011,8 @@ fn read_global_attention_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalAttent
         focused_score,
         n_active,
         slot_biases,
+        replay_intensity: 0.0,
+        last_replay_t_us: 0,
     }
 }
 

@@ -125,6 +125,17 @@ fn main() {
         vp_binding.tick_binding_maintenance(now_us());
     });
 
+    // Endogenous activity ticker, 10 Hz.
+    // Err-driven attention rebalancing (self-regulation law §2.2) and
+    // quiet-period history replay (endogenous activity law §2.1).
+    // Both are substrate-level mechanisms — no world content or meaning.
+    let vp_endo = vp.clone();
+    let h_endogenous = spawn_ticker(10, stop.clone(), move |_| {
+        let t = now_us();
+        vp_endo.tick_err_driven_attention(t);
+        vp_endo.tick_quiet_history_replay(t);
+    });
+
     // Global orchestrator: attention → relations → snapshot (30 Hz).
     //
     // Replaces the three independent tickers that previously ran at 30/20/30 Hz.
@@ -154,6 +165,7 @@ fn main() {
     let _ = h_health.join();
     let _ = h_ingress.join();
     let _ = h_binding.join();
+    let _ = h_endogenous.join();
     let _ = h_orchestrator.join();
     let _ = h_master.join();
 

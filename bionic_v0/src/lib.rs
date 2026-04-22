@@ -272,6 +272,19 @@ pub const BINDING_RESONANCE_THRESHOLD: f64 = 0.5;
 /// Alpha for binding → attention bias injection.
 pub const BINDING_ATTN_ALPHA: f64 = 0.05;
 
+// --- Endogenous Activity Laws (spec 2026-04-20) ---
+
+/// Engineering approximation: EMA alpha for err-driven attention rebalancing.
+/// High predictor-err slots gain attention share; low-err slots lose share.
+/// This is a substrate knob, not a theoretical resource law.
+pub const ATTN_ERR_REBALANCE_ALPHA: f64 = 0.10;
+
+/// Engineering approximation: EMA alpha for quiet-period history replay
+/// intensity. During HEALTH_QUIET, reasoning history entries are replayed
+/// as微弱 attention perturbations to maintain endogenous activity.
+/// This is a substrate knob, not a fixed replay law.
+pub const REPLAY_ALPHA: f64 = 0.05;
+
 // --- Phase 5D: Cross-object temporal relation substrate ---
 
 /// Number of directed relation edges in GlobalRelationState.

@@ -8,16 +8,16 @@ use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::PhotSlotPredictor;
 use crate::probe_law::ProbeLawState;
 use crate::{
-    AXIS_COUNT, ATTN_PRECISION_BIAS_MAX, BINDING_ATTN_ALPHA, BINDING_MAINTENANCE_DECAY_STEP,
-    BINDING_MAINTENANCE_IDLE_US, BINDING_RESONANCE_THRESHOLD, CLAIM_CROSS_MODALITY_BASE,
-    CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED, CLAIM_LOG_ENERGY_BAND,
-    CLAIM_REUSE_MIN_SCORE, CLAIM_SAME_MODALITY_BONUS, CLAIM_SURPRISE_BAND, CLAIM_W_ENERGY,
-    CLAIM_W_MODALITY, CLAIM_W_SPATIAL, CLAIM_W_SURPRISE, CLAIM_W_TIME, CROSS_MODAL_SPATIAL_DIST,
-    CROSS_MODAL_WINDOW_US, HEALTH_FAULT, HEALTH_OK, HEALTH_QUIET, HEALTH_STALE, HISTORY_CAP,
-    MOD_MECH, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES, N_ROUTING_FOCUS_EDGES,
-    N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES, QUIET_ENERGY_THRESHOLD,
-    QUIET_WINDOW_US, REASONING_HISTORY_ALPHA, REASONING_HISTORY_RING_CAP,
-    REASONING_INTENSITY_THRESHOLD, REL_ALPHA, REL_PRED_ALPHA, REL_PRED_MSE_ALPHA,
+    AXIS_COUNT, ATTN_ERR_REBALANCE_ALPHA, ATTN_PRECISION_BIAS_MAX, BINDING_ATTN_ALPHA,
+    BINDING_MAINTENANCE_DECAY_STEP, BINDING_MAINTENANCE_IDLE_US, BINDING_RESONANCE_THRESHOLD,
+    CLAIM_CROSS_MODALITY_BASE, CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED,
+    CLAIM_LOG_ENERGY_BAND, CLAIM_REUSE_MIN_SCORE, CLAIM_SAME_MODALITY_BONUS, CLAIM_SURPRISE_BAND,
+    CLAIM_W_ENERGY, CLAIM_W_MODALITY, CLAIM_W_SPATIAL, CLAIM_W_SURPRISE, CLAIM_W_TIME,
+    CROSS_MODAL_SPATIAL_DIST, CROSS_MODAL_WINDOW_US, HEALTH_FAULT, HEALTH_OK, HEALTH_QUIET,
+    HEALTH_STALE, HISTORY_CAP, MOD_MECH, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES,
+    N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES,
+    QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REASONING_HISTORY_ALPHA, REASONING_HISTORY_RING_CAP,
+    REASONING_INTENSITY_THRESHOLD, REPLAY_ALPHA, REL_ALPHA, REL_PRED_ALPHA, REL_PRED_MSE_ALPHA,
     REL_PRED_PRECISION_MAX, REL_PRED_WARMUP_MIN, SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS,
 };
 
@@ -321,6 +321,11 @@ pub struct GlobalAttentionState {
     /// Per-slot bias injected by binding resonance. Added to attention
     /// shares during refresh. [0, ATTN_PRECISION_BIAS_MAX].
     pub slot_biases: [f64; N_OBJECT_SLOTS],
+    /// Endogenous activity: replay intensity during QUIET periods.
+    /// Rises when reasoning history is replayed; decays otherwise. [0,1].
+    pub replay_intensity: f64,
+    /// Substrate time of last replay tick. 0 = never replayed.
+    pub last_replay_t_us: u64,
 }
 
 impl Default for GlobalAttentionState {
@@ -333,6 +338,8 @@ impl Default for GlobalAttentionState {
             focused_score: 0.0,
             n_active: 0,
             slot_biases: [0.0f64; N_OBJECT_SLOTS],
+            replay_intensity: 0.0,
+            last_replay_t_us: 0,
         }
     }
 }
@@ -1848,7 +1855,10 @@ impl Viewport {
             }
         }
 
-        *self.global_attention.write().unwrap() = GlobalAttentionState {
+        let mut attn = self.global_attention.write().unwrap();
+        let prev_replay = attn.replay_intensity;
+        let prev_replay_t = attn.last_replay_t_us;
+        *attn = GlobalAttentionState {
             focused_slot_id,
             top_slot_ids,
             attention_shares: shares,
@@ -1856,6 +1866,8 @@ impl Viewport {
             focused_score,
             n_active,
             slot_biases: [0.0f64; N_OBJECT_SLOTS],
+            replay_intensity: prev_replay,
+            last_replay_t_us: prev_replay_t,
         };
     }
 
@@ -2515,5 +2527,94 @@ impl Viewport {
         } else {
             HealthState::Ok
         }
+    }
+
+    // --- Endogenous Activity Laws (spec 2026-04-20) ---
+
+    /// Err-driven attention rebalancing (self-regulation law §2.2).
+    ///
+    /// Reads per-slot high_layer.err, computes err-weighted target shares,
+    /// and EMA-shifts attention shares toward those targets. High-err slots
+    /// gain attention; low-err slots lose attention.
+    ///
+    /// `ATTN_ERR_REBALANCE_ALPHA` is an engineering approximation — not a
+    /// theoretical resource law. Should be revised as exploration history
+    /// accumulates.
+    pub fn tick_err_driven_attention(&self, _now_us: u64) {
+        // Collect per-slot err from active slots.
+        let mut errs: Vec<(usize, f64)> = Vec::new();
+        for (i, slot_lock) in self.slots.iter().enumerate() {
+            let slot = slot_lock.read().unwrap();
+            if slot.active {
+                let err = slot
+                    .high_layer
+                    .as_ref()
+                    .map(|hl| hl.object_err)
+                    .unwrap_or(0.0);
+                errs.push((i, err));
+            }
+        }
+
+        if errs.is_empty() {
+            return;
+        }
+
+        let total_err: f64 = errs.iter().map(|(_, e)| e).sum();
+        if total_err < 1e-9 {
+            return;
+        }
+
+        let mut attn = self.global_attention.write().unwrap();
+        for (slot_id, err) in errs.iter() {
+            let target_share = err / total_err;
+            attn.attention_shares[*slot_id] =
+                (1.0 - ATTN_ERR_REBALANCE_ALPHA) * attn.attention_shares[*slot_id]
+                    + ATTN_ERR_REBALANCE_ALPHA * target_share;
+        }
+    }
+
+    /// Quiet-period history replay (endogenous activity law §2.1).
+    ///
+    /// When the system is in HEALTH_QUIET (no external stimulus), this
+    /// replays entries from the reasoning history ring as微弱 attention
+    /// perturbations, maintaining endogenous activity without external input.
+    ///
+    /// `REPLAY_ALPHA` is an engineering approximation — not a fixed replay law.
+    pub fn tick_quiet_history_replay(&self, now_us: u64) {
+        let health = self.health_state.load(Ordering::Relaxed);
+        if health != HEALTH_QUIET {
+            return;
+        }
+
+        let history = self.global_reasoning_history.read().unwrap();
+        if history.count == 0 {
+            return;
+        }
+
+        // Pick a recent entry by time-based rotation (deterministic, no RNG).
+        let idx = ((now_us / 100_000) as usize) % history.count;
+        let entry = match history.get_recent(idx) {
+            Some(e) => *e,
+            None => return,
+        };
+
+        drop(history);
+
+        // Inject replay signal as a small attention perturbation.
+        let replay_novelty = entry.surprise_load.clamp(0.0, 1.0);
+        let mut attn = self.global_attention.write().unwrap();
+        attn.replay_intensity = (1.0 - REPLAY_ALPHA) * attn.replay_intensity
+            + REPLAY_ALPHA * replay_novelty;
+
+        // Perturb the top slot's share by a tiny amount proportional to
+        // replay intensity. This keeps the attention distribution flowing
+        // even without external input.
+        if attn.n_active > 0 && attn.top_slot_ids[0] >= 0 {
+            let top = attn.top_slot_ids[0] as usize;
+            let perturbation = attn.replay_intensity * REPLAY_ALPHA * 0.1;
+            attn.attention_shares[top] = (attn.attention_shares[top] + perturbation).min(1.0);
+        }
+
+        attn.last_replay_t_us = now_us;
     }
 }
