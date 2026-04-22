@@ -8,6 +8,7 @@
 > - [2026-04-20-new-axioms-v1.md](../../axioms/2026-04-20-new-axioms-v1.md)
 > - [2026-04-20-bionic-v0-architecture-audit-cleanup-design.md](./2026-04-20-bionic-v0-architecture-audit-cleanup-design.md)
 > - [2026-04-20-language-binding-layer-design.md](./2026-04-20-language-binding-layer-design.md)
+> - [2026-04-22-vpc-time-and-error-contract-design.md](./2026-04-22-vpc-time-and-error-contract-design.md)
 > **目的**：冻结 VPC 的最小理论闭环、跨尺度预测定义与质量口径，作为后续感官层、语言绑定层与更高层结构的前置地基
 
 ---
@@ -263,6 +264,8 @@ Viewport 中的内容必须严格区分为三类：
 
 这里的分离原则是 `研发期架构边界`，不是 body 内部资格门。
 
+`§7` 的具体实现合同由 [2026-04-22-vpc-time-and-error-contract-design.md](./2026-04-22-vpc-time-and-error-contract-design.md) 固定，后续代码与测试应直接以该子 spec 为准。
+
 ---
 
 ## 8. 未闭合预测、等待与继续条件
@@ -323,6 +326,8 @@ AI 脑内的“等待结果后继续”不应被定义成程序式 blocking。
 - 可被新证据推进
 - 也可随时间衰减或撤销
 
+`§8` 中的未闭合预测、继续条件与 open-state 要求，已由 [2026-04-22-vpc-time-and-error-contract-design.md](./2026-04-22-vpc-time-and-error-contract-design.md) 进一步冻结成可实现合同。
+
 ---
 
 ## 9. 当前已确认但待继续细化的合同
@@ -347,3 +352,4 @@ AI 脑内的“等待结果后继续”不应被定义成程序式 blocking。
 - 同域、同时间参照如何成立
 - 长远预测如何与短期预测共存而不互相污染
 
+本优先话题已在 [2026-04-22-vpc-time-and-error-contract-design.md](./2026-04-22-vpc-time-and-error-contract-design.md) 中作为正式子 spec 收口；后续剩余工作转为实现合同测试与最小 substrate 落地。
