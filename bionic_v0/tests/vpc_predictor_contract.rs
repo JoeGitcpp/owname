@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bionic_v0::predictor::Ar2Predictor;
+use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, PredictorLifecycleState,
@@ -193,4 +194,83 @@ fn relation_predictor_contract_resolves_same_cycle_edge_publication() {
             && trace.alignment == ErrAlignmentKind::PointExact
             && trace.status == PublicationStatus::Resolved
     }));
+}
+
+#[test]
+fn predictor_contract_snapshot_roundtrips_family_traces_without_semantics() {
+    let vp = Arc::new(Viewport::new());
+    let mut p = Ar2Predictor::new(0);
+
+    vp.push_observation(0, 10_000, 0.10);
+    p.tick(&vp);
+
+    let dir = std::env::temp_dir().join("bionic_v0_predictor_contract_snap");
+    std::fs::create_dir_all(&dir).ok();
+    let paths = SnapshotPaths::new(&dir);
+    write_snapshot(&vp, &paths).expect("write ok");
+
+    let snap = read_snapshot(&paths.final_path).expect("read ok");
+    assert_eq!(snap.vpc_contract.predictor_traces.len(), 1);
+    assert_eq!(snap.vpc_contract.predictor_traces[0].predictor_family, VPC_FAMILY_AR2);
+    assert_eq!(
+        snap.vpc_contract.predictor_traces[0].lifecycle,
+        PredictorLifecycleState::InsufficientContext
+    );
+
+    let observer_src =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/observer.rs"))
+            .expect("read observer.rs");
+    assert!(observer_src.contains("tr["));
+    assert!(!observer_src.contains("meaning"));
+    assert!(!observer_src.contains("identity"));
+}
+
+#[test]
+fn predictor_contract_hygiene_source_avoids_semantic_and_naming_layers() {
+    for path in [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/vpc.rs"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/predictor.rs"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/phot_predictor.rs"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/observer.rs"),
+    ] {
+        let src = std::fs::read_to_string(path).expect("read source");
+        for forbidden in ["concept_id", "token_id", "naming gate", "symbolizer"] {
+            assert!(
+                !src.contains(forbidden),
+                "{} must not contain `{}`",
+                path,
+                forbidden
+            );
+        }
+    }
+}
+
+#[test]
+fn predictor_contract_hygiene_warmup_stays_open_and_non_confident() {
+    let vp = Arc::new(Viewport::new());
+    let phot_slot = vp.allocate_slot(MOD_PHOT, 10_000, 1).expect("phot slot");
+    let relation_a = vp.allocate_slot(MOD_VIB, 10_000, 2).expect("slot a");
+    let relation_b = vp.allocate_slot(MOD_VIB, 10_000, 3).expect("slot b");
+
+    vp.update_slot_phot_with_predictor(phot_slot, 10_000, &[0.3, 0.5, 0.1, 0.2]);
+    run_relation_cycle(&vp, relation_a, relation_b, 10_000, 10_000);
+
+    let phot = vp.read_slot(phot_slot).expect("phot slot").phot.expect("phot");
+    assert!(phot.err.iter().all(|v| v.abs() < 1e-12));
+    assert!(phot.precision.iter().all(|v| v.abs() < 1e-12));
+
+    let relation_edge = vp.read_global_relations().edges[relation_edge_idx(relation_a, relation_b)];
+    assert_eq!(relation_edge.pred.relation_err, 0.0);
+    assert_eq!(relation_edge.pred.relation_precision, 0.0);
+
+    let st = vp.read_vpc_contract();
+    assert!(
+        !st.publications.iter().any(|trace| {
+            (trace.predictor_family == VPC_FAMILY_PHOT
+                || trace.predictor_family == VPC_FAMILY_RELATION)
+                && trace.status == PublicationStatus::Resolved
+                && trace.horizon.publish_t_us == 10_000
+        }),
+        "warmup ticks must not look like resolved predictor publications"
+    );
 }

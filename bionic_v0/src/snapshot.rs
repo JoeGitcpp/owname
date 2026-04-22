@@ -13,7 +13,7 @@ use crate::object_high_layer::ObjectHighLayerState;
 use crate::probe_law::ProbeLawState;
 use crate::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
-    PredictionPublicationTrace, PublicationStatus, VpcContractState,
+    PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
 };
 use crate::viewport::{
     AmbientModalitySnapshot, AxisRing, BandFamilyState, CrossModalFusionState,
@@ -1292,6 +1292,20 @@ fn external_pattern_kind_code(kind: ExternalPatternKind) -> u8 {
 }
 
 fn write_vpc_contract(buf: &mut Vec<u8>, st: &VpcContractState) {
+    buf.extend_from_slice(&(st.predictor_traces.len() as u32).to_le_bytes());
+    for trace in &st.predictor_traces {
+        buf.push(trace.predictor_family);
+        buf.push(observation_domain_kind_code(trace.domain.kind));
+        buf.extend_from_slice(&trace.domain.primary.to_le_bytes());
+        buf.extend_from_slice(&trace.domain.secondary.to_le_bytes());
+        buf.extend_from_slice(&trace.domain.tertiary.to_le_bytes());
+        buf.push(horizon_kind_code(trace.horizon.kind));
+        buf.extend_from_slice(&trace.horizon.publish_t_us.to_le_bytes());
+        buf.extend_from_slice(&trace.horizon.target_start_t_us.to_le_bytes());
+        buf.extend_from_slice(&trace.horizon.target_end_t_us.to_le_bytes());
+        buf.push(predictor_lifecycle_code(trace.lifecycle));
+    }
+
     buf.extend_from_slice(&(st.publications.len() as u32).to_le_bytes());
     for trace in &st.publications {
         buf.push(trace.predictor_family);
@@ -1341,6 +1355,37 @@ fn read_vpc_contract_snapshot(bytes: &[u8], cur: &mut usize) -> VpcContractState
         a.copy_from_slice(&b[*c..*c + 8]);
         *c += 8;
         u64::from_le_bytes(a)
+    }
+
+    let n_predictor_traces = rd_u32(bytes, cur) as usize;
+    let mut predictor_traces = Vec::with_capacity(n_predictor_traces);
+    for _ in 0..n_predictor_traces {
+        let predictor_family = bytes[*cur];
+        *cur += 1;
+        let domain_kind = observation_domain_kind_from_code(bytes[*cur]);
+        *cur += 1;
+        let domain = ObservationDomainRef {
+            kind: domain_kind,
+            primary: rd_u16(bytes, cur),
+            secondary: rd_u16(bytes, cur),
+            tertiary: rd_u16(bytes, cur),
+        };
+        let horizon_kind = horizon_kind_from_code(bytes[*cur]);
+        *cur += 1;
+        let horizon = PredictionHorizon {
+            kind: horizon_kind,
+            publish_t_us: rd_u64(bytes, cur),
+            target_start_t_us: rd_u64(bytes, cur),
+            target_end_t_us: rd_u64(bytes, cur),
+        };
+        let lifecycle = predictor_lifecycle_from_code(bytes[*cur]);
+        *cur += 1;
+        predictor_traces.push(crate::vpc::PredictorFamilyTrace {
+            predictor_family,
+            domain,
+            horizon,
+            lifecycle,
+        });
     }
 
     let n_publications = rd_u32(bytes, cur) as usize;
@@ -1411,7 +1456,7 @@ fn read_vpc_contract_snapshot(bytes: &[u8], cur: &mut usize) -> VpcContractState
     }
 
     VpcContractState {
-        predictor_traces: Vec::new(),
+        predictor_traces,
         publications,
         open_predictions,
     }
@@ -1476,6 +1521,24 @@ fn publication_status_from_code(code: u8) -> PublicationStatus {
         1 => PublicationStatus::Resolved,
         2 => PublicationStatus::Expired,
         _ => PublicationStatus::Open,
+    }
+}
+
+fn predictor_lifecycle_code(state: PredictorLifecycleState) -> u8 {
+    match state {
+        PredictorLifecycleState::InsufficientContext => 0,
+        PredictorLifecycleState::Warmup => 1,
+        PredictorLifecycleState::OpenPublication => 2,
+        PredictorLifecycleState::ResolvedPublication => 3,
+    }
+}
+
+fn predictor_lifecycle_from_code(code: u8) -> PredictorLifecycleState {
+    match code {
+        1 => PredictorLifecycleState::Warmup,
+        2 => PredictorLifecycleState::OpenPublication,
+        3 => PredictorLifecycleState::ResolvedPublication,
+        _ => PredictorLifecycleState::InsufficientContext,
     }
 }
 

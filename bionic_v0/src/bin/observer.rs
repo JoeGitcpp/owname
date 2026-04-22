@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bionic_v0::language_binding::{BindingStatus, BindingTargetRef, ExternalPatternKind};
 use bionic_v0::snapshot::{read_snapshot, SnapshotData};
-use bionic_v0::vpc::{ObservationDomainKind, PublicationStatus};
+use bionic_v0::vpc::{ObservationDomainKind, PredictorLifecycleState, PublicationStatus};
 use bionic_v0::{
     CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED, HEALTH_FAULT, HEALTH_OK,
     HEALTH_QUIET, HEALTH_STALE,
@@ -128,6 +128,15 @@ fn vpc_status_label(status: PublicationStatus) -> &'static str {
         PublicationStatus::Open => "op",
         PublicationStatus::Resolved => "rs",
         PublicationStatus::Expired => "ex",
+    }
+}
+
+fn predictor_lifecycle_label(state: PredictorLifecycleState) -> &'static str {
+    match state {
+        PredictorLifecycleState::InsufficientContext => "ins",
+        PredictorLifecycleState::Warmup => "warm",
+        PredictorLifecycleState::OpenPublication => "opn",
+        PredictorLifecycleState::ResolvedPublication => "res",
     }
 }
 
@@ -427,6 +436,24 @@ fn print_row(snap: &SnapshotData) {
     row.push_str(&format!("\tbind:n{}|{}", bind.n_bindings, trace_str));
 
     let vpc = &snap.vpc_contract;
+    let trace_str = if vpc.predictor_traces.is_empty() {
+        "-".to_string()
+    } else {
+        vpc.predictor_traces
+            .iter()
+            .map(|trace| {
+                format!(
+                    "pf{}:{}|{}->{}|{}",
+                    trace.predictor_family,
+                    vpc_domain_label(trace.domain.kind, trace.domain.primary),
+                    trace.horizon.publish_t_us,
+                    trace.horizon.target_end_t_us,
+                    predictor_lifecycle_label(trace.lifecycle),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    };
     let pub_str = if vpc.publications.is_empty() {
         "-".to_string()
     } else {
@@ -464,8 +491,9 @@ fn print_row(snap: &SnapshotData) {
             .join(";")
     };
     row.push_str(&format!(
-        "\tvpc:n{}|pub[{}]|open[{}]",
+        "\tvpc:n{}|tr[{}]|pub[{}]|open[{}]",
         vpc.publications.len(),
+        trace_str,
         pub_str,
         open_str
     ));

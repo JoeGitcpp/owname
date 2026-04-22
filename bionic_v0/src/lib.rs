@@ -262,7 +262,8 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v31: curve_similarity added to ActionConsequencePair.
 // v32: slot_biases added to GlobalAttentionState.
 // v33: VPC contract trace substrate added (publication/open timing provenance).
-pub const SNAPSHOT_VERSION: u64 = 33;
+// v34: VPC predictor-family lifecycle traces added to snapshot payload.
+pub const SNAPSHOT_VERSION: u64 = 34;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.
