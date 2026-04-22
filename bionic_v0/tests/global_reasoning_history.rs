@@ -132,7 +132,13 @@ fn sustained_pattern_raises_persistence_score() {
     let t_base = t0 + 15 * dt;
     for i in 0..15u64 {
         let big_delta = 60_000u64;
-        run_cycle_with_offset(&vp, slot_a, slot_b, t_base + i * dt, t_base + i * dt + big_delta);
+        run_cycle_with_offset(
+            &vp,
+            slot_a,
+            slot_b,
+            t_base + i * dt,
+            t_base + i * dt + big_delta,
+        );
     }
 
     let mem_late = vp.read_global_reasoning_memory_summary();
@@ -229,7 +235,13 @@ fn repeated_pattern_raises_recurrence_score() {
     // Create a specific pattern: slot A active, moderate surprise
     let t_base = t0 + 10 * dt;
     for i in 0..5u64 {
-        run_cycle_with_offset(&vp, slot_a, slot_b, t_base + i * dt, t_base + i * dt + 30_000u64);
+        run_cycle_with_offset(
+            &vp,
+            slot_a,
+            slot_b,
+            t_base + i * dt,
+            t_base + i * dt + 30_000u64,
+        );
     }
 
     let _mem_mid = vp.read_global_reasoning_memory_summary();
@@ -237,7 +249,13 @@ fn repeated_pattern_raises_recurrence_score() {
     // Repeat the same pattern
     let t_repeat = t_base + 5 * dt + 50_000u64;
     for i in 0..5u64 {
-        run_cycle_with_offset(&vp, slot_a, slot_b, t_repeat + i * dt, t_repeat + i * dt + 30_000u64);
+        run_cycle_with_offset(
+            &vp,
+            slot_a,
+            slot_b,
+            t_repeat + i * dt,
+            t_repeat + i * dt + 30_000u64,
+        );
     }
 
     let mem_late = vp.read_global_reasoning_memory_summary();
@@ -371,7 +389,10 @@ fn claim_architecture_remains_unchanged_after_history() {
         nomination_seq_hint: 1,
     };
     let claim1 = vp.claim_slot_for_event(&ev1);
-    assert!(matches!(claim1, SlotClaim::Allocated(_)), "first VIB must allocate");
+    assert!(
+        matches!(claim1, SlotClaim::Allocated(_)),
+        "first VIB must allocate"
+    );
     let slot_id = claim1.slot_id().unwrap();
 
     for i in 0..15u64 {

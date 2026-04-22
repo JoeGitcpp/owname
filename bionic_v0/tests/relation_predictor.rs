@@ -81,7 +81,8 @@ fn stable_relation_drives_err_down() {
     }
     let err_early: f64 = {
         let gr = vp.read_global_relations();
-        gr.edges.iter()
+        gr.edges
+            .iter()
             .filter(|e| e.active)
             .map(|e| e.pred.relation_err)
             .fold(f64::MAX, f64::min)
@@ -93,7 +94,8 @@ fn stable_relation_drives_err_down() {
     }
     let err_late: f64 = {
         let gr = vp.read_global_relations();
-        gr.edges.iter()
+        gr.edges
+            .iter()
             .filter(|e| e.active)
             .map(|e| e.pred.relation_err)
             .fold(f64::MAX, f64::min)
@@ -102,7 +104,8 @@ fn stable_relation_drives_err_down() {
     assert!(
         err_late < err_early,
         "relation_err must decrease with stable input; early={:.6}, late={:.6}",
-        err_early, err_late
+        err_early,
+        err_late
     );
     assert!(
         err_late < 0.01,
@@ -134,7 +137,8 @@ fn relation_change_spikes_err() {
     }
     let err_stable: f64 = {
         let gr = vp.read_global_relations();
-        gr.edges.iter()
+        gr.edges
+            .iter()
             .filter(|e| e.active)
             .map(|e| e.pred.relation_err)
             .fold(f64::MAX, f64::min)
@@ -161,7 +165,8 @@ fn relation_change_spikes_err() {
     assert!(
         err_spiked > err_stable + 0.03,
         "relation_err must spike after abrupt lead_lag change; stable={:.6}, spiked={:.6}",
-        err_stable, err_spiked
+        err_stable,
+        err_spiked
     );
 }
 
@@ -189,7 +194,10 @@ fn warmup_does_not_fake_relation_confidence() {
 
     let gr = vp.read_global_relations();
     let active_edges: Vec<_> = gr.edges.iter().filter(|e| e.active).collect();
-    assert!(!active_edges.is_empty(), "at least one edge must be active after first cycle");
+    assert!(
+        !active_edges.is_empty(),
+        "at least one edge must be active after first cycle"
+    );
 
     for edge in &active_edges {
         assert_eq!(
@@ -235,7 +243,10 @@ fn snapshot_roundtrip_preserves_relation_prediction_state() {
     let data = read_snapshot(&paths.final_path).expect("read ok");
 
     let gr = &data.global_relations;
-    assert_eq!(gr.n_active_edges, gr_before.n_active_edges, "n_active_edges");
+    assert_eq!(
+        gr.n_active_edges, gr_before.n_active_edges,
+        "n_active_edges"
+    );
 
     for i in 0..N_REL_EDGES {
         let a = &gr_before.edges[i];
@@ -308,7 +319,10 @@ fn ordered_refresh_contract_remains_intact() {
 
     let gr = vp.read_global_relations();
     // Relations substrate was stamped with t_cycle.
-    assert_eq!(gr.last_update_t_us, t_cycle, "relations last_update must equal cycle t");
+    assert_eq!(
+        gr.last_update_t_us, t_cycle,
+        "relations last_update must equal cycle t"
+    );
 
     // Every active edge's predictor output was also stamped with t_cycle.
     for edge in gr.edges.iter().filter(|e| e.active) {
@@ -347,7 +361,10 @@ fn claim_architecture_remains_unchanged_after_relation_prediction() {
         nomination_seq_hint: 1,
     };
     let claim1 = vp.claim_slot_for_event(&ev1);
-    assert!(matches!(claim1, SlotClaim::Allocated(_)), "first VIB must allocate");
+    assert!(
+        matches!(claim1, SlotClaim::Allocated(_)),
+        "first VIB must allocate"
+    );
     let slot_id = claim1.slot_id().unwrap();
 
     // Run several ordered refresh cycles (including relation predictor).

@@ -89,7 +89,11 @@ impl SyntheticVibSource {
             // so smoothed energy ramps rather than jumping, mimicking live
             // mic bursts.
             let frac = cycle_pos as f64 / self.burst_width_us.max(1) as f64;
-            let tri = if frac < 0.5 { frac * 2.0 } else { (1.0 - frac) * 2.0 };
+            let tri = if frac < 0.5 {
+                frac * 2.0
+            } else {
+                (1.0 - frac) * 2.0
+            };
             let amp = 0.12 * tri;
             for axis in 0..VIB_BANDS {
                 bands[axis] += amp * (1.0 + 0.2 * axis as f64);

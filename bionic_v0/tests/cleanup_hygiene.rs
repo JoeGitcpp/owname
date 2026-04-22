@@ -19,11 +19,8 @@ fn active_test_suite_contains_no_semantic_contract_files() {
 
 #[test]
 fn snapshot_schema_contains_no_semantic_or_symbolizer_sections() {
-    let snap_src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/snapshot.rs"
-    ))
-    .expect("read snapshot.rs");
+    let snap_src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/snapshot.rs"))
+        .expect("read snapshot.rs");
     assert!(
         !snap_src.contains("SemanticReadinessState"),
         "snapshot.rs must not reference SemanticReadinessState"
@@ -44,11 +41,8 @@ fn snapshot_schema_contains_no_semantic_or_symbolizer_sections() {
 
 #[test]
 fn viewport_exposes_no_semantic_or_symbolizer_api() {
-    let vp_src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/viewport.rs"
-    ))
-    .expect("read viewport.rs");
+    let vp_src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/viewport.rs"))
+        .expect("read viewport.rs");
     for forbidden in [
         "pub fn refresh_semantic_readiness",
         "pub fn read_semantic_readiness",

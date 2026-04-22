@@ -12,16 +12,15 @@
 use std::sync::Arc;
 
 use bionic_v0::viewport::{EventEvidence, SlotClaim, Viewport};
-use bionic_v0::{
-    MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, PHOT_BANDS, SLOT_IDLE_US, VIB_BANDS,
-};
+use bionic_v0::{MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, PHOT_BANDS, SLOT_IDLE_US, VIB_BANDS};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 fn allocate_joint_slot(vp: &Arc<Viewport>, t_us: u64) -> usize {
-    vp.allocate_slot(MOD_VIB, t_us, 0).expect("must allocate slot")
+    vp.allocate_slot(MOD_VIB, t_us, 0)
+        .expect("must allocate slot")
 }
 
 /// Write both VIB and PHOT at the same timestamp, refresh fusion, refresh
@@ -70,7 +69,10 @@ fn joint_slot_creates_high_layer_state() {
     // Before any refresh: high_layer must be None.
     {
         let snap = vp.read_slot(slot_id).unwrap();
-        assert!(snap.high_layer.is_none(), "high_layer must be None before any refresh");
+        assert!(
+            snap.high_layer.is_none(),
+            "high_layer must be None before any refresh"
+        );
     }
 
     tick_joint(&vp, slot_id, t0);
@@ -78,7 +80,10 @@ fn joint_slot_creates_high_layer_state() {
     // After one joint tick: high_layer must exist.
     {
         let snap = vp.read_slot(slot_id).unwrap();
-        assert!(snap.high_layer.is_some(), "high_layer must be Some after joint tick");
+        assert!(
+            snap.high_layer.is_some(),
+            "high_layer must be Some after joint tick"
+        );
         let hl = snap.high_layer.unwrap();
         assert_eq!(hl.last_update_t_us, t0);
     }
@@ -102,7 +107,9 @@ fn single_modality_slot_does_not_fake_high_layer_confidence() {
     }
 
     let snap = vp.read_slot(slot_id).unwrap();
-    let hl = snap.high_layer.expect("high_layer must exist after vib-only ticks");
+    let hl = snap
+        .high_layer
+        .expect("high_layer must exist after vib-only ticks");
     assert!(
         hl.predicted_confidence <= 0.5 + 1e-9,
         "VIB-only: predicted_confidence must be ≤ 0.5, got {}",
@@ -257,7 +264,9 @@ fn snapshot_roundtrip_preserves_high_layer_state() {
     }
 
     let snap_before = vp.read_slot(slot_id).unwrap();
-    let hl_before = snap_before.high_layer.expect("high_layer must exist before snapshot");
+    let hl_before = snap_before
+        .high_layer
+        .expect("high_layer must exist before snapshot");
 
     let dir = std::env::temp_dir().join("bionic_v0_phase5b_hl_snap");
     std::fs::create_dir_all(&dir).ok();
@@ -266,7 +275,9 @@ fn snapshot_roundtrip_preserves_high_layer_state() {
     let data = read_snapshot(&paths.final_path).expect("read ok");
 
     let slot_snap = &data.slots[slot_id];
-    let hl = slot_snap.high_layer.expect("high_layer must survive roundtrip");
+    let hl = slot_snap
+        .high_layer
+        .expect("high_layer must survive roundtrip");
 
     assert!(
         (hl.predicted_confidence - hl_before.predicted_confidence).abs() < 1e-12,
@@ -289,8 +300,7 @@ fn snapshot_roundtrip_preserves_high_layer_state() {
         "attention_bias roundtrip failed"
     );
     assert_eq!(
-        hl.last_update_t_us,
-        hl_before.last_update_t_us,
+        hl.last_update_t_us, hl_before.last_update_t_us,
         "last_update_t_us roundtrip failed"
     );
 }
@@ -316,7 +326,10 @@ fn claim_architecture_remains_unchanged_after_high_layer() {
     };
 
     let claim1 = vp.claim_slot_for_event(&ev1);
-    assert!(matches!(claim1, SlotClaim::Allocated(_)), "first VIB must allocate");
+    assert!(
+        matches!(claim1, SlotClaim::Allocated(_)),
+        "first VIB must allocate"
+    );
 
     let slot_id = claim1.slot_id().unwrap();
 

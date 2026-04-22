@@ -97,7 +97,12 @@ pub enum SynthCamStep {
     Idle,
     /// Localized bright blob at normalized (cx, cy) with radius r (in
     /// normalized coords). Everything else is near-black.
-    Blob { cx: f64, cy: f64, r: f64, brightness: f64 },
+    Blob {
+        cx: f64,
+        cy: f64,
+        r: f64,
+        brightness: f64,
+    },
     /// Multiple blobs in one frame. Each blob is rendered independently;
     /// overlapping blobs take the maximum brightness.
     MultiBlob(Vec<BlobSpec>),
@@ -143,7 +148,12 @@ impl SyntheticCameraFrameProvider {
             script.push(SynthCamStep::Idle);
         }
         for _ in 0..n_blob {
-            script.push(SynthCamStep::Blob { cx, cy, r, brightness });
+            script.push(SynthCamStep::Blob {
+                cx,
+                cy,
+                r,
+                brightness,
+            });
         }
         Self::new(script, start_t_us, us_per_tick)
     }
@@ -231,12 +241,13 @@ impl CameraFrameProvider for SyntheticCameraFrameProvider {
         match step {
             SynthCamStep::NoFrame => Ok(None),
             SynthCamStep::Idle => Ok(Some(Self::render_idle(self.t_us))),
-            SynthCamStep::Blob { cx, cy, r, brightness } => {
-                Ok(Some(Self::render_blob(self.t_us, cx, cy, r, brightness)))
-            }
-            SynthCamStep::MultiBlob(blobs) => {
-                Ok(Some(Self::render_multi_blob(self.t_us, &blobs)))
-            }
+            SynthCamStep::Blob {
+                cx,
+                cy,
+                r,
+                brightness,
+            } => Ok(Some(Self::render_blob(self.t_us, cx, cy, r, brightness))),
+            SynthCamStep::MultiBlob(blobs) => Ok(Some(Self::render_multi_blob(self.t_us, &blobs))),
             SynthCamStep::RuntimeError => {
                 self.healthy = false;
                 Err(CameraFault::RuntimeError)
@@ -314,7 +325,7 @@ impl RealCameraFrameProvider {
         use nokhwa::Camera;
         use std::sync::atomic::Ordering;
         use std::sync::mpsc;
-        use std::sync::{Arc, atomic::AtomicBool};
+        use std::sync::{atomic::AtomicBool, Arc};
         use std::time::Duration;
 
         let healthy = Arc::new(AtomicBool::new(false));
@@ -369,7 +380,11 @@ impl RealCameraFrameProvider {
 
         // Wait up to 10 s for the capture thread to confirm the stream opened.
         match startup_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(())) => Ok(Self { rx: frame_rx, healthy, _thread: thread }),
+            Ok(Ok(())) => Ok(Self {
+                rx: frame_rx,
+                healthy,
+                _thread: thread,
+            }),
             _ => Err(CameraFault::StartupFailed),
         }
     }
@@ -378,7 +393,8 @@ impl RealCameraFrameProvider {
 impl Drop for RealCameraFrameProvider {
     fn drop(&mut self) {
         // Signal the capture thread to exit gracefully.
-        self.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.healthy
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -388,12 +404,14 @@ impl CameraFrameProvider for RealCameraFrameProvider {
         match self.rx.try_recv() {
             Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(fault)) => {
-                self.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 Err(fault)
             }
             Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => {
-                self.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 Err(CameraFault::RuntimeError)
             }
         }
@@ -532,19 +550,31 @@ pub fn extract_regions_from_motion(motion: &[f64], w: usize, h: usize) -> Vec<Mo
             // 4-neighbours
             if px > 0 {
                 let nb = idx - 1;
-                if above[nb] && !visited[nb] { visited[nb] = true; queue.push_back(nb); }
+                if above[nb] && !visited[nb] {
+                    visited[nb] = true;
+                    queue.push_back(nb);
+                }
             }
             if px + 1 < w {
                 let nb = idx + 1;
-                if above[nb] && !visited[nb] { visited[nb] = true; queue.push_back(nb); }
+                if above[nb] && !visited[nb] {
+                    visited[nb] = true;
+                    queue.push_back(nb);
+                }
             }
             if py > 0 {
                 let nb = idx - w;
-                if above[nb] && !visited[nb] { visited[nb] = true; queue.push_back(nb); }
+                if above[nb] && !visited[nb] {
+                    visited[nb] = true;
+                    queue.push_back(nb);
+                }
             }
             if py + 1 < h {
                 let nb = idx + w;
-                if above[nb] && !visited[nb] { visited[nb] = true; queue.push_back(nb); }
+                if above[nb] && !visited[nb] {
+                    visited[nb] = true;
+                    queue.push_back(nb);
+                }
             }
         }
         if region.len() >= PHOT_REGION_MIN_PIXELS {
@@ -596,7 +626,9 @@ fn region_to_extract(motion: &[f64], w: usize, h: usize, pixels: &[usize]) -> Mo
         let v = motion[i];
         sum_m += v;
         sum_m2 += v * v;
-        if v > peak { peak = v; }
+        if v > peak {
+            peak = v;
+        }
     }
 
     let event_energy = sum_m2;
@@ -659,9 +691,15 @@ fn region_to_extract(motion: &[f64], w: usize, h: usize, pixels: &[usize]) -> Mo
 
     let mut bands = [0.0_f64; PHOT_BANDS];
     bands[0] = b0;
-    if PHOT_BANDS > 1 { bands[1] = b1; }
-    if PHOT_BANDS > 2 { bands[2] = b2; }
-    if PHOT_BANDS > 3 { bands[3] = b3; }
+    if PHOT_BANDS > 1 {
+        bands[1] = b1;
+    }
+    if PHOT_BANDS > 2 {
+        bands[2] = b2;
+    }
+    if PHOT_BANDS > 3 {
+        bands[3] = b3;
+    }
 
     MotionExtract {
         phot_bands: bands,
@@ -680,7 +718,9 @@ fn region_to_extract(motion: &[f64], w: usize, h: usize, pixels: &[usize]) -> Mo
 fn box_blur_rms(grid: &[f64], w: usize, h: usize, radius: usize) -> f64 {
     if radius == 0 {
         let mut s = 0.0_f64;
-        for v in grid { s += v * v; }
+        for v in grid {
+            s += v * v;
+        }
         return (s / grid.len() as f64).sqrt();
     }
     let r = radius as isize;

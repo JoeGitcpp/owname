@@ -127,11 +127,19 @@ mod tests {
         let obs = [0.3, 0.5, 0.1, 0.2];
         // First warm-up call.
         let out = pred.update(&obs);
-        assert_eq!(out.precision, vec![0.0; 4], "warmup call 1: precision must be zero");
+        assert_eq!(
+            out.precision,
+            vec![0.0; 4],
+            "warmup call 1: precision must be zero"
+        );
         assert_eq!(out.err, vec![0.0; 4], "warmup call 1: err must be zero");
         // Second warm-up call (n_updates=1, still < WARMUP_MIN=2).
         let out2 = pred.update(&obs);
-        assert_eq!(out2.precision, vec![0.0; 4], "warmup call 2: precision must be zero");
+        assert_eq!(
+            out2.precision,
+            vec![0.0; 4],
+            "warmup call 2: precision must be zero"
+        );
         assert_eq!(out2.err, vec![0.0; 4], "warmup call 2: err must be zero");
         // Third call: now predicting. With constant obs, err should still be ~0.
         let out3 = pred.update(&obs);

@@ -5,12 +5,8 @@
 
 use std::sync::Arc;
 
-use bionic_v0::viewport::{
-    EventEvidence, SlotClaim, SpatialEvidence, Viewport,
-};
-use bionic_v0::{
-    CROSS_MODAL_WINDOW_US, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, SLOT_IDLE_US,
-};
+use bionic_v0::viewport::{EventEvidence, SlotClaim, SpatialEvidence, Viewport};
+use bionic_v0::{CROSS_MODAL_WINDOW_US, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, SLOT_IDLE_US};
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -100,8 +96,11 @@ fn joint_slot_produces_fused_state() {
     if phot_slot == slot_id {
         let snap = vp.read_slot(slot_id).unwrap();
         let f = snap.fusion.expect("fusion must exist after PHOT refresh");
-        assert_eq!(f.modality_mask & (MOD_VIB | MOD_PHOT), MOD_VIB | MOD_PHOT,
-            "modality_mask must carry both bits");
+        assert_eq!(
+            f.modality_mask & (MOD_VIB | MOD_PHOT),
+            MOD_VIB | MOD_PHOT,
+            "modality_mask must carry both bits"
+        );
         assert!(f.is_cross_modal, "joint slot must be cross-modal");
     }
 }
@@ -128,7 +127,10 @@ fn single_modality_slot_does_not_fake_cross_modal_confidence() {
         "single-modality confidence must be ≤ 0.5, got {}",
         f.cross_modal_confidence
     );
-    assert_eq!(f.phot_weight, 0.0, "phot_weight must be 0 for VIB-only slot");
+    assert_eq!(
+        f.phot_weight, 0.0,
+        "phot_weight must be 0 for VIB-only slot"
+    );
 }
 
 /// When VIB and PHOT write at the same timestamp, temporal_alignment_score
@@ -156,7 +158,10 @@ fn temporal_alignment_improves_for_synchronous_updates() {
         "synchronous writes must have temporal_alignment near 1.0, got {}",
         f.temporal_alignment_score
     );
-    assert!(f.is_cross_modal, "synchronous joint slot must be cross-modal");
+    assert!(
+        f.is_cross_modal,
+        "synchronous joint slot must be cross-modal"
+    );
     assert!(
         f.cross_modal_confidence > 0.5,
         "synchronous joint confidence must exceed 0.5, got {}",
@@ -219,7 +224,8 @@ fn stale_modality_reduces_fusion_weight() {
     assert!(
         f.vib_weight > f.phot_weight,
         "fresh VIB weight ({}) must exceed stale PHOT weight ({})",
-        f.vib_weight, f.phot_weight
+        f.vib_weight,
+        f.phot_weight
     );
 }
 
@@ -270,7 +276,10 @@ fn claim_architecture_remains_unchanged() {
     // Allocate first slot.
     let ev1 = make_vib_evidence(t0, 0.1);
     let claim1 = vp.claim_slot_for_event(&ev1);
-    assert!(matches!(claim1, SlotClaim::Allocated(_)), "first VIB must allocate");
+    assert!(
+        matches!(claim1, SlotClaim::Allocated(_)),
+        "first VIB must allocate"
+    );
 
     let slot_id = claim1.slot_id().unwrap();
     write_vib_and_fuse(&vp, slot_id, t0);
@@ -281,7 +290,8 @@ fn claim_architecture_remains_unchanged() {
     let claim2 = vp.claim_slot_for_event(&ev2);
     assert!(
         matches!(claim2, SlotClaim::Reused(_)),
-        "same-modality within window must reuse, got {:?}", claim2
+        "same-modality within window must reuse, got {:?}",
+        claim2
     );
     assert_eq!(claim2.slot_id(), claim1.slot_id(), "must reuse same slot");
 

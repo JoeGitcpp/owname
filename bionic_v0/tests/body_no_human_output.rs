@@ -5,11 +5,8 @@
 
 #[test]
 fn body_contains_no_human_readable_prints() {
-    let body = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bin/body.rs"
-    ))
-    .expect("read body.rs");
+    let body = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/body.rs"))
+        .expect("read body.rs");
     assert!(
         !body.contains("println!"),
         "body.rs must not contain println!"

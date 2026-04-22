@@ -161,7 +161,10 @@ mod tests {
         // Both warmup calls must return object_err=0, attention_bias=0.5.
         let out0 = pred.update(0.9, 0.8, 0.5, 1_000_000);
         assert_eq!(out0.object_err, 0.0, "warmup tick 0: err must be 0");
-        assert_eq!(out0.attention_bias, 0.5, "warmup tick 0: bias must be 0.5 (neutral)");
+        assert_eq!(
+            out0.attention_bias, 0.5,
+            "warmup tick 0: bias must be 0.5 (neutral)"
+        );
         let out1 = pred.update(0.9, 0.8, 0.5, 1_001_000);
         assert_eq!(out1.object_err, 0.0, "warmup tick 1: err must be 0");
         assert_eq!(out1.attention_bias, 0.5, "warmup tick 1: bias must be 0.5");

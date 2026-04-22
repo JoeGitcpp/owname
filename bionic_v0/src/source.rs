@@ -35,11 +35,18 @@ impl SyntheticSource {
         let t = (t_us.saturating_sub(self.t0_us)) as f64 * 1e-6;
         let cycle = 30.0;
         let phase = t.rem_euclid(cycle);
-        if phase < 10.0 { 0 }
-        else if phase < 12.0 { 1 }
-        else if phase < 17.0 { 2 }
-        else if phase < 22.0 { 3 }
-        else if phase < 27.0 { 4 }
-        else { 5 }
+        if phase < 10.0 {
+            0
+        } else if phase < 12.0 {
+            1
+        } else if phase < 17.0 {
+            2
+        } else if phase < 22.0 {
+            3
+        } else if phase < 27.0 {
+            4
+        } else {
+            5
+        }
     }
 }

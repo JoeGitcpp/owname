@@ -28,8 +28,14 @@ fn language_binding_trace_uses_external_patterns_and_reversible_evidence() {
         last_update_t_us: 99,
     };
 
-    assert!(matches!(trace.pattern_kind, ExternalPatternKind::VisualGlyph));
-    assert!(matches!(trace.target, BindingTargetRef::ObjectSlot { slot_id: 2 }));
+    assert!(matches!(
+        trace.pattern_kind,
+        ExternalPatternKind::VisualGlyph
+    ));
+    assert!(matches!(
+        trace.target,
+        BindingTargetRef::ObjectSlot { slot_id: 2 }
+    ));
     assert_eq!(trace.status, BindingStatus::Candidate);
     assert_eq!(trace.evidence_refs, vec![11, 13]);
 }
@@ -42,7 +48,11 @@ fn language_binding_viewport_exposes_binding_state_without_readiness_gates() {
     assert!(st.traces.is_empty());
 }
 
-fn sample_binding_event(feedback: BindingFeedback, evidence_ref: u64, event_t_us: u64) -> BindingEvent {
+fn sample_binding_event(
+    feedback: BindingFeedback,
+    evidence_ref: u64,
+    event_t_us: u64,
+) -> BindingEvent {
     BindingEvent {
         pattern_kind: ExternalPatternKind::VisualGlyph,
         pattern_hash: 17,
@@ -124,14 +134,15 @@ fn language_binding_snapshot_carries_binding_traces_not_concepts() {
         snap.language_binding.traces[0].target,
         BindingTargetRef::ObjectSlot { slot_id: 2 }
     );
-    assert_eq!(snap.language_binding.traces[0].status, BindingStatus::Candidate);
+    assert_eq!(
+        snap.language_binding.traces[0].status,
+        BindingStatus::Candidate
+    );
     assert!(snap.language_binding.traces[0].strength.value > 0.0);
 
-    let observer_src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bin/observer.rs"
-    ))
-    .expect("read observer.rs");
+    let observer_src =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/observer.rs"))
+            .expect("read observer.rs");
     assert!(observer_src.contains("bind:"));
     assert!(!observer_src.contains("concept_id"));
 }

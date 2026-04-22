@@ -62,7 +62,10 @@ fn phot_writes_viewport() {
             }
         }
     }
-    assert!(has_phot_slot, "at least one slot should carry a phot family");
+    assert!(
+        has_phot_slot,
+        "at least one slot should carry a phot family"
+    );
     assert!(has_spatial, "at least one slot should carry spatial state");
 }
 
@@ -95,7 +98,10 @@ fn phot_slot_ages_out() {
     for i in 0..N_OBJECT_SLOTS {
         let s = vp.read_slot(i).unwrap();
         if let Some(sp) = s.spatial {
-            assert!(!sp.valid, "spatial should be marked invalid after explicit call");
+            assert!(
+                !sp.valid,
+                "spatial should be marked invalid after explicit call"
+            );
         }
     }
 

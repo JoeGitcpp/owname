@@ -14,7 +14,10 @@ use bionic_v0::{
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let runtime_dir = args.get(1).cloned().unwrap_or_else(|| "runtime".to_string());
+    let runtime_dir = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "runtime".to_string());
     let poll_hz: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
     let max_polls: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
 
@@ -38,7 +41,8 @@ fn main() {
          rel:s->d:co|ll|pr|cf|pc|pl|pp|pf|err|rp|age_ms;...\t\
          rsn:sl|ce|ni|slots[...]|edges[...]:w...\t\
          mem:nov|per|rst|rec|fill|dom\t\
-         bind:n|traces[...]"
+          bind:n|traces[...]|ep:n|epochs[...]\t\
+         prb:i|s|ph|o"
     );
 
     let mut last_seq: u64 = 0;
@@ -184,13 +188,7 @@ fn print_row(snap: &SnapshotData) {
             None => "-".to_string(),
             Some(f) => {
                 let get = |idx: usize| f.observed.get(idx).copied().unwrap_or(f64::NAN);
-                format!(
-                    "{:.4},{:.4},{:.4},{:.4}",
-                    get(0),
-                    get(1),
-                    get(2),
-                    get(3),
-                )
+                format!("{:.4},{:.4},{:.4},{:.4}", get(0), get(1), get(2), get(3),)
             }
         };
         let phot_block = match s.phot.as_ref() {
@@ -225,8 +223,7 @@ fn print_row(snap: &SnapshotData) {
         let hl_block = match s.high_layer.as_ref() {
             None => "hl=-".to_string(),
             Some(hl) => {
-                let hl_age_ms = snap.clock_us
-                    .saturating_sub(hl.last_update_t_us) as f64 / 1000.0;
+                let hl_age_ms = snap.clock_us.saturating_sub(hl.last_update_t_us) as f64 / 1000.0;
                 format!(
                     "hl:c{:.3}|a{:.3}|p{:.3}|err{:.4}|bias{:.3}|{:.0}ms",
                     hl.predicted_confidence,
@@ -246,11 +243,7 @@ fn print_row(snap: &SnapshotData) {
             (false, true) => "PHOT",
             (false, false) => "-",
         };
-        let attn_block = format!(
-            "attn:{:.3}|pb:{:.2}",
-            s.attention_share,
-            s.precision_bias,
-        );
+        let attn_block = format!("attn:{:.3}|pb:{:.2}", s.attention_share, s.precision_bias,);
         row.push_str(&format!(
             "{}:m{:02x}|{}|nom{}|{:.0}ms|vib={}|phot={}|sp={}|{}|{}",
             i,
@@ -295,18 +288,16 @@ fn print_row(snap: &SnapshotData) {
 
     // Global attention column — observer renders; never recomputes scores.
     let ga = &snap.global_attention;
-    let top_str: String = ga.top_slot_ids.iter()
+    let top_str: String = ga
+        .top_slot_ids
+        .iter()
         .filter(|&&id| id >= 0)
         .map(|&id| id.to_string())
         .collect::<Vec<_>>()
         .join(",");
     row.push_str(&format!(
         "\tga:f{}|fs{:.3}|N{}|H{:.3}|top=[{}]",
-        ga.focused_slot_id,
-        ga.focused_score,
-        ga.n_active,
-        ga.attention_entropy,
-        top_str,
+        ga.focused_slot_id, ga.focused_score, ga.n_active, ga.attention_entropy, top_str,
     ));
 
     // Relation column — observer renders snapshot truth; never recomputes scores.
@@ -315,9 +306,10 @@ fn print_row(snap: &SnapshotData) {
     let gr = &snap.global_relations;
     let mut rel_parts: Vec<String> = Vec::new();
     for edge in gr.edges.iter() {
-        if !edge.active { continue; }
-        let pred_age_ms = snap.clock_us
-            .saturating_sub(edge.pred.last_predict_t_us) as f64 / 1000.0;
+        if !edge.active {
+            continue;
+        }
+        let pred_age_ms = snap.clock_us.saturating_sub(edge.pred.last_predict_t_us) as f64 / 1000.0;
         rel_parts.push(format!(
             "s{}->d{}:co{:.3}|ll{:+.3}|pr{:.3}|cf{:.2}|pc{:.3}|pl{:+.3}|pp{:.3}|pf{:.2}|err{:.4}|rp{:.4}|{:.0}ms",
             edge.src_slot_id,
@@ -345,12 +337,16 @@ fn print_row(snap: &SnapshotData) {
     // Reasoning column — observer renders snapshot truth; never recomputes.
     // rsn:sl<load>|ce<coord>|ni<instab>|slots[s0,s1,...]|edges[idx:w,...]
     let rs = &snap.global_reasoning;
-    let slot_str: String = rs.routing_focus_slot_ids.iter()
+    let slot_str: String = rs
+        .routing_focus_slot_ids
+        .iter()
         .filter(|&&id| id >= 0)
         .map(|&id| id.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    let edge_str: String = rs.routing_focus_edge_ids.iter()
+    let edge_str: String = rs
+        .routing_focus_edge_ids
+        .iter()
         .zip(rs.routing_weights.iter())
         .take_while(|(&id, _)| id >= 0)
         .map(|(&id, &w)| format!("{}:{:.3}", id, w))
@@ -361,8 +357,16 @@ fn print_row(snap: &SnapshotData) {
         rs.global_surprise_load,
         rs.coordinated_event_score,
         rs.network_instability_score,
-        if slot_str.is_empty() { "-".to_string() } else { slot_str },
-        if edge_str.is_empty() { "-".to_string() } else { edge_str },
+        if slot_str.is_empty() {
+            "-".to_string()
+        } else {
+            slot_str
+        },
+        if edge_str.is_empty() {
+            "-".to_string()
+        } else {
+            edge_str
+        },
     ));
 
     // Phase 5G.1: memory summary column — observer renders snapshot truth;
@@ -402,6 +406,115 @@ fn print_row(snap: &SnapshotData) {
             .join(";")
     };
     row.push_str(&format!("\tbind:n{}|{}", bind.n_bindings, trace_str));
+
+    let ao = &snap.action_output;
+    let ch_str: String = ao
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            format!(
+                "ch{}[k{}|ph{}|m{:.3}|pk{:.3}|s{}|u{}|ws{}]",
+                i,
+                ch.channel_kind,
+                ch.phase,
+                ch.current_magnitude,
+                ch.peak_magnitude,
+                ch.start_t_us,
+                ch.last_update_t_us,
+                ch.current_write_seq
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    row.push_str(&format!(
+        "\tout:n{}|{}",
+        ao.n_channels,
+        if ch_str.is_empty() {
+            "-".to_string()
+        } else {
+            ch_str
+        }
+    ));
+
+    // v27: write epoch history — numeric/time/phase only; no target, result, or meaning.
+    let ep_str: String = ao
+        .write_epoch_history
+        .iter()
+        .enumerate()
+        .map(|(i, ep)| {
+            format!(
+                "e{}[ws{}|k{}|s{}|u{}|ph{}]",
+                i, ep.write_seq, ep.channel_kind, ep.start_t_us, ep.last_update_t_us, ep.last_phase
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    row.push_str(&format!(
+        "\tep:n{}|{}",
+        ao.n_write_epochs,
+        if ep_str.is_empty() {
+            "-".to_string()
+        } else {
+            ep_str
+        }
+    ));
+
+    let acq = &snap.action_consequence;
+    let w_str: String = acq
+        .windows
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            // phase: 0=Open 1=Closed — substrate lifecycle field, no result semantics
+            format!(
+                "w{}[id{}|m{}|s{}|e{}|mg{:.3}|ph{}|lu{}]",
+                i,
+                w.window_id,
+                w.modality_kind,
+                w.start_t_us,
+                w.end_t_us,
+                w.magnitude,
+                w.phase,
+                w.last_update_t_us
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    let p_str: String = acq
+        .pairs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            format!(
+                "p{}[ws{}|wid{}|d{}|st{}]",
+                i, p.write_seq, p.window_id, p.delay_us, p.status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    row.push_str(&format!(
+        "\tacq:w{}|{}|p{}|{}",
+        acq.n_windows,
+        if w_str.is_empty() {
+            "-".to_string()
+        } else {
+            w_str
+        },
+        acq.n_pairs,
+        if p_str.is_empty() {
+            "-".to_string()
+        } else {
+            p_str
+        }
+    ));
+
+    // v30: probe-law — numeric values + phase code only; no semantic labels.
+    let prb = &snap.probe_law;
+    row.push_str(&format!(
+        "\tprb:i{:.4}|s{:.4}|ph{}|o{:.4}",
+        prb.intensity, prb.suppression, prb.phase, prb.output_intensity,
+    ));
 
     println!("{}", row);
 }

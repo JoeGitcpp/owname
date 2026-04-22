@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use bionic_v0::adapter::{AdapterRegistry, RegistryError, SyntheticPhotAdapter};
+use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
-use bionic_v0::snapshot::{write_snapshot, read_snapshot, SnapshotPaths};
 use bionic_v0::{MOD_MECH, MOD_PHOT, MOD_VIB, VIB_BANDS};
+use std::sync::Arc;
 
 fn main() {
     let vp = Arc::new(Viewport::new());
@@ -11,7 +11,8 @@ fn main() {
     // Phase 3B: synthetic PHOT adapter replaces the no-op stub. The duplicate-
     // modality rejection and modality_mask checks remain meaningful.
     let mut reg = AdapterRegistry::new();
-    reg.register(Box::new(SyntheticPhotAdapter::new(0))).expect("register phot");
+    reg.register(Box::new(SyntheticPhotAdapter::new(0)))
+        .expect("register phot");
     assert_eq!(reg.len(), 1);
     assert_eq!(reg.modality_mask(), MOD_PHOT);
     match reg.register(Box::new(SyntheticPhotAdapter::new(0))) {
@@ -29,7 +30,14 @@ fn main() {
     assert_eq!(VIB_BANDS, 4);
     vp.write_slot_vib(slot, now, &obs, &pred, &err, &prec);
     let phot_obs = vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
-    vp.write_slot_phot(slot, now, &phot_obs, &vec![0.0; 7], &vec![0.0; 7], &vec![0.0; 7]);
+    vp.write_slot_phot(
+        slot,
+        now,
+        &phot_obs,
+        &vec![0.0; 7],
+        &vec![0.0; 7],
+        &vec![0.0; 7],
+    );
 
     // Spatial: a future-PHOT-style 2D estimate (numbers only). Out-of-range
     // components should clamp into [0,1].
@@ -60,7 +68,10 @@ fn main() {
 
     vp.write_ambient_for(MOD_PHOT, 9.0, 2.0, Some(now + 1), true);
     let amb = vp.read_ambient();
-    assert_eq!(amb.vib.event_energy, 0.25, "VIB scalar untouched by PHOT write");
+    assert_eq!(
+        amb.vib.event_energy, 0.25,
+        "VIB scalar untouched by PHOT write"
+    );
     assert_eq!(amb.vib.candidate_flag, true);
     assert_eq!(amb.phot.event_energy, 9.0);
     assert_eq!(amb.phot.candidate_flag, true);

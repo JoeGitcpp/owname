@@ -4,13 +4,22 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::action_consequence::ActionConsequenceState;
+use crate::action_output::ActionOutputState;
 use crate::language_binding::{
     BindingStatus, BindingTargetRef, BindingTrace, ExternalPatternKind, LanguageBindingState,
 };
-use crate::viewport::{AmbientModalitySnapshot, AxisRing, BandFamilyState, CrossModalFusionState, GlobalAttentionState, GlobalReasoningMemorySummary, GlobalRelationState, GlobalReasoningState, RelationEdgeState, SpatialState, Viewport};
-use crate::{N_REL_EDGES, N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS};
 use crate::object_high_layer::ObjectHighLayerState;
-use crate::{AXIS_COUNT, HISTORY_CAP, N_OBJECT_SLOTS, SNAPSHOT_MAGIC, SNAPSHOT_VERSION};
+use crate::probe_law::ProbeLawState;
+use crate::viewport::{
+    AmbientModalitySnapshot, AxisRing, BandFamilyState, CrossModalFusionState,
+    GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,
+    RelationEdgeState, SpatialState, Viewport,
+};
+use crate::{
+    AXIS_COUNT, HISTORY_CAP, N_OBJECT_SLOTS, PROBE_HISTORY_CAP, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
+};
+use crate::{N_REL_EDGES, N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS};
 
 pub struct SnapshotPaths {
     pub final_path: PathBuf,
@@ -150,6 +159,15 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
     // v24: language-binding trace substrate
     write_language_binding(&mut buf, &vp.read_language_binding());
 
+    // v25: action-output substrate (write-out side, 2026-04-21)
+    write_action_output(&mut buf, &vp.read_action_output());
+
+    // v26: action-consequence loop substrate (2026-04-21)
+    write_action_consequence(&mut buf, &vp.read_action_consequence());
+
+    // v30: probe-law substrate
+    write_probe_law(&mut buf, &vp.read_probe_law());
+
     // v21 (semantic readiness) and v22 (symbolizer / concept-id) sections
     // removed by cleanup spec 2026-04-20. Snapshot terminates at the
     // reasoning memory summary + language-binding traces.
@@ -227,10 +245,18 @@ fn write_family(buf: &mut Vec<u8>, fam: Option<&BandFamilyState>) {
         Some(f) => {
             buf.push(1u8);
             buf.extend_from_slice(&f.n_bands.to_le_bytes());
-            for v in &f.observed { buf.extend_from_slice(&v.to_le_bytes()); }
-            for v in &f.predicted { buf.extend_from_slice(&v.to_le_bytes()); }
-            for v in &f.err { buf.extend_from_slice(&v.to_le_bytes()); }
-            for v in &f.precision { buf.extend_from_slice(&v.to_le_bytes()); }
+            for v in &f.observed {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in &f.predicted {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in &f.err {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in &f.precision {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
         }
     }
 }
@@ -341,6 +367,98 @@ pub struct SnapshotData {
     pub language_binding: LanguageBindingState,
     // v21 (semantic-readiness) and v22 (symbolizer) removed by cleanup spec
     // 2026-04-20.
+    // v25: action-output substrate (write-out side)
+    pub action_output: SnapshotActionOutput,
+    // v26: action-consequence loop substrate
+    pub action_consequence: SnapshotActionConsequence,
+    // v30: probe-law substrate (numeric/time-only)
+    pub probe_law: SnapshotProbeLaw,
+}
+
+/// Snapshot-visible representation of the action-output substrate (v25/v26/v27).
+/// Numeric-only; no world content; no language gate.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotActionOutput {
+    pub n_channels: u32,
+    pub channels: Vec<SnapshotActionOutputChannel>,
+    /// v27: minimal write-epoch ledger — one entry per Begin event.
+    /// Numeric/time-only; no target, result, or meaning fields.
+    pub n_write_epochs: u32,
+    pub write_epoch_history: Vec<SnapshotWriteEpochRecord>,
+}
+
+/// Snapshot-visible write epoch record (v27).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SnapshotWriteEpochRecord {
+    pub write_seq: u64,
+    pub channel_kind: u64,
+    pub start_t_us: u64,
+    pub last_update_t_us: u64,
+    pub last_phase: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SnapshotActionOutputChannel {
+    pub channel_kind: u64,
+    pub phase: u64,
+    pub current_magnitude: f64,
+    pub peak_magnitude: f64,
+    pub start_t_us: u64,
+    pub last_update_t_us: u64,
+    pub last_transition_t_us: u64,
+    pub reinforce_count: u32,
+    pub decay_count: u32,
+    /// v26: monotonic write-epoch pairing handle.
+    pub current_write_seq: u64,
+}
+
+/// Snapshot-visible representation of the action-consequence substrate (v26).
+/// Numeric/time-only; no target, result, or imitation fields.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotActionConsequence {
+    pub n_windows: u32,
+    pub windows: Vec<SnapshotConsequenceWindow>,
+    pub n_pairs: u32,
+    pub pairs: Vec<SnapshotConsequencePair>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SnapshotConsequenceWindow {
+    /// v29: stable monotonic window identifier.
+    pub window_id: u64,
+    pub modality_kind: u64,
+    pub start_t_us: u64,
+    pub end_t_us: u64,
+    pub magnitude: f64,
+    /// v28: lifecycle phase; 0 = Open, 1 = Closed.
+    pub phase: u64,
+    /// v28: substrate time of last phase or boundary update.
+    pub last_update_t_us: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SnapshotConsequencePair {
+    pub write_seq: u64,
+    /// v29: stable window identifier (replaces window_index Vec position).
+    pub window_id: u64,
+    pub delay_us: u64,
+    pub status: u64,
+    pub pair_t_us: u64,
+    /// v31: numeric similarity between write and consequence magnitudes.
+    pub curve_similarity: f64,
+}
+
+/// Snapshot-visible representation of the probe-law substrate (v30).
+/// Numeric/time-only; no target, result, or semantic fields.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotProbeLaw {
+    pub intensity: f64,
+    pub suppression: f64,
+    pub phase: u8,
+    pub output_intensity: f64,
+    pub last_update_t_us: u64,
+    pub history_len: u8,
+    pub history: [f64; PROBE_HISTORY_CAP],
 }
 
 #[derive(Clone, Copy, Default)]
@@ -445,8 +563,15 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         let err = read_ring_linear(&bytes, &mut cur, history_cap as usize);
 
         axes.push(SnapshotAxis {
-            a, b, precision, last_err, mse, updates,
-            observed, predicted, err,
+            a,
+            b,
+            precision,
+            last_err,
+            mse,
+            updates,
+            observed,
+            predicted,
+            err,
         });
     }
 
@@ -457,7 +582,12 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         let surprise = rd_f64(&bytes, c);
         let last_event_t_us = rd_u64(&bytes, c);
         let candidate_flag = rd_u64(&bytes, c) != 0;
-        SnapshotAmbientSub { event_energy, surprise, last_event_t_us, candidate_flag }
+        SnapshotAmbientSub {
+            event_energy,
+            surprise,
+            last_event_t_us,
+            candidate_flag,
+        }
     };
     let ambient_vib = read_amb_sub(&mut cur);
     let ambient_phot = read_amb_sub(&mut cur);
@@ -480,9 +610,18 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         let attention_share = rd_f64(&bytes, &mut cur);
         let precision_bias = rd_f64(&bytes, &mut cur);
         slots.push(SnapshotSlot {
-            active, last_update_t_us, source_modality, nomination_seq,
-            vib, phot, mech, spatial, fusion, high_layer,
-            attention_share, precision_bias,
+            active,
+            last_update_t_us,
+            source_modality,
+            nomination_seq,
+            vib,
+            phot,
+            mech,
+            spatial,
+            fusion,
+            high_layer,
+            attention_share,
+            precision_bias,
         });
     }
 
@@ -544,15 +683,45 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         LanguageBindingState::default()
     };
 
+    let action_output = if version >= 25 {
+        read_action_output_snapshot(&bytes, &mut cur, version)
+    } else {
+        SnapshotActionOutput::default()
+    };
+
+    let action_consequence = if version >= 29 {
+        read_action_consequence_snapshot(&bytes, &mut cur, version)
+    } else {
+        SnapshotActionConsequence::default()
+    };
+
+    let probe_law = if version >= 30 {
+        read_probe_law_snapshot(&bytes, &mut cur)
+    } else {
+        SnapshotProbeLaw::default()
+    };
+
     // v21 (semantic-readiness) and v22 (symbolizer) sections removed by
     // cleanup spec 2026-04-20. Older snapshot files containing those bytes
     // are no longer readable; v23+ omits them entirely.
 
     Ok(SnapshotData {
-        seq, master_tick, clock_us, start_us, source_writes, predictor_ticks,
-        snapshot_fail_count, history_cap, axis_count,
-        hearing_fault, hearing_fault_count,
-        hl_a, hl_avg_mse, hl_pred_mse, hl_meta_err, hl_modulation,
+        seq,
+        master_tick,
+        clock_us,
+        start_us,
+        source_writes,
+        predictor_ticks,
+        snapshot_fail_count,
+        history_cap,
+        axis_count,
+        hearing_fault,
+        hearing_fault_count,
+        hl_a,
+        hl_avg_mse,
+        hl_pred_mse,
+        hl_meta_err,
+        hl_modulation,
         last_obs_t_us,
         health_state,
         phot_health,
@@ -560,7 +729,9 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         phot_last_frame_t_us,
         axes,
         ambient_nomination_seq,
-        ambient_vib, ambient_phot, ambient_mech,
+        ambient_vib,
+        ambient_phot,
+        ambient_mech,
         slots,
         last_claim,
         global_attention,
@@ -568,16 +739,23 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         global_reasoning,
         global_reasoning_memory,
         language_binding,
+        action_output,
+        action_consequence,
+        probe_law,
     })
 }
 
 fn read_spatial(bytes: &[u8], cur: &mut usize) -> Option<SnapshotSpatial> {
     fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         u64::from_le_bytes(a)
     }
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
     let present = bytes[*cur];
@@ -594,17 +772,27 @@ fn read_spatial(bytes: &[u8], cur: &mut usize) -> Option<SnapshotSpatial> {
     let valid = bytes[*cur] != 0;
     *cur += 1;
     Some(SnapshotSpatial {
-        pos_x, pos_y, span_x, span_y, precision, last_update_t_us, valid,
+        pos_x,
+        pos_y,
+        span_x,
+        span_y,
+        precision,
+        last_update_t_us,
+        valid,
     })
 }
 
 fn read_fusion(bytes: &[u8], cur: &mut usize) -> Option<CrossModalFusionState> {
     fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         u64::from_le_bytes(a)
     }
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
     let present = bytes[*cur];
@@ -641,11 +829,15 @@ fn read_fusion(bytes: &[u8], cur: &mut usize) -> Option<CrossModalFusionState> {
 
 fn read_high_layer(bytes: &[u8], cur: &mut usize) -> Option<ObjectHighLayerState> {
     fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         u64::from_le_bytes(a)
     }
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
     let present = bytes[*cur];
@@ -671,11 +863,15 @@ fn read_high_layer(bytes: &[u8], cur: &mut usize) -> Option<ObjectHighLayerState
 
 fn read_family(bytes: &[u8], cur: &mut usize) -> Option<SnapshotBandFamily> {
     fn rd_u16(b: &[u8], c: &mut usize) -> u16 {
-        let mut a = [0u8; 2]; a.copy_from_slice(&b[*c..*c+2]); *c += 2;
+        let mut a = [0u8; 2];
+        a.copy_from_slice(&b[*c..*c + 2]);
+        *c += 2;
         u16::from_le_bytes(a)
     }
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
     let present = bytes[*cur];
@@ -686,29 +882,47 @@ fn read_family(bytes: &[u8], cur: &mut usize) -> Option<SnapshotBandFamily> {
     let n_bands = rd_u16(bytes, cur);
     let n = n_bands as usize;
     let mut observed = Vec::with_capacity(n);
-    for _ in 0..n { observed.push(rd_f64(bytes, cur)); }
+    for _ in 0..n {
+        observed.push(rd_f64(bytes, cur));
+    }
     let mut predicted = Vec::with_capacity(n);
-    for _ in 0..n { predicted.push(rd_f64(bytes, cur)); }
+    for _ in 0..n {
+        predicted.push(rd_f64(bytes, cur));
+    }
     let mut err = Vec::with_capacity(n);
-    for _ in 0..n { err.push(rd_f64(bytes, cur)); }
+    for _ in 0..n {
+        err.push(rd_f64(bytes, cur));
+    }
     let mut precision = Vec::with_capacity(n);
-    for _ in 0..n { precision.push(rd_f64(bytes, cur)); }
+    for _ in 0..n {
+        precision.push(rd_f64(bytes, cur));
+    }
     Some(SnapshotBandFamily {
-        n_bands, observed, predicted, err, precision,
+        n_bands,
+        observed,
+        predicted,
+        err,
+        precision,
     })
 }
 
 fn read_ring_linear(bytes: &[u8], cur: &mut usize, cap: usize) -> Vec<(u64, f64)> {
     fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         u64::from_le_bytes(a)
     }
     fn rd_u32(b: &[u8], c: &mut usize) -> u32 {
-        let mut a = [0u8; 4]; a.copy_from_slice(&b[*c..*c+4]); *c += 4;
+        let mut a = [0u8; 4];
+        a.copy_from_slice(&b[*c..*c + 4]);
+        *c += 4;
         u32::from_le_bytes(a)
     }
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
     let write_idx = rd_u32(bytes, cur) as usize;
@@ -723,7 +937,11 @@ fn read_ring_linear(bytes: &[u8], cur: &mut usize, cap: usize) -> Vec<(u64, f64)
     }
     let available = (total_written as usize).min(cap);
     let mut out = Vec::with_capacity(available);
-    let start = if total_written as usize <= cap { 0 } else { write_idx };
+    let start = if total_written as usize <= cap {
+        0
+    } else {
+        write_idx
+    };
     for i in 0..available {
         let idx = (start + i) % cap;
         let (t, v, valid) = raw[idx];
@@ -749,22 +967,32 @@ fn write_global_attention(buf: &mut Vec<u8>, ga: &GlobalAttentionState) {
 
 fn read_global_attention_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalAttentionState {
     fn rd_i64(b: &[u8], c: &mut usize) -> i64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         i64::from_le_bytes(a)
     }
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
     fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         u64::from_le_bytes(a)
     }
     let focused_slot_id = rd_i64(bytes, cur) as i8;
     let mut top_slot_ids = [-1i8; N_OBJECT_SLOTS];
-    for i in 0..N_OBJECT_SLOTS { top_slot_ids[i] = rd_i64(bytes, cur) as i8; }
+    for i in 0..N_OBJECT_SLOTS {
+        top_slot_ids[i] = rd_i64(bytes, cur) as i8;
+    }
     let mut attention_shares = [0.0f64; N_OBJECT_SLOTS];
-    for i in 0..N_OBJECT_SLOTS { attention_shares[i] = rd_f64(bytes, cur); }
+    for i in 0..N_OBJECT_SLOTS {
+        attention_shares[i] = rd_f64(bytes, cur);
+    }
     let attention_entropy = rd_f64(bytes, cur);
     let focused_score = rd_f64(bytes, cur);
     let n_active = rd_u64(bytes, cur) as u8;
@@ -803,11 +1031,15 @@ fn write_global_relations(buf: &mut Vec<u8>, gr: &GlobalRelationState) {
 
 fn read_global_relations_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalRelationState {
     fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         u64::from_le_bytes(a)
     }
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
     let n_active_edges = rd_u64(bytes, cur) as u8;
@@ -851,7 +1083,11 @@ fn read_global_relations_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalRelati
             },
         };
     }
-    GlobalRelationState { edges, n_active_edges, last_update_t_us }
+    GlobalRelationState {
+        edges,
+        n_active_edges,
+        last_update_t_us,
+    }
 }
 
 fn write_global_reasoning(buf: &mut Vec<u8>, rs: &GlobalReasoningState) {
@@ -872,14 +1108,18 @@ fn write_global_reasoning(buf: &mut Vec<u8>, rs: &GlobalReasoningState) {
 
 fn read_global_reasoning_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalReasoningState {
     fn rd_i64(b: &[u8], c: &mut usize) -> i64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         i64::from_le_bytes(a)
     }
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
-    let global_surprise_load    = rd_f64(bytes, cur);
+    let global_surprise_load = rd_f64(bytes, cur);
     let coordinated_event_score = rd_f64(bytes, cur);
     let network_instability_score = rd_f64(bytes, cur);
     let mut routing_focus_slot_ids = [-1i8; N_ROUTING_FOCUS_SLOTS];
@@ -916,13 +1156,20 @@ fn write_global_reasoning_memory_summary(buf: &mut Vec<u8>, ms: &GlobalReasoning
     buf.extend_from_slice(&ms.last_update_t_us.to_le_bytes());
 }
 
-fn read_global_reasoning_memory_summary(bytes: &[u8], cur: &mut usize) -> GlobalReasoningMemorySummary {
+fn read_global_reasoning_memory_summary(
+    bytes: &[u8],
+    cur: &mut usize,
+) -> GlobalReasoningMemorySummary {
     fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         f64::from_le_bytes(a)
     }
     fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
-        let mut a = [0u8; 8]; a.copy_from_slice(&b[*c..*c+8]); *c += 8;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
         u64::from_le_bytes(a)
     }
     GlobalReasoningMemorySummary {
@@ -1086,5 +1333,252 @@ fn read_binding_target(bytes: &[u8], cur: &mut usize) -> BindingTargetRef {
             end_t_us: b,
         },
         _ => BindingTargetRef::ObjectSlot { slot_id: a as u8 },
+    }
+}
+
+// ─── v25/v27: action-output substrate ────────────────────────────────────────
+
+fn write_action_output(buf: &mut Vec<u8>, s: &ActionOutputState) {
+    buf.extend_from_slice(&(s.n_channels as u64).to_le_bytes());
+    for ch in &s.channels {
+        buf.extend_from_slice(&(ch.channel_kind as u64).to_le_bytes());
+        buf.extend_from_slice(&(ch.phase as u64).to_le_bytes());
+        buf.extend_from_slice(&ch.current_magnitude.to_le_bytes());
+        buf.extend_from_slice(&ch.peak_magnitude.to_le_bytes());
+        buf.extend_from_slice(&ch.start_t_us.to_le_bytes());
+        buf.extend_from_slice(&ch.last_update_t_us.to_le_bytes());
+        buf.extend_from_slice(&ch.last_transition_t_us.to_le_bytes());
+        buf.extend_from_slice(&(ch.reinforce_count as u64).to_le_bytes());
+        buf.extend_from_slice(&(ch.decay_count as u64).to_le_bytes());
+        // v26: write-epoch pairing handle
+        buf.extend_from_slice(&ch.current_write_seq.to_le_bytes());
+    }
+    // v27: minimal write-epoch ledger
+    buf.extend_from_slice(&(s.n_write_epochs as u64).to_le_bytes());
+    for ep in &s.write_epoch_history {
+        buf.extend_from_slice(&ep.write_seq.to_le_bytes());
+        buf.extend_from_slice(&(ep.channel_kind as u64).to_le_bytes());
+        buf.extend_from_slice(&ep.start_t_us.to_le_bytes());
+        buf.extend_from_slice(&ep.last_update_t_us.to_le_bytes());
+        buf.extend_from_slice(&(ep.last_phase as u64).to_le_bytes());
+    }
+}
+
+fn read_action_output_snapshot(
+    bytes: &[u8],
+    cur: &mut usize,
+    version: u64,
+) -> SnapshotActionOutput {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    let n_channels = rd_u64(bytes, cur) as u32;
+    let mut channels = Vec::with_capacity(n_channels as usize);
+    for _ in 0..n_channels {
+        let channel_kind = rd_u64(bytes, cur);
+        let phase = rd_u64(bytes, cur);
+        let current_magnitude = rd_f64(bytes, cur);
+        let peak_magnitude = rd_f64(bytes, cur);
+        let start_t_us = rd_u64(bytes, cur);
+        let last_update_t_us = rd_u64(bytes, cur);
+        let last_transition_t_us = rd_u64(bytes, cur);
+        let reinforce_count = rd_u64(bytes, cur) as u32;
+        let decay_count = rd_u64(bytes, cur) as u32;
+        let current_write_seq = if version >= 26 { rd_u64(bytes, cur) } else { 0 };
+        channels.push(SnapshotActionOutputChannel {
+            channel_kind,
+            phase,
+            current_magnitude,
+            peak_magnitude,
+            start_t_us,
+            last_update_t_us,
+            last_transition_t_us,
+            reinforce_count,
+            decay_count,
+            current_write_seq,
+        });
+    }
+    // v27: write-epoch ledger
+    let (n_write_epochs, write_epoch_history) = if version >= 27 {
+        let n = rd_u64(bytes, cur) as u32;
+        let mut history = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let write_seq = rd_u64(bytes, cur);
+            let channel_kind = rd_u64(bytes, cur);
+            let start_t_us = rd_u64(bytes, cur);
+            let last_update_t_us = rd_u64(bytes, cur);
+            let last_phase = rd_u64(bytes, cur);
+            history.push(SnapshotWriteEpochRecord {
+                write_seq,
+                channel_kind,
+                start_t_us,
+                last_update_t_us,
+                last_phase,
+            });
+        }
+        (n, history)
+    } else {
+        (0, vec![])
+    };
+    SnapshotActionOutput {
+        n_channels,
+        channels,
+        n_write_epochs,
+        write_epoch_history,
+    }
+}
+
+// ─── v26: action-consequence loop substrate ───────────────────────────────────
+
+fn write_action_consequence(buf: &mut Vec<u8>, s: &ActionConsequenceState) {
+    buf.extend_from_slice(&(s.n_windows as u64).to_le_bytes());
+    for w in &s.windows {
+        // v29: window_id is the first field written per window
+        buf.extend_from_slice(&w.window_id.to_le_bytes());
+        buf.extend_from_slice(&(w.modality_kind as u64).to_le_bytes());
+        buf.extend_from_slice(&w.start_t_us.to_le_bytes());
+        buf.extend_from_slice(&w.end_t_us.to_le_bytes());
+        buf.extend_from_slice(&w.magnitude.to_le_bytes());
+        // v28: lifecycle fields
+        buf.extend_from_slice(&w.phase.as_u64().to_le_bytes());
+        buf.extend_from_slice(&w.last_update_t_us.to_le_bytes());
+    }
+    buf.extend_from_slice(&(s.n_pairs as u64).to_le_bytes());
+    for p in &s.pairs {
+        buf.extend_from_slice(&p.write_seq.to_le_bytes());
+        // v29: window_id replaces window_index
+        buf.extend_from_slice(&p.window_id.to_le_bytes());
+        buf.extend_from_slice(&p.delay_us.to_le_bytes());
+        buf.extend_from_slice(&(p.status as u64).to_le_bytes());
+        buf.extend_from_slice(&p.pair_t_us.to_le_bytes());
+        // v31: curve_similarity
+        buf.extend_from_slice(&p.curve_similarity.to_le_bytes());
+    }
+}
+
+fn read_action_consequence_snapshot(bytes: &[u8], cur: &mut usize, version: u64) -> SnapshotActionConsequence {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    let n_windows = rd_u64(bytes, cur) as u32;
+    let mut windows = Vec::with_capacity(n_windows as usize);
+    for _ in 0..n_windows {
+        // v29: window_id is the first field read per window
+        let window_id = rd_u64(bytes, cur);
+        let modality = rd_u64(bytes, cur);
+        let start_t_us = rd_u64(bytes, cur);
+        let end_t_us = rd_u64(bytes, cur);
+        let magnitude = rd_f64(bytes, cur);
+        // v28: lifecycle fields
+        let phase = rd_u64(bytes, cur);
+        let last_update_t_us = rd_u64(bytes, cur);
+        windows.push(SnapshotConsequenceWindow {
+            window_id,
+            modality_kind: modality,
+            start_t_us,
+            end_t_us,
+            magnitude,
+            phase,
+            last_update_t_us,
+        });
+    }
+    let n_pairs = rd_u64(bytes, cur) as u32;
+    let mut pairs = Vec::with_capacity(n_pairs as usize);
+    for _ in 0..n_pairs {
+        let write_seq = rd_u64(bytes, cur);
+        // v29: window_id replaces window_index
+        let window_id = rd_u64(bytes, cur);
+        let delay_us = rd_u64(bytes, cur);
+        let status = rd_u64(bytes, cur);
+        let pair_t_us = rd_u64(bytes, cur);
+        let curve_similarity = if version >= 31 {
+            rd_f64(bytes, cur)
+        } else {
+            0.0
+        };
+        pairs.push(SnapshotConsequencePair {
+            write_seq,
+            window_id,
+            delay_us,
+            status,
+            pair_t_us,
+            curve_similarity,
+        });
+    }
+    SnapshotActionConsequence {
+        n_windows,
+        windows,
+        n_pairs,
+        pairs,
+    }
+}
+
+// ─── v30: probe-law substrate ─────────────────────────────────────────────────
+
+fn write_probe_law(buf: &mut Vec<u8>, s: &ProbeLawState) {
+    buf.extend_from_slice(&s.intensity.to_le_bytes());
+    buf.extend_from_slice(&s.suppression.to_le_bytes());
+    buf.push(s.phase.as_u8());
+    buf.extend_from_slice(&[0u8; 7]); // padding to 8-byte alignment
+    buf.extend_from_slice(&s.output_intensity.to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+    buf.push(s.history_len as u8);
+    buf.extend_from_slice(&[0u8; 7]); // padding
+    for v in &s.history {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn read_probe_law_snapshot(bytes: &[u8], cur: &mut usize) -> SnapshotProbeLaw {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    let intensity = rd_f64(bytes, cur);
+    let suppression = rd_f64(bytes, cur);
+    let phase = bytes[*cur];
+    *cur += 8; // phase byte + 7 padding bytes
+    let output_intensity = rd_f64(bytes, cur);
+    let last_update_t_us = rd_u64(bytes, cur);
+    let history_len = bytes[*cur];
+    *cur += 8; // history_len byte + 7 padding bytes
+    let mut history = [0.0f64; PROBE_HISTORY_CAP];
+    for v in history.iter_mut() {
+        *v = rd_f64(bytes, cur);
+    }
+    SnapshotProbeLaw {
+        intensity,
+        suppression,
+        phase,
+        output_intensity,
+        last_update_t_us,
+        history_len,
+        history,
     }
 }

@@ -12,9 +12,7 @@ use std::sync::Arc;
 
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::{EventEvidence, SlotClaim, Viewport};
-use bionic_v0::{
-    MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, PHOT_BANDS, SLOT_IDLE_US, VIB_BANDS,
-};
+use bionic_v0::{MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, PHOT_BANDS, SLOT_IDLE_US, VIB_BANDS};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -236,7 +234,10 @@ fn snapshot_roundtrip_preserves_global_attention_state() {
     let data = read_snapshot(&paths.final_path).expect("read ok");
 
     let ga = data.global_attention;
-    assert_eq!(ga.focused_slot_id, ga_before.focused_slot_id, "focused_slot_id");
+    assert_eq!(
+        ga.focused_slot_id, ga_before.focused_slot_id,
+        "focused_slot_id"
+    );
     assert_eq!(ga.n_active, ga_before.n_active, "n_active");
     assert!(
         (ga.focused_score - ga_before.focused_score).abs() < 1e-12,
@@ -249,9 +250,14 @@ fn snapshot_roundtrip_preserves_global_attention_state() {
     for i in 0..N_OBJECT_SLOTS {
         assert!(
             (ga.attention_shares[i] - ga_before.attention_shares[i]).abs() < 1e-12,
-            "attention_shares[{}] roundtrip", i
+            "attention_shares[{}] roundtrip",
+            i
         );
-        assert_eq!(ga.top_slot_ids[i], ga_before.top_slot_ids[i], "top_slot_ids[{}]", i);
+        assert_eq!(
+            ga.top_slot_ids[i], ga_before.top_slot_ids[i],
+            "top_slot_ids[{}]",
+            i
+        );
     }
 
     let slot_snap = &data.slots[slot_id];
@@ -285,7 +291,10 @@ fn claim_architecture_unchanged_after_attention() {
         nomination_seq_hint: 1,
     };
     let claim1 = vp.claim_slot_for_event(&ev1);
-    assert!(matches!(claim1, SlotClaim::Allocated(_)), "first VIB must allocate");
+    assert!(
+        matches!(claim1, SlotClaim::Allocated(_)),
+        "first VIB must allocate"
+    );
     let slot_id = claim1.slot_id().unwrap();
 
     // Run attention refreshes on this slot.
@@ -305,7 +314,8 @@ fn claim_architecture_unchanged_after_attention() {
     let claim2 = vp.claim_slot_for_event(&ev2);
     assert!(
         matches!(claim2, SlotClaim::Reused(_)),
-        "same-modality within window must reuse; got {:?}", claim2
+        "same-modality within window must reuse; got {:?}",
+        claim2
     );
     assert_eq!(claim2.slot_id(), claim1.slot_id(), "must reuse same slot");
 

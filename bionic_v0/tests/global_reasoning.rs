@@ -114,7 +114,13 @@ fn high_relation_error_edges_dominate_routing_focus() {
     let big_delta = 55_000u64;
     let t_base = t0 + 40 * dt;
     for i in 0..5u64 {
-        run_cycle(&vp, slot_a, slot_b, t_base + i * dt, t_base + i * dt + big_delta);
+        run_cycle(
+            &vp,
+            slot_a,
+            slot_b,
+            t_base + i * dt,
+            t_base + i * dt + big_delta,
+        );
     }
 
     let rs = vp.read_global_reasoning();
@@ -129,8 +135,7 @@ fn high_relation_error_edges_dominate_routing_focus() {
     let focus_edge = &gr.edges[focus_edge_idx as usize];
     let is_ab_edge = (focus_edge.src_slot_id as usize == slot_a
         && focus_edge.dst_slot_id as usize == slot_b)
-        || (focus_edge.src_slot_id as usize == slot_b
-            && focus_edge.dst_slot_id as usize == slot_a);
+        || (focus_edge.src_slot_id as usize == slot_b && focus_edge.dst_slot_id as usize == slot_a);
     assert!(
         is_ab_edge,
         "the top routing_focus edge must be between slot_a and slot_b after abrupt change; \
@@ -174,12 +179,10 @@ fn low_attention_background_objects_do_not_dominate_reasoning() {
 
     // slot_c must not dominate routing focus.
     assert_ne!(
-        rs.routing_focus_slot_ids[0],
-        slot_c as i8,
+        rs.routing_focus_slot_ids[0], slot_c as i8,
         "stale slot_c (id={}) must not be the top routing focus slot; \
          routing_focus_slot_ids={:?}",
-        slot_c,
-        rs.routing_focus_slot_ids
+        slot_c, rs.routing_focus_slot_ids
     );
 
     // coordinated_event_score and global_surprise_load must be based on A↔B activity.
@@ -312,7 +315,10 @@ fn claim_architecture_remains_unchanged_after_reasoning() {
         nomination_seq_hint: 1,
     };
     let claim1 = vp.claim_slot_for_event(&ev1);
-    assert!(matches!(claim1, SlotClaim::Allocated(_)), "first VIB must allocate");
+    assert!(
+        matches!(claim1, SlotClaim::Allocated(_)),
+        "first VIB must allocate"
+    );
     let slot_id = claim1.slot_id().unwrap();
 
     for i in 0..15u64 {
@@ -516,8 +522,7 @@ fn reasoning_normalization_does_not_change_routing_focus() {
     let focus_edge = &gr.edges[focus_edge_idx as usize];
     let is_ab_edge = (focus_edge.src_slot_id as usize == slot_a
         && focus_edge.dst_slot_id as usize == slot_b)
-        || (focus_edge.src_slot_id as usize == slot_b
-            && focus_edge.dst_slot_id as usize == slot_a);
+        || (focus_edge.src_slot_id as usize == slot_b && focus_edge.dst_slot_id as usize == slot_a);
     assert!(
         is_ab_edge,
         "routing focus must be on A-B edge after high error; got {}→{}",
@@ -525,7 +530,8 @@ fn reasoning_normalization_does_not_change_routing_focus() {
     );
 
     // routing_focus_slot_ids should include A and B (the active slots)
-    let focus_slots: std::collections::HashSet<i8> = rs.routing_focus_slot_ids.iter().cloned().collect();
+    let focus_slots: std::collections::HashSet<i8> =
+        rs.routing_focus_slot_ids.iter().cloned().collect();
     assert!(
         focus_slots.contains(&(slot_a as i8)) || focus_slots.contains(&(slot_b as i8)),
         "routing focus slots must include active slots A or B; got {:?}",

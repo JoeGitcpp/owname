@@ -1,13 +1,16 @@
-pub mod viewport;
-pub mod clock;
-pub mod predictor;
-pub mod source;
-pub mod snapshot;
-pub mod language_binding;
-pub mod vib;
-pub mod highlevel;
+pub mod action_consequence;
+pub mod action_output;
 pub mod adapter;
+pub mod clock;
+pub mod highlevel;
+pub mod language_binding;
+pub mod predictor;
+pub mod probe_law;
+pub mod snapshot;
+pub mod source;
 pub mod synthetic_vib;
+pub mod vib;
+pub mod viewport;
 
 pub const HISTORY_CAP: usize = 1024;
 
@@ -119,10 +122,70 @@ pub const PHOT_BANDS: usize = 4;
 // --- Phase 4A: real PHOT ingress path ---
 pub mod phot_camera;
 
+// --- Language binding runtime maintenance ---
+pub const BINDING_REFRESH_HZ: u32 = 5;
+/// A trace with no updates for this long is considered stale for runtime
+/// maintenance and receives one decay step per refresh tick.
+pub const BINDING_MAINTENANCE_IDLE_US: u64 = 2_000_000;
+/// Per-tick decay amount applied to stale binding strength.
+pub const BINDING_MAINTENANCE_DECAY_STEP: f64 = 0.05;
+
 // --- Phase 4B: real camera binding + PHOT staleness ---
 /// Provider healthy but no new frame within this window => STALE.
 /// At 30 Hz a frame arrives every ~33 ms; 500 ms ≈ 15 missed frames.
 pub const PHOT_STALE_WINDOW_US: u64 = 500_000;
+
+/// Engineering approximation of the maximum delay between a write epoch's
+/// `start_t_us` and a consequence window's `start_t_us` for the live
+/// temporal auto-pairing helper to be eligible to form a link.
+///
+/// At 30 Hz a PHOT consequence window typically forms within a few hundred
+/// milliseconds of a preceding write event; 2 s gives comfortable headroom
+/// for slower physical feedback paths.
+///
+/// This is a substrate-level engineering knob, NOT a fixed theoretical
+/// consequence time window.  The actual temporal structure of action-consequence
+/// coupling should be formed and revised through exploration history once that
+/// substrate is in place.
+pub const TEMPORAL_PAIR_MAX_DELAY_US: u64 = 2_000_000; // 2 s
+
+/// Engineering cap on write_epoch_history Vec length.
+///
+/// Substrate knob — not a theoretical learning window.  The actual number of
+/// live epochs needed for nearest-legal-predecessor selection is determined by
+/// TEMPORAL_PAIR_MAX_DELAY_US × write-event frequency; 128 gives comfortable
+/// headroom at current rates.  Adjust via exploration history as write patterns
+/// become known.
+pub const WRITE_EPOCH_HISTORY_CAP: usize = 128;
+
+/// Engineering cap on consequence windows Vec length.
+///
+/// Substrate knob — not a theoretical consequence count.  At 30 Hz PHOT with
+/// PHOT_CONSEQUENCE_QUIESCENCE_US ≈ 300 ms, at most a few windows open per
+/// second; 128 gives many seconds of headroom.  Adjust via exploration history.
+pub const CONSEQUENCE_WINDOW_CAP: usize = 128;
+
+/// Engineering cap on consequence pairs Vec length.
+///
+/// Substrate knob — not a theoretical pair count.  Larger than the window cap
+/// because multiple epochs may pair with the same window, and history lookback
+/// wants more pair records than active windows.
+pub const PAIR_HISTORY_CAP: usize = 256;
+
+/// Engineering approximation of the quiescence gap used by the PHOT ingress
+/// accumulation wiring to close an Open consequence window when no motion
+/// has been observed for this many microseconds.
+///
+/// At 30 Hz, 300 ms ≈ 9 consecutive no-motion frames.
+///
+/// This is a substrate-level engineering knob, NOT a fixed theoretical
+/// consequence boundary.  The actual quiescence structure should be formed
+/// and revised through exploration history once that substrate is in place.
+pub const PHOT_CONSEQUENCE_QUIESCENCE_US: u64 = 300_000;
+
+/// Engineering approximation: VIB event energy above this triggers
+/// consequence window accumulation. Substrate knob, not theoretical bound.
+pub const INGRESS_ACCUMULATION_THRESHOLD: f64 = 0.01;
 
 // --- Phase 4C: slot-local PHOT predictor ---
 pub mod phot_predictor;
@@ -169,10 +232,34 @@ pub const OBJECT_HL_ERR_ALPHA: f64 = 0.1;
 /// During warm-up, object_err = 0 and attention_bias = 0.5 (neutral).
 pub const OBJECT_HL_WARMUP_MIN: u32 = 2;
 
+// --- Phase 6B: probe-law substrate ---
+
+/// EMA alpha for probe intensity (tracks reasoning novelty).
+pub const PROBE_INTENSITY_ALPHA: f64 = 0.20;
+
+/// EMA alpha for probe suppression (slower, acts as adaptive baseline).
+pub const PROBE_SUPPRESSION_ALPHA: f64 = 0.05;
+
+/// Short history ring length for probe intensity values.
+pub const PROBE_HISTORY_CAP: usize = 8;
+
+/// Engineering approximation: global_surprise_load threshold for the
+/// surprise-driven action-output trigger. Strictly above this, tick_surprise_trigger
+/// fires a Begin event. Range [0,1]; 0.5 targets the upper half of the load range.
+pub const SURPRISE_TRIGGER_THRESHOLD: f64 = 0.5;
+
+/// Engineering approximation: relation_precision (EMA of relation_err²) threshold
+/// for the relation-instability action-output trigger. Strictly above this on any
+/// active edge, tick_relation_instability_trigger fires a Begin event.
+/// relation_precision inputs are in [0, REL_PRED_PRECISION_MAX]; 0.3 sits in the
+/// lower third, catching sustained surprises before they compound.
+pub const RELATION_INSTABILITY_TRIGGER_THRESHOLD: f64 = 0.3;
+
 pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
-// v24: add language-binding trace snapshot state without reviving naming
-// gates or concept allocators.
-pub const SNAPSHOT_VERSION: u64 = 24;
+// v30: probe_law substrate added (intensity, suppression, phase, output_intensity,
+// last_update_t_us, short history). Old snapshots (v29) are rejected.
+// v31: curve_similarity added to ActionConsequencePair.
+pub const SNAPSHOT_VERSION: u64 = 31;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

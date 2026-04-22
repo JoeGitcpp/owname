@@ -1,22 +1,24 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::RwLock;
 
-use crate::{
-    AXIS_COUNT, CLAIM_CROSS_MODALITY_BASE, CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED,
-    CLAIM_KIND_REUSED, CLAIM_LOG_ENERGY_BAND, CLAIM_REUSE_MIN_SCORE, CLAIM_SAME_MODALITY_BONUS,
-    CLAIM_SURPRISE_BAND, CLAIM_W_ENERGY, CLAIM_W_MODALITY, CLAIM_W_SPATIAL, CLAIM_W_SURPRISE,
-    CLAIM_W_TIME, CROSS_MODAL_SPATIAL_DIST,
-    CROSS_MODAL_WINDOW_US, HEALTH_FAULT, HEALTH_OK, HEALTH_QUIET, HEALTH_STALE, HISTORY_CAP,
-    MOD_MECH, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES, N_ROUTING_FOCUS_EDGES,
-    N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES,
-    QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REL_ALPHA, REL_PRED_ALPHA, REL_PRED_MSE_ALPHA,
-    REL_PRED_PRECISION_MAX, REL_PRED_WARMUP_MIN, REASONING_HISTORY_ALPHA,
-    REASONING_HISTORY_RING_CAP, REASONING_INTENSITY_THRESHOLD, SAME_MODAL_SPATIAL_DIST,
-    SLOT_IDLE_US, VIB_BANDS,
-};
+use crate::action_consequence::ActionConsequenceState;
+use crate::action_output::ActionOutputState;
 use crate::language_binding::{BindingEvent, BindingTrace, LanguageBindingState};
-use crate::phot_predictor::PhotSlotPredictor;
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
+use crate::phot_predictor::PhotSlotPredictor;
+use crate::probe_law::ProbeLawState;
+use crate::{
+    AXIS_COUNT, BINDING_MAINTENANCE_DECAY_STEP, BINDING_MAINTENANCE_IDLE_US,
+    CLAIM_CROSS_MODALITY_BASE, CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED,
+    CLAIM_LOG_ENERGY_BAND, CLAIM_REUSE_MIN_SCORE, CLAIM_SAME_MODALITY_BONUS, CLAIM_SURPRISE_BAND,
+    CLAIM_W_ENERGY, CLAIM_W_MODALITY, CLAIM_W_SPATIAL, CLAIM_W_SURPRISE, CLAIM_W_TIME,
+    CROSS_MODAL_SPATIAL_DIST, CROSS_MODAL_WINDOW_US, HEALTH_FAULT, HEALTH_OK, HEALTH_QUIET,
+    HEALTH_STALE, HISTORY_CAP, MOD_MECH, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES,
+    N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES,
+    QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REASONING_HISTORY_ALPHA, REASONING_HISTORY_RING_CAP,
+    REASONING_INTENSITY_THRESHOLD, REL_ALPHA, REL_PRED_ALPHA, REL_PRED_MSE_ALPHA,
+    REL_PRED_PRECISION_MAX, REL_PRED_WARMUP_MIN, SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS,
+};
 
 /// First-class viewport health state. Stored as a numeric atomic; observers
 /// and tests always read this and never recompute thresholds.
@@ -25,10 +27,10 @@ use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum HealthState {
-    Fault = HEALTH_FAULT,  // 0
-    Quiet = HEALTH_QUIET,  // 1
-    Ok = HEALTH_OK,        // 2
-    Stale = HEALTH_STALE,  // 3 — PHOT only: provider healthy but no frame arriving
+    Fault = HEALTH_FAULT, // 0
+    Quiet = HEALTH_QUIET, // 1
+    Ok = HEALTH_OK,       // 2
+    Stale = HEALTH_STALE, // 3 — PHOT only: provider healthy but no frame arriving
 }
 
 impl HealthState {
@@ -587,7 +589,8 @@ impl GlobalReasoningHistoryState {
         if i >= self.count {
             return None;
         }
-        let idx = (self.write_idx + REASONING_HISTORY_RING_CAP - 1 - i) % REASONING_HISTORY_RING_CAP;
+        let idx =
+            (self.write_idx + REASONING_HISTORY_RING_CAP - 1 - i) % REASONING_HISTORY_RING_CAP;
         Some(&self.ring[idx])
     }
 }
@@ -965,6 +968,21 @@ pub struct Viewport {
     // semantic_readiness and symbolizer subtrees were removed by cleanup
     // spec 2026-04-20. Substrate now terminates at global_reasoning_history
     // / global_reasoning_memory_summary.
+    /// Action-output substrate — body's write-out side (v25).
+    /// Numeric-only; no world content; no language gate.
+    pub action_output: RwLock<ActionOutputState>,
+    /// Monotonic counter incremented on every Begin event. Consumed by
+    /// action_output.rs to stamp current_write_seq on each new write trace.
+    pub action_output_write_seq: AtomicU64,
+    /// Monotonic counter for stable window_id assignment. Parallels action_output_write_seq.
+    pub action_consequence_window_seq: AtomicU64,
+    /// Action-consequence loop substrate (v26). Records consequence windows
+    /// and explicit pairs. No target inference; no success/failure semantics.
+    pub action_consequence: RwLock<ActionConsequenceState>,
+
+    /// Probe-law substrate (v30). Intensity + suppression + phase + short history.
+    /// Numeric/time-only; no target, result, or semantic fields.
+    pub probe_law: RwLock<ProbeLawState>,
 }
 
 impl Viewport {
@@ -1014,6 +1032,11 @@ impl Viewport {
             global_reasoning_history: RwLock::new(GlobalReasoningHistoryState::new()),
             global_reasoning_memory_summary: RwLock::new(GlobalReasoningMemorySummary::default()),
             language_binding: RwLock::new(LanguageBindingState::default()),
+            action_output: RwLock::new(ActionOutputState::default()),
+            action_output_write_seq: AtomicU64::new(0),
+            action_consequence_window_seq: AtomicU64::new(0),
+            action_consequence: RwLock::new(ActionConsequenceState::default()),
+            probe_law: RwLock::new(ProbeLawState::default()),
         }
     }
 
@@ -1414,12 +1437,7 @@ impl Viewport {
     ///   * After warmup: `predicted` = previous AR-1 state, `err` = residual,
     ///     `precision` = EMA of squared err (rises with surprise).
     ///   * Does NOT touch claim/scoring or any other modality's fields.
-    pub fn update_slot_phot_with_predictor(
-        &self,
-        slot_id: usize,
-        t_us: u64,
-        observed: &[f64],
-    ) {
+    pub fn update_slot_phot_with_predictor(&self, slot_id: usize, t_us: u64, observed: &[f64]) {
         if slot_id >= N_OBJECT_SLOTS {
             return;
         }
@@ -1564,7 +1582,22 @@ impl Viewport {
     }
 
     pub fn apply_language_binding_event(&self, event: BindingEvent) {
-        self.language_binding.write().unwrap().apply_binding_event(event);
+        self.language_binding
+            .write()
+            .unwrap()
+            .apply_binding_event(event);
+    }
+
+    pub fn apply_binding_event_from_adapter(&self, event: BindingEvent) {
+        self.apply_language_binding_event(event);
+    }
+
+    pub fn tick_binding_maintenance(&self, now_us: u64) {
+        self.language_binding.write().unwrap().tick_maintenance(
+            now_us,
+            BINDING_MAINTENANCE_IDLE_US,
+            BINDING_MAINTENANCE_DECAY_STEP,
+        );
     }
 
     /// Phase 5A: recompute the fusion subtree for an active slot.
@@ -1716,7 +1749,11 @@ impl Viewport {
             let s = self.slots[i].read().unwrap();
             if s.active {
                 if let (Some(hl), Some(fusion)) = (s.high_layer, s.fusion) {
-                    info[i] = Some((hl.attention_bias, fusion.cross_modal_confidence, fusion.last_fused_t_us));
+                    info[i] = Some((
+                        hl.attention_bias,
+                        fusion.cross_modal_confidence,
+                        fusion.last_fused_t_us,
+                    ));
                 }
             }
         }
@@ -1739,17 +1776,23 @@ impl Viewport {
             if n_active > 0 {
                 let eq = 1.0 / n_active as f64;
                 for i in 0..N_OBJECT_SLOTS {
-                    if info[i].is_some() { shares[i] = eq; }
+                    if info[i].is_some() {
+                        shares[i] = eq;
+                    }
                 }
             }
         } else {
-            for i in 0..N_OBJECT_SLOTS { shares[i] = raw[i] / total; }
+            for i in 0..N_OBJECT_SLOTS {
+                shares[i] = raw[i] / total;
+            }
         }
 
         // Sort active slot indices by raw score descending.
         let mut active: Vec<usize> = (0..N_OBJECT_SLOTS).filter(|&i| info[i].is_some()).collect();
         active.sort_unstable_by(|&a, &b| {
-            raw[b].partial_cmp(&raw[a]).unwrap_or(std::cmp::Ordering::Equal)
+            raw[b]
+                .partial_cmp(&raw[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         let mut top_slot_ids = [-1i8; N_OBJECT_SLOTS];
@@ -1757,8 +1800,13 @@ impl Viewport {
             top_slot_ids[pos] = id as i8;
         }
         let focused_slot_id = top_slot_ids[0];
-        let focused_score = if focused_slot_id >= 0 { raw[focused_slot_id as usize] } else { 0.0 };
-        let attention_entropy: f64 = shares.iter()
+        let focused_score = if focused_slot_id >= 0 {
+            raw[focused_slot_id as usize]
+        } else {
+            0.0
+        };
+        let attention_entropy: f64 = shares
+            .iter()
             .filter(|&&p| p > 1e-15)
             .map(|&p| -p * p.ln())
             .sum();
@@ -1830,7 +1878,9 @@ impl Viewport {
 
         for src in 0..N_OBJECT_SLOTS {
             for dst in 0..N_OBJECT_SLOTS {
-                if src == dst { continue; }
+                if src == dst {
+                    continue;
+                }
                 let idx = edge_idx(src, dst);
                 let edge = &mut new_edges[idx];
                 edge.src_slot_id = src as u8;
@@ -1868,7 +1918,8 @@ impl Viewport {
 
                 // co_change: similarity of attention_bias trajectories.
                 let obs_co = (1.0 - (s_bias - d_bias).abs()).clamp(0.0, 1.0);
-                edge.co_change_score = REL_ALPHA * obs_co + (1.0 - REL_ALPHA) * edge.co_change_score;
+                edge.co_change_score =
+                    REL_ALPHA * obs_co + (1.0 - REL_ALPHA) * edge.co_change_score;
 
                 // lead_lag: (t_dst - t_src) / window; positive = src precedes dst.
                 let t_diff_i = d_t as i64 - s_t as i64;
@@ -1877,13 +1928,13 @@ impl Viewport {
 
                 // predictive: src err spike before dst err spike.
                 let obs_pred = (s_err * d_err * 0.0_f64.max(lag_obs)).clamp(0.0, 1.0);
-                edge.predictive_score = REL_ALPHA * obs_pred
-                    + (1.0 - REL_ALPHA) * edge.predictive_score;
+                edge.predictive_score =
+                    REL_ALPHA * obs_pred + (1.0 - REL_ALPHA) * edge.predictive_score;
 
                 // relation_confidence: scales with both slots' attention shares.
                 let obs_conf = (4.0 * s_share * d_share).clamp(0.0, 1.0);
-                edge.relation_confidence = REL_ALPHA * obs_conf
-                    + (1.0 - REL_ALPHA) * edge.relation_confidence;
+                edge.relation_confidence =
+                    REL_ALPHA * obs_conf + (1.0 - REL_ALPHA) * edge.relation_confidence;
 
                 edge.last_update_t_us = now_us;
             }
@@ -1943,14 +1994,12 @@ impl Viewport {
             let err_conf = edge.relation_confidence - ps.ema_conf;
 
             // Update AR-1 EMA for each dimension.
-            ps.ema_co = REL_PRED_ALPHA * edge.co_change_score
-                + (1.0 - REL_PRED_ALPHA) * ps.ema_co;
-            ps.ema_lag = REL_PRED_ALPHA * edge.lead_lag_score
-                + (1.0 - REL_PRED_ALPHA) * ps.ema_lag;
-            ps.ema_pred = REL_PRED_ALPHA * edge.predictive_score
-                + (1.0 - REL_PRED_ALPHA) * ps.ema_pred;
-            ps.ema_conf = REL_PRED_ALPHA * edge.relation_confidence
-                + (1.0 - REL_PRED_ALPHA) * ps.ema_conf;
+            ps.ema_co = REL_PRED_ALPHA * edge.co_change_score + (1.0 - REL_PRED_ALPHA) * ps.ema_co;
+            ps.ema_lag = REL_PRED_ALPHA * edge.lead_lag_score + (1.0 - REL_PRED_ALPHA) * ps.ema_lag;
+            ps.ema_pred =
+                REL_PRED_ALPHA * edge.predictive_score + (1.0 - REL_PRED_ALPHA) * ps.ema_pred;
+            ps.ema_conf =
+                REL_PRED_ALPHA * edge.relation_confidence + (1.0 - REL_PRED_ALPHA) * ps.ema_conf;
 
             // RMS error across all 4 predicted dimensions.
             let rms_err = ((err_co * err_co
@@ -1961,8 +2010,8 @@ impl Viewport {
                 .sqrt();
 
             // Update EMA of squared error (feeds relation_precision).
-            ps.ema_mse = (1.0 - REL_PRED_MSE_ALPHA) * ps.ema_mse
-                + REL_PRED_MSE_ALPHA * rms_err * rms_err;
+            ps.ema_mse =
+                (1.0 - REL_PRED_MSE_ALPHA) * ps.ema_mse + REL_PRED_MSE_ALPHA * rms_err * rms_err;
 
             ps.warmup = ps.warmup.saturating_add(1);
 
@@ -1978,8 +2027,7 @@ impl Viewport {
                 edge.pred.relation_precision = 0.0;
             } else {
                 edge.pred.relation_err = rms_err;
-                edge.pred.relation_precision =
-                    ps.ema_mse.min(REL_PRED_PRECISION_MAX);
+                edge.pred.relation_precision = ps.ema_mse.min(REL_PRED_PRECISION_MAX);
             }
         }
     }
@@ -2007,7 +2055,9 @@ impl Viewport {
         let mut coord_denom = 0.0f64;
 
         for (i, edge) in gr.edges.iter().enumerate() {
-            if !edge.active { continue; }
+            if !edge.active {
+                continue;
+            }
 
             let share_src = ga.attention_shares[edge.src_slot_id as usize];
             let share_dst = ga.attention_shares[edge.dst_slot_id as usize];
@@ -2024,8 +2074,7 @@ impl Viewport {
             surprise_weight_sum += attn_product;
 
             // Network instability: surprise + temporal structure change, normalized by attention weight sum.
-            instability_sum +=
-                (edge.pred.relation_err + edge.lead_lag_score.abs()) * attn_product;
+            instability_sum += (edge.pred.relation_err + edge.lead_lag_score.abs()) * attn_product;
             instability_weight_sum += attn_product;
 
             // Coordinated event: weighted co_change_score.
@@ -2055,15 +2104,16 @@ impl Viewport {
         // Top-N_ROUTING_FOCUS_EDGES edges by routing weight.
         let mut edge_order: [(f64, usize); N_REL_EDGES] =
             core::array::from_fn(|i| (edge_raw_weights[i], i));
-        edge_order.sort_unstable_by(|a, b| {
-            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        edge_order
+            .sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let total_rw: f64 = edge_order.iter().map(|(w, _)| w).sum();
 
         let mut routing_focus_edge_ids = [-1i16; N_ROUTING_FOCUS_EDGES];
         let mut routing_weights = [0.0f64; N_ROUTING_FOCUS_EDGES];
         for k in 0..N_ROUTING_FOCUS_EDGES.min(N_REL_EDGES) {
-            if edge_order[k].0 <= 0.0 { break; }
+            if edge_order[k].0 <= 0.0 {
+                break;
+            }
             routing_focus_edge_ids[k] = edge_order[k].1 as i16;
             routing_weights[k] = if total_rw > 1e-12 {
                 edge_order[k].0 / total_rw
@@ -2075,9 +2125,8 @@ impl Viewport {
         // Top-N_ROUTING_FOCUS_SLOTS slots by accumulated routing score.
         let mut slot_order: [(f64, usize); N_OBJECT_SLOTS] =
             core::array::from_fn(|i| (slot_scores[i], i));
-        slot_order.sort_unstable_by(|a, b| {
-            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        slot_order
+            .sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut routing_focus_slot_ids = [-1i8; N_ROUTING_FOCUS_SLOTS];
         for k in 0..N_ROUTING_FOCUS_SLOTS {
@@ -2226,8 +2275,7 @@ impl Viewport {
         };
 
         // History fill ratio
-        let history_fill_ratio =
-            hist.count as f64 / REASONING_HISTORY_RING_CAP as f64;
+        let history_fill_ratio = hist.count as f64 / REASONING_HISTORY_RING_CAP as f64;
 
         // Push current entry to ring buffer
         hist.push(current_signature);
@@ -2252,10 +2300,13 @@ impl Viewport {
     // refresh_symbolizer / read_symbolizer were removed by cleanup spec
     // 2026-04-20. They are not part of the substrate API.
 
-
     pub fn push_observation(&self, axis: usize, t_us: u64, value: f64) {
         let mut w = self.observed[axis].write().unwrap();
-        w.push(Sample { t_us, value, valid: true });
+        w.push(Sample {
+            t_us,
+            value,
+            valid: true,
+        });
         self.source_writes.fetch_add(1, Ordering::Relaxed);
         self.last_obs_t_us.store(t_us, Ordering::Relaxed);
     }
@@ -2266,12 +2317,20 @@ impl Viewport {
 
     pub fn push_prediction(&self, axis: usize, t_us: u64, value: f64) {
         let mut w = self.predicted[axis].write().unwrap();
-        w.push(Sample { t_us, value, valid: true });
+        w.push(Sample {
+            t_us,
+            value,
+            valid: true,
+        });
     }
 
     pub fn push_err(&self, axis: usize, t_us: u64, err: f64) {
         let mut w = self.err_stream[axis].write().unwrap();
-        w.push(Sample { t_us, value: err, valid: true });
+        w.push(Sample {
+            t_us,
+            value: err,
+            valid: true,
+        });
     }
 
     pub fn read_latest_observations(&self, axis: usize, n: usize) -> Vec<Sample> {
@@ -2306,7 +2365,14 @@ impl Viewport {
 
     pub fn read_predictor(&self, axis: usize) -> (f64, f64, f64, f64, f64, u64) {
         let ps = self.predictors[axis].read().unwrap();
-        (ps.a, ps.b, ps.precision, ps.last_err, ps.mean_sq_err, ps.total_updates)
+        (
+            ps.a,
+            ps.b,
+            ps.precision,
+            ps.last_err,
+            ps.mean_sq_err,
+            ps.total_updates,
+        )
     }
 
     pub fn mark_snapshot_fail(&self) {
@@ -2340,7 +2406,13 @@ impl Viewport {
 
     pub fn read_hl_state(&self) -> (f64, f64, f64, f64, f64) {
         let hl = self.hl.read().unwrap();
-        (hl.a, hl.last_avg_mse, hl.pred_mse, hl.meta_err, hl.modulation)
+        (
+            hl.a,
+            hl.last_avg_mse,
+            hl.pred_mse,
+            hl.meta_err,
+            hl.modulation,
+        )
     }
 
     // --- Phase 3A.1: first-class health state ---

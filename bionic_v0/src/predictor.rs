@@ -43,7 +43,14 @@ impl Ar2Predictor {
 
         let (precision, _a_vp, _b_vp, _e, _mse, _u) = {
             let ps = vp.predictors[self.axis].read().unwrap();
-            (ps.precision, ps.a, ps.b, ps.last_err, ps.mean_sq_err, ps.total_updates)
+            (
+                ps.precision,
+                ps.a,
+                ps.b,
+                ps.last_err,
+                ps.mean_sq_err,
+                ps.total_updates,
+            )
         };
 
         let mut last_err = 0.0f64;

@@ -164,7 +164,10 @@ fn global_orchestrator_does_not_change_claim_architecture() {
         nomination_seq_hint: 1,
     };
     let claim1 = vp.claim_slot_for_event(&ev1);
-    assert!(matches!(claim1, SlotClaim::Allocated(_)), "first VIB must allocate");
+    assert!(
+        matches!(claim1, SlotClaim::Allocated(_)),
+        "first VIB must allocate"
+    );
     let slot_id = claim1.slot_id().unwrap();
 
     for i in 0..15u64 {
@@ -210,11 +213,8 @@ fn global_orchestrator_does_not_change_claim_architecture() {
 
 #[test]
 fn ordered_refresh_cycle_stops_before_semantic_layers() {
-    let body_src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bin/body.rs"
-    ))
-    .expect("read body.rs");
+    let body_src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/body.rs"))
+        .expect("read body.rs");
     assert!(
         !body_src.contains("refresh_semantic_readiness"),
         "body.rs must not call refresh_semantic_readiness in main cycle"
@@ -263,8 +263,7 @@ fn observer_still_renders_snapshot_truth_only() {
     );
     for i in 0..N_OBJECT_SLOTS {
         assert!(
-            (data.global_attention.attention_shares[i] - ga_live.attention_shares[i]).abs()
-                < 1e-12,
+            (data.global_attention.attention_shares[i] - ga_live.attention_shares[i]).abs() < 1e-12,
             "snapshot attention_shares[{}] must match live viewport",
             i
         );

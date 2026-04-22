@@ -8,12 +8,8 @@ use std::sync::Arc;
 use bionic_v0::adapter::{ModalityAdapter, SyntheticPhotAdapter, SyntheticVibAdapter};
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::synthetic_vib::SyntheticVibSource;
-use bionic_v0::viewport::{
-    EventEvidence, SlotClaim, SpatialEvidence, Viewport,
-};
-use bionic_v0::{
-    CROSS_MODAL_WINDOW_US, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, SLOT_IDLE_US,
-};
+use bionic_v0::viewport::{EventEvidence, SlotClaim, SpatialEvidence, Viewport};
+use bionic_v0::{CROSS_MODAL_WINDOW_US, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, SLOT_IDLE_US};
 
 fn count_active_slots(vp: &Viewport) -> usize {
     (0..N_OBJECT_SLOTS)
@@ -25,9 +21,7 @@ fn joint_slot_indices(vp: &Viewport) -> Vec<usize> {
     (0..N_OBJECT_SLOTS)
         .filter(|&i| {
             let s = vp.read_slot(i).unwrap();
-            s.active
-                && (s.source_modality & MOD_VIB) != 0
-                && (s.source_modality & MOD_PHOT) != 0
+            s.active && (s.source_modality & MOD_VIB) != 0 && (s.source_modality & MOD_PHOT) != 0
         })
         .collect()
 }
@@ -51,7 +45,10 @@ fn claim_api_allocates_then_reuses_same_modality() {
     // Activate the slot so reuse rule can see it — the claim API only
     // allocates the slot with `source_modality = ev.modality_bit`. Subsequent
     // evidence within SLOT_IDLE_US should reuse it.
-    let ev2 = EventEvidence { event_t_us: t0 + 1_000, ..ev };
+    let ev2 = EventEvidence {
+        event_t_us: t0 + 1_000,
+        ..ev
+    };
     let second = vp.claim_slot_for_event(&ev2);
     match (first, second) {
         (SlotClaim::Allocated(a), SlotClaim::Reused(b)) => assert_eq!(a, b),
@@ -67,9 +64,7 @@ fn same_time_events_reuse_same_slot() {
     // clock in real life, so this test assumes the adapter scheduler fires
     // them at sub-window granularity.
     let mut phot = SyntheticPhotAdapter::new(1_000_000);
-    let mut vib = SyntheticVibAdapter::new(
-        SyntheticVibSource::new(1_000_000, 100_000, 30_000),
-    );
+    let mut vib = SyntheticVibAdapter::new(SyntheticVibSource::new(1_000_000, 100_000, 30_000));
 
     // Warm up both smoothed-energy integrators past their respective
     // thresholds. Step 16_666 us ≈ 60 Hz, matching the synthetic PHOT tick.
@@ -127,14 +122,21 @@ fn desynced_events_allocate_different_slots() {
     // PHOT event arrives AFTER the cross-modal window has elapsed but BEFORE
     // the slot would age out. Must allocate a new slot.
     let t_phot = t_vib + CROSS_MODAL_WINDOW_US + 10_000;
-    assert!(t_phot < t_vib + SLOT_IDLE_US, "test precondition: PHOT still inside SLOT_IDLE_US");
+    assert!(
+        t_phot < t_vib + SLOT_IDLE_US,
+        "test precondition: PHOT still inside SLOT_IDLE_US"
+    );
     let ev_phot = EventEvidence {
         modality_bit: MOD_PHOT,
         event_t_us: t_phot,
         event_energy: 0.4,
         surprise: 0.0,
         spatial: Some(SpatialEvidence {
-            pos_x: 0.5, pos_y: 0.5, span_x: 0.1, span_y: 0.1, precision: 0.5,
+            pos_x: 0.5,
+            pos_y: 0.5,
+            span_x: 0.1,
+            span_y: 0.1,
+            precision: 0.5,
         }),
         nomination_seq_hint: 1,
     };
@@ -176,7 +178,10 @@ fn stale_slot_not_reused_cross_modally() {
     // be reclaimed.
     let t_late = t_vib + SLOT_IDLE_US + 50_000;
     vp.sweep_slots(t_late);
-    assert!(!vp.read_slot(vib_slot).unwrap().active, "VIB slot should have been swept");
+    assert!(
+        !vp.read_slot(vib_slot).unwrap().active,
+        "VIB slot should have been swept"
+    );
 
     // PHOT event arrives now. Must allocate fresh — not recycle the old id
     // with mixed source_modality.
@@ -186,7 +191,11 @@ fn stale_slot_not_reused_cross_modally() {
         event_energy: 0.4,
         surprise: 0.0,
         spatial: Some(SpatialEvidence {
-            pos_x: 0.5, pos_y: 0.5, span_x: 0.1, span_y: 0.1, precision: 0.5,
+            pos_x: 0.5,
+            pos_y: 0.5,
+            span_x: 0.1,
+            span_y: 0.1,
+            precision: 0.5,
         }),
         nomination_seq_hint: 1,
     };
@@ -221,7 +230,11 @@ fn cross_modal_reuse_rejected_when_spatial_far_apart() {
         event_energy: 0.4,
         surprise: 0.0,
         spatial: Some(SpatialEvidence {
-            pos_x: 0.1, pos_y: 0.1, span_x: 0.05, span_y: 0.05, precision: 0.5,
+            pos_x: 0.1,
+            pos_y: 0.1,
+            span_x: 0.05,
+            span_y: 0.05,
+            precision: 0.5,
         }),
         nomination_seq_hint: 0,
     };
@@ -236,7 +249,11 @@ fn cross_modal_reuse_rejected_when_spatial_far_apart() {
         event_energy: 0.5,
         surprise: 0.0,
         spatial: Some(SpatialEvidence {
-            pos_x: 0.9, pos_y: 0.9, span_x: 0.05, span_y: 0.05, precision: 0.5,
+            pos_x: 0.9,
+            pos_y: 0.9,
+            span_x: 0.05,
+            span_y: 0.05,
+            precision: 0.5,
         }),
         nomination_seq_hint: 1,
     };
@@ -254,9 +271,7 @@ fn cross_modal_reuse_rejected_when_spatial_far_apart() {
 fn observer_sees_joint_slot_through_snapshot() {
     let vp = Arc::new(Viewport::new());
     let mut phot = SyntheticPhotAdapter::new(1_000_000);
-    let mut vib = SyntheticVibAdapter::new(
-        SyntheticVibSource::new(1_000_000, 100_000, 30_000),
-    );
+    let mut vib = SyntheticVibAdapter::new(SyntheticVibSource::new(1_000_000, 100_000, 30_000));
 
     for step in 0..30 {
         let t = 1_000_000 + (step as u64) * 16_666;

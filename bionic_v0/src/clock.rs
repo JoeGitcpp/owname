@@ -16,7 +16,10 @@ pub fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn spawn_master_clock(vp: Arc<Viewport>, stop: Arc<std::sync::atomic::AtomicBool>) -> JoinHandle<()> {
+pub fn spawn_master_clock(
+    vp: Arc<Viewport>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> JoinHandle<()> {
     let period = Duration::from_micros(1_000);
     thread::spawn(move || {
         let start_wall = now_us();
@@ -25,7 +28,10 @@ pub fn spawn_master_clock(vp: Arc<Viewport>, stop: Arc<std::sync::atomic::Atomic
         let mut next = t0 + period;
         while !stop.load(Ordering::Relaxed) {
             vp.master_tick.fetch_add(1, Ordering::Relaxed);
-            vp.clock_us.store(start_wall + t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+            vp.clock_us.store(
+                start_wall + t0.elapsed().as_micros() as u64,
+                Ordering::Relaxed,
+            );
             let now = Instant::now();
             if next > now {
                 thread::sleep(next - now);
@@ -35,7 +41,11 @@ pub fn spawn_master_clock(vp: Arc<Viewport>, stop: Arc<std::sync::atomic::Atomic
     })
 }
 
-pub fn spawn_ticker<F>(rate_hz: u32, stop: Arc<std::sync::atomic::AtomicBool>, mut f: F) -> JoinHandle<()>
+pub fn spawn_ticker<F>(
+    rate_hz: u32,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    mut f: F,
+) -> JoinHandle<()>
 where
     F: FnMut(u64) + Send + 'static,
 {

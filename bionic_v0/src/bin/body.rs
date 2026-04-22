@@ -3,16 +3,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bionic_v0::adapter::{
-    spawn_registry_driver, AdapterRegistry, RealPhotAdapter, VibAdapter,
-};
+use bionic_v0::action_consequence::tick_all_ingress_accumulation;
+use bionic_v0::adapter::{spawn_registry_driver, AdapterRegistry, RealPhotAdapter, VibAdapter};
 use bionic_v0::clock::{now_us, spawn_master_clock, spawn_ticker};
-use bionic_v0::phot_camera::{RealCameraFrameProvider, StubRealCameraFrameProvider};
 use bionic_v0::highlevel::HighLevelPredictor;
+use bionic_v0::phot_camera::{RealCameraFrameProvider, StubRealCameraFrameProvider};
 use bionic_v0::predictor::Ar2Predictor;
 use bionic_v0::snapshot::{write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::VIB_BANDS;
+use bionic_v0::{BINDING_REFRESH_HZ, PHOT_CONSEQUENCE_QUIESCENCE_US};
 
 // Serial global refresh cycle terminates at reasoning history + snapshot.
 // Per cleanup spec 2026-04-20, semantic-readiness and symbolizer are not part
@@ -23,6 +23,14 @@ fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u
     vp.refresh_global_relation_predictor(t);
     vp.refresh_global_reasoning(t);
     vp.refresh_global_reasoning_history(t);
+    vp.refresh_probe_law(t);
+    vp.tick_probe_output_from_law(t);
+    // Additional action-output triggers (Tasks 5-7 from body-side-write-trigger plan).
+    // Each reads independently-refreshed substrate state and fires events
+    // only when its engineering threshold is strictly exceeded.
+    vp.tick_surprise_trigger(t);
+    vp.tick_attention_trigger(t);
+    vp.tick_relation_instability_trigger(t);
     if write_snapshot(vp, paths).is_err() {
         vp.mark_snapshot_fail();
     }
@@ -30,7 +38,10 @@ fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let runtime_dir = args.get(1).cloned().unwrap_or_else(|| String::from("runtime"));
+    let runtime_dir = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| String::from("runtime"));
     let duration_secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let runtime_dir = PathBuf::from(runtime_dir);
@@ -72,9 +83,8 @@ fn main() {
 
     // Per-band AR-2 predictors, 100 Hz — purely consume viewport data, do not
     // own any input source, so they stay in body.rs.
-    let predictors: Arc<Mutex<Vec<Ar2Predictor>>> = Arc::new(Mutex::new(
-        (0..VIB_BANDS).map(Ar2Predictor::new).collect(),
-    ));
+    let predictors: Arc<Mutex<Vec<Ar2Predictor>>> =
+        Arc::new(Mutex::new((0..VIB_BANDS).map(Ar2Predictor::new).collect()));
     let vp_pred = vp.clone();
     let pred_ref = predictors.clone();
     let h_pred = spawn_ticker(100, stop.clone(), move |_| {
@@ -98,6 +108,21 @@ fn main() {
     let vp_health = vp.clone();
     let h_health = spawn_ticker(50, stop.clone(), move |_| {
         vp_health.update_health_state(now_us());
+    });
+
+    // Unified ingress accumulation ticker, 10 Hz.
+    // Closes quiescent consequence windows across all modalities and attempts
+    // auto-pairing for newly closed windows. Single authoritative path for
+    // quiescence-based window closure.
+    let vp_ingress = vp.clone();
+    let h_ingress = spawn_ticker(10, stop.clone(), move |_| {
+        tick_all_ingress_accumulation(&vp_ingress, now_us(), PHOT_CONSEQUENCE_QUIESCENCE_US);
+    });
+
+    // Binding maintenance refresh ticker, 5 Hz by default.
+    let vp_binding = vp.clone();
+    let h_binding = spawn_ticker(BINDING_REFRESH_HZ, stop.clone(), move |_| {
+        vp_binding.tick_binding_maintenance(now_us());
     });
 
     // Global orchestrator: attention → relations → snapshot (30 Hz).
@@ -127,6 +152,8 @@ fn main() {
     let _ = h_pred.join();
     let _ = h_hl.join();
     let _ = h_health.join();
+    let _ = h_ingress.join();
+    let _ = h_binding.join();
     let _ = h_orchestrator.join();
     let _ = h_master.join();
 

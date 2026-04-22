@@ -1,11 +1,11 @@
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::{VIB_BAND_CUTOFFS, VIB_BANDS};
+use crate::{VIB_BANDS, VIB_BAND_CUTOFFS};
 
 /// Splits audio into VIB_BANDS energy bands using 1st-order IIR LP filters.
 /// Sends [f64; VIB_BANDS] RMS measurements at ~100 Hz (10ms windows).
@@ -19,7 +19,10 @@ impl VibSource {
         fault: Arc<AtomicBool>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (rx, stream) = Self::try_new_parts(fault)?;
-        Ok(VibSource { rx, _stream: stream })
+        Ok(VibSource {
+            rx,
+            _stream: stream,
+        })
     }
 
     /// Build the mic pipeline and return `(receiver, stream)` so the caller
@@ -44,7 +47,14 @@ impl VibSource {
         let config: cpal::StreamConfig = supported.into();
 
         let stream = make_stream(
-            &device, &config, fmt, tx, fault, channels, sample_rate, mono_window,
+            &device,
+            &config,
+            fmt,
+            tx,
+            fault,
+            channels,
+            sample_rate,
+            mono_window,
         )?;
         stream.play()?;
         Ok((rx, stream))
@@ -92,10 +102,10 @@ impl BandFilter {
         self.lp[2] = a2 * x + (1.0 - a2) * self.lp[2];
 
         // Band signals: successive differences of LP outputs
-        let b0 = self.lp[0];              // 0–500 Hz
+        let b0 = self.lp[0]; // 0–500 Hz
         let b1 = self.lp[1] - self.lp[0]; // 500–2 kHz
         let b2 = self.lp[2] - self.lp[1]; // 2–5 kHz
-        let b3 = x - self.lp[2];          // 5 kHz+
+        let b3 = x - self.lp[2]; // 5 kHz+
 
         self.sum_sq[0] += b0 * b0;
         self.sum_sq[1] += b1 * b1;

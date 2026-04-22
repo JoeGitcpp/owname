@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bionic_v0::adapter::{ModalityAdapter, RealPhotAdapter};
 use bionic_v0::phot_camera::{
-    CameraFault, CameraFrame, CameraFrameProvider, StubRealCameraFrameProvider,
-    SyntheticCameraFrameProvider, SynthCamStep, CAM_PIX,
+    CameraFault, CameraFrame, CameraFrameProvider, StubRealCameraFrameProvider, SynthCamStep,
+    SyntheticCameraFrameProvider, CAM_PIX,
 };
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::{HealthState, Viewport};
@@ -25,8 +25,18 @@ fn phot_predictor_warmup_does_not_fake_confidence() {
     // 1 idle (warm-up diffing baseline) + 1 blob (first real event, warmup call 1)
     // + 1 blob (second event, warmup call 2; PHOT_PRED_WARMUP_MIN == 2)
     let mut script = vec![SynthCamStep::Idle];
-    script.push(SynthCamStep::Blob { cx: 0.5, cy: 0.5, r: 0.15, brightness: 0.95 });
-    script.push(SynthCamStep::Blob { cx: 0.5, cy: 0.5, r: 0.15, brightness: 0.95 });
+    script.push(SynthCamStep::Blob {
+        cx: 0.5,
+        cy: 0.5,
+        r: 0.15,
+        brightness: 0.95,
+    });
+    script.push(SynthCamStep::Blob {
+        cx: 0.5,
+        cy: 0.5,
+        r: 0.15,
+        brightness: 0.95,
+    });
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
     let mut adapter = RealPhotAdapter::new(provider);
 
@@ -64,7 +74,10 @@ fn phot_predictor_warmup_does_not_fake_confidence() {
             }
         }
     }
-    assert!(found_phot, "at least one PHOT slot must be active after blob frames");
+    assert!(
+        found_phot,
+        "at least one PHOT slot must be active after blob frames"
+    );
 }
 
 /// Stable visual pattern: alternating Idle/Blob frames create consistent,
@@ -78,7 +91,12 @@ fn phot_predictor_converges_on_stable_synthetic_motion() {
     let mut script = Vec::with_capacity(32);
     for _ in 0..16 {
         script.push(SynthCamStep::Idle);
-        script.push(SynthCamStep::Blob { cx: 0.6, cy: 0.4, r: 0.12, brightness: 0.90 });
+        script.push(SynthCamStep::Blob {
+            cx: 0.6,
+            cy: 0.4,
+            r: 0.12,
+            brightness: 0.90,
+        });
     }
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
     let mut adapter = RealPhotAdapter::new(provider);
@@ -103,7 +121,11 @@ fn phot_predictor_converges_on_stable_synthetic_motion() {
                 // After many consistent-motion frames, err should be small
                 // relative to observed (predictor has tracked the signal).
                 let max_err = phot.err.iter().map(|e| e.abs()).fold(0.0_f64, f64::max);
-                let max_obs = phot.observed.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                let max_obs = phot
+                    .observed
+                    .iter()
+                    .map(|v| v.abs())
+                    .fold(0.0_f64, f64::max);
                 if max_obs > 1e-6 {
                     assert!(
                         max_err < max_obs * 0.5,
@@ -115,7 +137,10 @@ fn phot_predictor_converges_on_stable_synthetic_motion() {
             }
         }
     }
-    assert!(found, "at least one PHOT slot must be active with non-zero predicted");
+    assert!(
+        found,
+        "at least one PHOT slot must be active with non-zero predicted"
+    );
 }
 
 /// Motion change: when a blob moves to a new position, MotionExtract changes
@@ -126,11 +151,21 @@ fn phot_predictor_err_spikes_on_motion_change() {
     // Phase 1: stable blob at left.
     let mut script = vec![SynthCamStep::Idle; 2];
     for _ in 0..20 {
-        script.push(SynthCamStep::Blob { cx: 0.2, cy: 0.5, r: 0.10, brightness: 0.80 });
+        script.push(SynthCamStep::Blob {
+            cx: 0.2,
+            cy: 0.5,
+            r: 0.10,
+            brightness: 0.80,
+        });
     }
     // Phase 2: suddenly jump blob to right (changes MotionExtract bands dramatically).
     for _ in 0..5 {
-        script.push(SynthCamStep::Blob { cx: 0.8, cy: 0.5, r: 0.10, brightness: 0.80 });
+        script.push(SynthCamStep::Blob {
+            cx: 0.8,
+            cy: 0.5,
+            r: 0.10,
+            brightness: 0.80,
+        });
     }
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
     let mut adapter = RealPhotAdapter::new(provider);
@@ -146,7 +181,9 @@ fn phot_predictor_err_spikes_on_motion_change() {
         if s.active && (s.source_modality & MOD_PHOT) != 0 {
             if let Some(phot) = s.phot.as_ref() {
                 let m = phot.err.iter().map(|e| e.abs()).fold(0.0_f64, f64::max);
-                if m > stable_err_max { stable_err_max = m; }
+                if m > stable_err_max {
+                    stable_err_max = m;
+                }
             }
         }
     }
@@ -160,7 +197,9 @@ fn phot_predictor_err_spikes_on_motion_change() {
         if s.active && (s.source_modality & MOD_PHOT) != 0 {
             if let Some(phot) = s.phot.as_ref() {
                 let m = phot.err.iter().map(|e| e.abs()).fold(0.0_f64, f64::max);
-                if m > spike_err_max { spike_err_max = m; }
+                if m > spike_err_max {
+                    spike_err_max = m;
+                }
             }
         }
     }
@@ -188,7 +227,12 @@ fn snapshot_roundtrip_preserves_phot_prediction_fields() {
     let mut script = Vec::with_capacity(12);
     for _ in 0..6 {
         script.push(SynthCamStep::Idle);
-        script.push(SynthCamStep::Blob { cx: 0.5, cy: 0.5, r: 0.12, brightness: 0.90 });
+        script.push(SynthCamStep::Blob {
+            cx: 0.5,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.90,
+        });
     }
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
     let mut adapter = RealPhotAdapter::new(provider);
@@ -234,7 +278,10 @@ fn snapshot_roundtrip_preserves_phot_prediction_fields() {
 fn real_phot_health_startup_failure_is_visible() {
     let vp = Arc::new(Viewport::new());
     let provider = Box::new(StubRealCameraFrameProvider::try_new());
-    assert!(!provider.is_healthy(), "stub real provider must start faulted");
+    assert!(
+        !provider.is_healthy(),
+        "stub real provider must start faulted"
+    );
 
     let mut adapter = RealPhotAdapter::new(provider);
 
@@ -276,7 +323,10 @@ fn real_phot_idle_frame_does_not_emit_event() {
     );
 
     let amb = vp.read_ambient();
-    assert!(!amb.phot.candidate_flag, "idle frames must not flip the candidate flag");
+    assert!(
+        !amb.phot.candidate_flag,
+        "idle frames must not flip the candidate flag"
+    );
 
     for i in 0..N_OBJECT_SLOTS {
         let s = vp.read_slot(i).unwrap();
@@ -329,7 +379,12 @@ fn real_phot_event_writes_slot_phot_and_spatial() {
     // the only tick with real motion, so the slot's last write reflects an
     // actual event (not a tail of static-scene zero-motion overwrites).
     let mut script = vec![SynthCamStep::Idle; 3];
-    script.push(SynthCamStep::Blob { cx: 0.25, cy: 0.60, r: 0.12, brightness: 0.9 });
+    script.push(SynthCamStep::Blob {
+        cx: 0.25,
+        cy: 0.60,
+        r: 0.12,
+        brightness: 0.9,
+    });
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
     let mut adapter = RealPhotAdapter::new(provider);
 
@@ -354,15 +409,24 @@ fn real_phot_event_writes_slot_phot_and_spatial() {
                 }
             }
             if let Some(sp) = s.spatial {
-                assert!(sp.valid, "spatial target must be valid after a motion frame");
+                assert!(
+                    sp.valid,
+                    "spatial target must be valid after a motion frame"
+                );
                 assert!(sp.pos_x >= 0.0 && sp.pos_x <= 1.0);
                 assert!(sp.pos_y >= 0.0 && sp.pos_y <= 1.0);
                 saw_spatial = true;
             }
         }
     }
-    assert!(saw_phot_signal, "slot.phot bands must carry signal on a fresh event");
-    assert!(saw_spatial, "slot.spatial must be populated by real-camera motion");
+    assert!(
+        saw_phot_signal,
+        "slot.phot bands must carry signal on a fresh event"
+    );
+    assert!(
+        saw_spatial,
+        "slot.spatial must be populated by real-camera motion"
+    );
 }
 
 /// A runtime error mid-stream must flip phot_health to FAULT and keep it.
@@ -372,7 +436,12 @@ fn real_phot_runtime_error_transitions_to_fault() {
     let script = vec![
         SynthCamStep::Idle,
         SynthCamStep::Idle,
-        SynthCamStep::Blob { cx: 0.5, cy: 0.5, r: 0.1, brightness: 0.9 },
+        SynthCamStep::Blob {
+            cx: 0.5,
+            cy: 0.5,
+            r: 0.1,
+            brightness: 0.9,
+        },
         SynthCamStep::RuntimeError,
         SynthCamStep::Idle,
     ];
@@ -433,17 +502,22 @@ fn observer_sees_phot_health_and_claim_debug() {
 #[test]
 fn camera_fault_values_are_publicly_usable() {
     let mut p = StubRealCameraFrameProvider::try_new();
-    assert!(matches!(
-        p.try_recv(),
-        Err(CameraFault::StartupFailed)
-    ));
+    assert!(matches!(p.try_recv(), Err(CameraFault::StartupFailed)));
 }
 
 /// Sanity: synthetic provider output has the expected grid shape.
 #[test]
 fn synthetic_camera_frame_shape_is_fixed() {
     let mut p = SyntheticCameraFrameProvider::new(
-        vec![SynthCamStep::Idle, SynthCamStep::Blob { cx: 0.5, cy: 0.5, r: 0.1, brightness: 0.5 }],
+        vec![
+            SynthCamStep::Idle,
+            SynthCamStep::Blob {
+                cx: 0.5,
+                cy: 0.5,
+                r: 0.1,
+                brightness: 0.5,
+            },
+        ],
         0,
         33_333,
     );
@@ -513,7 +587,11 @@ fn phot_quiet_not_stale_when_frames_arrive_but_still() {
         adapter.tick(&vp, t);
     }
     let h = vp.read_phot_health();
-    assert_ne!(h, HealthState::Stale, "idle frames (arriving) must not produce STALE");
+    assert_ne!(
+        h,
+        HealthState::Stale,
+        "idle frames (arriving) must not produce STALE"
+    );
     assert_ne!(h, HealthState::Fault, "idle frames must not produce FAULT");
 }
 
@@ -642,15 +720,31 @@ fn phot_timing_fields_written_to_viewport() {
     let t0 = 2_000_000u64;
     adapter.tick(&vp, t0);
     // After first tick with a healthy provider: started is set.
-    assert_eq!(vp.read_phot_started_t_us(), t0, "started_t_us must equal first-tick time");
+    assert_eq!(
+        vp.read_phot_started_t_us(),
+        t0,
+        "started_t_us must equal first-tick time"
+    );
     // First idle frame is warm-up (no diff yet): last_frame should be set.
-    assert_eq!(vp.read_phot_last_frame_t_us(), t0, "last_frame_t_us must update on frame receipt");
+    assert_eq!(
+        vp.read_phot_last_frame_t_us(),
+        t0,
+        "last_frame_t_us must update on frame receipt"
+    );
 
     let t1 = t0 + 33_333;
     adapter.tick(&vp, t1);
-    assert_eq!(vp.read_phot_last_frame_t_us(), t1, "last_frame_t_us advances with each frame");
+    assert_eq!(
+        vp.read_phot_last_frame_t_us(),
+        t1,
+        "last_frame_t_us advances with each frame"
+    );
     // started_t_us must remain unchanged.
-    assert_eq!(vp.read_phot_started_t_us(), t0, "started_t_us must not change after first tick");
+    assert_eq!(
+        vp.read_phot_started_t_us(),
+        t0,
+        "started_t_us must not change after first tick"
+    );
 }
 
 /// Snapshot v13 must carry phot_started_t_us and phot_last_frame_t_us.
@@ -681,8 +775,14 @@ fn snapshot_v13_carries_phot_timing_fields() {
     write_snapshot(&vp, &paths).unwrap();
 
     let snap = read_snapshot(&paths.final_path).unwrap();
-    assert_eq!(snap.phot_started_t_us, base_t, "snapshot must carry phot_started_t_us");
-    assert!(snap.phot_last_frame_t_us >= base_t, "snapshot must carry phot_last_frame_t_us");
+    assert_eq!(
+        snap.phot_started_t_us, base_t,
+        "snapshot must carry phot_started_t_us"
+    );
+    assert!(
+        snap.phot_last_frame_t_us >= base_t,
+        "snapshot must carry phot_last_frame_t_us"
+    );
     // Confirm we are reading the right version.
     let _ = SNAPSHOT_VERSION; // v13
 }
@@ -701,7 +801,15 @@ fn phot_full_state_transition_regression() {
     //   RuntimeError at step 25 (→ FAULT)
     let mut script = vec![SynthCamStep::NoFrame];
     script.extend(vec![SynthCamStep::Idle; 2]);
-    script.extend(vec![SynthCamStep::Blob { cx: 0.5, cy: 0.5, r: 0.15, brightness: 0.95 }; 6]);
+    script.extend(vec![
+        SynthCamStep::Blob {
+            cx: 0.5,
+            cy: 0.5,
+            r: 0.15,
+            brightness: 0.95
+        };
+        6
+    ]);
     script.extend(vec![SynthCamStep::NoFrame; 16]);
     script.push(SynthCamStep::RuntimeError);
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
@@ -711,32 +819,52 @@ fn phot_full_state_transition_regression() {
 
     // Step 0: started, NoFrame, within stale window → not STALE yet.
     adapter.tick(&vp, base_t);
-    assert_ne!(vp.read_phot_health(), HealthState::Stale, "step 0: too early for STALE");
+    assert_ne!(
+        vp.read_phot_health(),
+        HealthState::Stale,
+        "step 0: too early for STALE"
+    );
 
     // Steps 1-2: idle frames → QUIET.
     adapter.tick(&vp, base_t + 33_333);
     adapter.tick(&vp, base_t + 66_666);
-    assert_eq!(vp.read_phot_health(), HealthState::Quiet, "steps 1-2: idle frames → QUIET");
+    assert_eq!(
+        vp.read_phot_health(),
+        HealthState::Quiet,
+        "steps 1-2: idle frames → QUIET"
+    );
 
     // Steps 3-8: blob frames → OK (smoothing may take a few ticks).
     for s in 3..9 {
         adapter.tick(&vp, base_t + s * 33_333);
     }
-    assert_eq!(vp.read_phot_health(), HealthState::Ok, "steps 3-8: motion frames → OK");
+    assert_eq!(
+        vp.read_phot_health(),
+        HealthState::Ok,
+        "steps 3-8: motion frames → OK"
+    );
 
     // Steps 9 onward: NoFrame; last frame was at step 8.
     // After PHOT_STALE_WINDOW_US from step 8 timestamp → STALE.
     let last_frame_t = base_t + 8 * 33_333;
     let stale_t = last_frame_t + PHOT_STALE_WINDOW_US + 1;
     adapter.tick(&vp, stale_t);
-    assert_eq!(vp.read_phot_health(), HealthState::Stale, "NoFrame timeout → STALE");
+    assert_eq!(
+        vp.read_phot_health(),
+        HealthState::Stale,
+        "NoFrame timeout → STALE"
+    );
 
     // RuntimeError at script step 25 → FAULT.
     // Drive enough ticks to exhaust the NoFrame steps and hit the error.
     for s in 0..20 {
         adapter.tick(&vp, stale_t + (s + 1) * 33_333);
     }
-    assert_eq!(vp.read_phot_health(), HealthState::Fault, "runtime error → FAULT");
+    assert_eq!(
+        vp.read_phot_health(),
+        HealthState::Fault,
+        "runtime error → FAULT"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +875,7 @@ fn phot_full_state_transition_regression() {
 /// merged centroid.
 #[test]
 fn multi_event_extraction_two_blobs_yield_two_regions() {
-    use bionic_v0::phot_camera::{CAM_W, CAM_H, CAM_PIX};
+    use bionic_v0::phot_camera::{CAM_H, CAM_PIX, CAM_W};
     use bionic_v0::PHOT_MAX_EVENTS_PER_FRAME;
 
     // Build a synthetic motion map manually: two bright separated regions.
@@ -761,7 +889,7 @@ fn multi_event_extraction_two_blobs_yield_two_regions() {
         for x in 0..CAM_W {
             let dx = x as isize - lcx as isize;
             let dy = y as isize - lcy as isize;
-            if dx*dx + dy*dy <= (r_px*r_px) as isize {
+            if dx * dx + dy * dy <= (r_px * r_px) as isize {
                 motion[y * CAM_W + x] = 0.8;
             }
         }
@@ -773,7 +901,7 @@ fn multi_event_extraction_two_blobs_yield_two_regions() {
         for x in 0..CAM_W {
             let dx = x as isize - rcx as isize;
             let dy = y as isize - rcy as isize;
-            if dx*dx + dy*dy <= (r_px*r_px) as isize {
+            if dx * dx + dy * dy <= (r_px * r_px) as isize {
                 motion[y * CAM_W + x] = 0.8;
             }
         }
@@ -782,15 +910,26 @@ fn multi_event_extraction_two_blobs_yield_two_regions() {
     // Use the public extract_regions helper that Chunk 1 must add.
     let regions = bionic_v0::phot_camera::extract_regions_from_motion(&motion, CAM_W, CAM_H);
 
-    assert_eq!(regions.len(), 2, "two separated blobs must yield exactly 2 regions; got {}", regions.len());
+    assert_eq!(
+        regions.len(),
+        2,
+        "two separated blobs must yield exactly 2 regions; got {}",
+        regions.len()
+    );
     // Higher energy first.
-    assert!(regions[0].event_energy >= regions[1].event_energy,
-        "regions must be sorted energy-descending");
+    assert!(
+        regions[0].event_energy >= regions[1].event_energy,
+        "regions must be sorted energy-descending"
+    );
     // The two blob centroids must be spatially separated.
     let dx = regions[0].pos_x - regions[1].pos_x;
     let dy = regions[0].pos_y - regions[1].pos_y;
-    let dist = (dx*dx + dy*dy).sqrt();
-    assert!(dist > 0.2, "two blobs must be spatially separated in normalised coords; dist={}", dist);
+    let dist = (dx * dx + dy * dy).sqrt();
+    assert!(
+        dist > 0.2,
+        "two blobs must be spatially separated in normalised coords; dist={}",
+        dist
+    );
     // Capped at PHOT_MAX_EVENTS_PER_FRAME.
     assert!(regions.len() <= PHOT_MAX_EVENTS_PER_FRAME);
 }
@@ -799,7 +938,7 @@ fn multi_event_extraction_two_blobs_yield_two_regions() {
 /// ascending, then pos_y ascending.
 #[test]
 fn multi_event_extraction_regions_sorted_deterministically() {
-    use bionic_v0::phot_camera::{CAM_W, CAM_H, CAM_PIX};
+    use bionic_v0::phot_camera::{CAM_H, CAM_PIX, CAM_W};
 
     let mut motion = vec![0.0f64; CAM_PIX];
     let r_px = 4usize;
@@ -810,7 +949,7 @@ fn multi_event_extraction_regions_sorted_deterministically() {
         for x in 0..CAM_W {
             let dx = x as isize - rcx as isize;
             let dy = y as isize - rcy as isize;
-            if dx*dx + dy*dy <= (r_px*r_px) as isize {
+            if dx * dx + dy * dy <= (r_px * r_px) as isize {
                 motion[y * CAM_W + x] = 0.9;
             }
         }
@@ -821,7 +960,7 @@ fn multi_event_extraction_regions_sorted_deterministically() {
         for x in 0..CAM_W {
             let dx = x as isize - lcx as isize;
             let dy = y as isize - lcy as isize;
-            if dx*dx + dy*dy <= (r_px*r_px) as isize {
+            if dx * dx + dy * dy <= (r_px * r_px) as isize {
                 motion[y * CAM_W + x] = 0.5;
             }
         }
@@ -830,14 +969,16 @@ fn multi_event_extraction_regions_sorted_deterministically() {
     let regions = bionic_v0::phot_camera::extract_regions_from_motion(&motion, CAM_W, CAM_H);
     assert!(regions.len() >= 2, "expected at least 2 regions");
     // Stronger (right) blob comes first.
-    assert!(regions[0].event_energy > regions[1].event_energy,
-        "higher-energy region must come first");
+    assert!(
+        regions[0].event_energy > regions[1].event_energy,
+        "higher-energy region must come first"
+    );
 }
 
 /// A single region frame still works — result has exactly one item.
 #[test]
 fn multi_event_extraction_single_blob_still_works() {
-    use bionic_v0::phot_camera::{CAM_W, CAM_H, CAM_PIX};
+    use bionic_v0::phot_camera::{CAM_H, CAM_PIX, CAM_W};
 
     let mut motion = vec![0.0f64; CAM_PIX];
     let (cx, cy, r_px) = (32usize, 24usize, 6usize);
@@ -845,19 +986,23 @@ fn multi_event_extraction_single_blob_still_works() {
         for x in 0..CAM_W {
             let dx = x as isize - cx as isize;
             let dy = y as isize - cy as isize;
-            if dx*dx + dy*dy <= (r_px*r_px) as isize {
+            if dx * dx + dy * dy <= (r_px * r_px) as isize {
                 motion[y * CAM_W + x] = 0.8;
             }
         }
     }
     let regions = bionic_v0::phot_camera::extract_regions_from_motion(&motion, CAM_W, CAM_H);
-    assert_eq!(regions.len(), 1, "single strong blob must yield exactly 1 region");
+    assert_eq!(
+        regions.len(),
+        1,
+        "single strong blob must yield exactly 1 region"
+    );
 }
 
 /// A frame with no motion yields an empty Vec from multi-region extraction.
 #[test]
 fn multi_event_extraction_empty_motion_yields_empty_vec() {
-    use bionic_v0::phot_camera::{CAM_W, CAM_H, CAM_PIX};
+    use bionic_v0::phot_camera::{CAM_H, CAM_PIX, CAM_W};
 
     let motion = vec![0.0f64; CAM_PIX];
     let regions = bionic_v0::phot_camera::extract_regions_from_motion(&motion, CAM_W, CAM_H);
@@ -873,7 +1018,7 @@ fn multi_event_extraction_empty_motion_yields_empty_vec() {
 /// two motion regions.
 #[test]
 fn multi_event_claim_two_blobs_fill_two_slots() {
-    use bionic_v0::phot_camera::{CAM_W, CAM_H, CameraFrame, CameraFault, CameraFrameProvider};
+    use bionic_v0::phot_camera::{CameraFault, CameraFrame, CameraFrameProvider, CAM_H, CAM_W};
 
     // Custom provider: first emit an all-idle frame (to seed the extractor),
     // then emit a two-blob frame. After that return Ok(None).
@@ -881,20 +1026,26 @@ fn multi_event_claim_two_blobs_fill_two_slots() {
         step: usize,
     }
     impl CameraFrameProvider for TwoBlobProvider {
-        fn is_healthy(&self) -> bool { true }
+        fn is_healthy(&self) -> bool {
+            true
+        }
         fn try_recv(&mut self) -> Result<Option<CameraFrame>, CameraFault> {
             self.step += 1;
             let t = (self.step as u64) * 33_333;
             if self.step == 1 {
                 // Idle seed frame
                 let mut f = CameraFrame::zeros(t);
-                for v in f.luma.iter_mut() { *v = 0.02; }
+                for v in f.luma.iter_mut() {
+                    *v = 0.02;
+                }
                 return Ok(Some(f));
             }
             if self.step == 2 {
                 // Two-blob frame: left blob and right blob, both bright
                 let mut f = CameraFrame::zeros(t);
-                for v in f.luma.iter_mut() { *v = 0.02; }
+                for v in f.luma.iter_mut() {
+                    *v = 0.02;
+                }
                 let r_px = 5usize;
                 // Left blob
                 let (lcx, lcy) = (10usize, 20usize);
@@ -902,7 +1053,7 @@ fn multi_event_claim_two_blobs_fill_two_slots() {
                     for x in 0..CAM_W {
                         let dx = x as isize - lcx as isize;
                         let dy = y as isize - lcy as isize;
-                        if dx*dx + dy*dy <= (r_px*r_px) as isize {
+                        if dx * dx + dy * dy <= (r_px * r_px) as isize {
                             f.luma[y * CAM_W + x] = 0.9;
                         }
                     }
@@ -913,7 +1064,7 @@ fn multi_event_claim_two_blobs_fill_two_slots() {
                     for x in 0..CAM_W {
                         let dx = x as isize - rcx as isize;
                         let dy = y as isize - rcy as isize;
-                        if dx*dx + dy*dy <= (r_px*r_px) as isize {
+                        if dx * dx + dy * dy <= (r_px * r_px) as isize {
                             f.luma[y * CAM_W + x] = 0.9;
                         }
                     }
@@ -929,8 +1080,8 @@ fn multi_event_claim_two_blobs_fill_two_slots() {
     let mut adapter = bionic_v0::adapter::RealPhotAdapter::new(provider);
 
     let base_t = 1_000_000u64;
-    adapter.tick(&vp, base_t);             // seed idle
-    adapter.tick(&vp, base_t + 33_333);   // two-blob motion frame
+    adapter.tick(&vp, base_t); // seed idle
+    adapter.tick(&vp, base_t + 33_333); // two-blob motion frame
 
     // Count active PHOT slots.
     let mut phot_slots = 0;
@@ -951,22 +1102,30 @@ fn multi_event_claim_two_blobs_fill_two_slots() {
 /// spatial positions in slot.spatial).
 #[test]
 fn multi_event_claim_two_far_blobs_in_different_slots() {
-    use bionic_v0::phot_camera::{CAM_W, CAM_H, CameraFrame, CameraFault, CameraFrameProvider};
+    use bionic_v0::phot_camera::{CameraFault, CameraFrame, CameraFrameProvider, CAM_H, CAM_W};
 
-    struct TwoBlobProvider2 { step: usize }
+    struct TwoBlobProvider2 {
+        step: usize,
+    }
     impl CameraFrameProvider for TwoBlobProvider2 {
-        fn is_healthy(&self) -> bool { true }
+        fn is_healthy(&self) -> bool {
+            true
+        }
         fn try_recv(&mut self) -> Result<Option<CameraFrame>, CameraFault> {
             self.step += 1;
             let t = (self.step as u64) * 33_333;
             if self.step == 1 {
                 let mut f = CameraFrame::zeros(t);
-                for v in f.luma.iter_mut() { *v = 0.02; }
+                for v in f.luma.iter_mut() {
+                    *v = 0.02;
+                }
                 return Ok(Some(f));
             }
             if self.step == 2 {
                 let mut f = CameraFrame::zeros(t);
-                for v in f.luma.iter_mut() { *v = 0.02; }
+                for v in f.luma.iter_mut() {
+                    *v = 0.02;
+                }
                 let r_px = 5usize;
                 let (lcx, lcy) = (8usize, 8usize);
                 let (rcx, rcy) = (56usize, 40usize);
@@ -974,12 +1133,12 @@ fn multi_event_claim_two_far_blobs_in_different_slots() {
                     for x in 0..CAM_W {
                         let dx = x as isize - lcx as isize;
                         let dy = y as isize - lcy as isize;
-                        if dx*dx + dy*dy <= (r_px*r_px) as isize {
+                        if dx * dx + dy * dy <= (r_px * r_px) as isize {
                             f.luma[y * CAM_W + x] = 0.85;
                         }
                         let dx2 = x as isize - rcx as isize;
                         let dy2 = y as isize - rcy as isize;
-                        if dx2*dx2 + dy2*dy2 <= (r_px*r_px) as isize {
+                        if dx2 * dx2 + dy2 * dy2 <= (r_px * r_px) as isize {
                             f.luma[y * CAM_W + x] = 0.85;
                         }
                     }
@@ -1010,14 +1169,20 @@ fn multi_event_claim_two_far_blobs_in_different_slots() {
             }
         }
     }
-    assert!(positions.len() >= 2,
-        "two far-apart blobs must produce at least 2 slots with spatial; got {}", positions.len());
+    assert!(
+        positions.len() >= 2,
+        "two far-apart blobs must produce at least 2 slots with spatial; got {}",
+        positions.len()
+    );
     // The two positions must be sufficiently different.
     let dx = positions[0].0 - positions[1].0;
     let dy = positions[0].1 - positions[1].1;
-    let dist = (dx*dx + dy*dy).sqrt();
-    assert!(dist > 0.2,
-        "slots from far-apart blobs should have different spatial positions; dist={}", dist);
+    let dist = (dx * dx + dy * dy).sqrt();
+    assert!(
+        dist > 0.2,
+        "slots from far-apart blobs should have different spatial positions; dist={}",
+        dist
+    );
 }
 
 /// Single-event backward compatibility: a single blob still produces exactly
@@ -1035,11 +1200,17 @@ fn multi_event_claim_single_blob_backward_compat() {
     for step in 0..15u64 {
         adapter.tick(&vp, 1_000_000 + step * 33_333);
     }
-    assert_eq!(vp.read_phot_health(), HealthState::Ok,
-        "single-blob path must still produce phot_health=OK");
+    assert_eq!(
+        vp.read_phot_health(),
+        HealthState::Ok,
+        "single-blob path must still produce phot_health=OK"
+    );
     let d = vp.read_last_claim_debug();
-    assert_eq!(d.modality_bit, bionic_v0::MOD_PHOT,
-        "last claim must be for PHOT");
+    assert_eq!(
+        d.modality_bit,
+        bionic_v0::MOD_PHOT,
+        "last claim must be for PHOT"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,7 +1221,7 @@ fn multi_event_claim_single_blob_backward_compat() {
 /// two active PHOT slots through the full adapter pipeline.
 #[test]
 fn synthetic_multi_blob_two_blobs_produce_two_slots() {
-    use bionic_v0::phot_camera::{SyntheticCameraFrameProvider, SynthCamStep};
+    use bionic_v0::phot_camera::{SynthCamStep, SyntheticCameraFrameProvider};
     use bionic_v0::viewport::Viewport;
 
     let vp = std::sync::Arc::new(Viewport::new());
@@ -1058,8 +1229,18 @@ fn synthetic_multi_blob_two_blobs_produce_two_slots() {
     let script = vec![
         SynthCamStep::Idle,
         SynthCamStep::MultiBlob(vec![
-            bionic_v0::phot_camera::BlobSpec { cx: 0.15, cy: 0.5, r: 0.12, brightness: 0.9 },
-            bionic_v0::phot_camera::BlobSpec { cx: 0.85, cy: 0.5, r: 0.12, brightness: 0.9 },
+            bionic_v0::phot_camera::BlobSpec {
+                cx: 0.15,
+                cy: 0.5,
+                r: 0.12,
+                brightness: 0.9,
+            },
+            bionic_v0::phot_camera::BlobSpec {
+                cx: 0.85,
+                cy: 0.5,
+                r: 0.12,
+                brightness: 0.9,
+            },
         ]),
     ];
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
@@ -1075,15 +1256,18 @@ fn synthetic_multi_blob_two_blobs_produce_two_slots() {
             phot_slots += 1;
         }
     }
-    assert!(phot_slots >= 2,
-        "two-blob MultiBlob frame must produce at least 2 PHOT slots; got {}", phot_slots);
+    assert!(
+        phot_slots >= 2,
+        "two-blob MultiBlob frame must produce at least 2 PHOT slots; got {}",
+        phot_slots
+    );
 }
 
 /// Three blobs where one is below PHOT_REGION_MIN_PIXELS must yield exactly
 /// two active slots (the weak blob filtered out).
 #[test]
 fn synthetic_multi_blob_weak_third_blob_filtered() {
-    use bionic_v0::phot_camera::{SyntheticCameraFrameProvider, SynthCamStep, BlobSpec};
+    use bionic_v0::phot_camera::{BlobSpec, SynthCamStep, SyntheticCameraFrameProvider};
     use bionic_v0::viewport::Viewport;
 
     let vp = std::sync::Arc::new(Viewport::new());
@@ -1091,9 +1275,24 @@ fn synthetic_multi_blob_weak_third_blob_filtered() {
     let script = vec![
         SynthCamStep::Idle,
         SynthCamStep::MultiBlob(vec![
-            BlobSpec { cx: 0.15, cy: 0.3, r: 0.12, brightness: 0.9 },
-            BlobSpec { cx: 0.85, cy: 0.7, r: 0.12, brightness: 0.9 },
-            BlobSpec { cx: 0.5,  cy: 0.5, r: 0.01, brightness: 0.06 },  // tiny and dim
+            BlobSpec {
+                cx: 0.15,
+                cy: 0.3,
+                r: 0.12,
+                brightness: 0.9,
+            },
+            BlobSpec {
+                cx: 0.85,
+                cy: 0.7,
+                r: 0.12,
+                brightness: 0.9,
+            },
+            BlobSpec {
+                cx: 0.5,
+                cy: 0.5,
+                r: 0.01,
+                brightness: 0.06,
+            }, // tiny and dim
         ]),
     ];
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
@@ -1118,7 +1317,7 @@ fn synthetic_multi_blob_weak_third_blob_filtered() {
 /// deterministic across repeated runs.
 #[test]
 fn synthetic_multi_blob_deterministic_ordering() {
-    use bionic_v0::phot_camera::{SyntheticCameraFrameProvider, SynthCamStep, BlobSpec};
+    use bionic_v0::phot_camera::{BlobSpec, SynthCamStep, SyntheticCameraFrameProvider};
     use bionic_v0::viewport::Viewport;
 
     // Run the same scenario twice and check slot positions are consistent.
@@ -1127,8 +1326,18 @@ fn synthetic_multi_blob_deterministic_ordering() {
         let script = vec![
             SynthCamStep::Idle,
             SynthCamStep::MultiBlob(vec![
-                BlobSpec { cx: 0.25, cy: 0.5, r: 0.10, brightness: 0.8 },
-                BlobSpec { cx: 0.75, cy: 0.5, r: 0.10, brightness: 0.8 },
+                BlobSpec {
+                    cx: 0.25,
+                    cy: 0.5,
+                    r: 0.10,
+                    brightness: 0.8,
+                },
+                BlobSpec {
+                    cx: 0.75,
+                    cy: 0.5,
+                    r: 0.10,
+                    brightness: 0.8,
+                },
             ]),
         ];
         let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
@@ -1139,7 +1348,11 @@ fn synthetic_multi_blob_deterministic_ordering() {
         for i in 0..bionic_v0::N_OBJECT_SLOTS {
             let s = vp.read_slot(i).unwrap();
             if s.active && (s.source_modality & bionic_v0::MOD_PHOT) != 0 {
-                if let Some(sp) = s.spatial { if sp.valid { positions.push((sp.pos_x, sp.pos_y)); } }
+                if let Some(sp) = s.spatial {
+                    if sp.valid {
+                        positions.push((sp.pos_x, sp.pos_y));
+                    }
+                }
             }
         }
         positions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -1148,13 +1361,21 @@ fn synthetic_multi_blob_deterministic_ordering() {
 
     let run1 = make_vp_and_run();
     let run2 = make_vp_and_run();
-    assert_eq!(run1.len(), run2.len(), "two runs must yield same number of slots");
+    assert_eq!(
+        run1.len(),
+        run2.len(),
+        "two runs must yield same number of slots"
+    );
     assert!(run1.len() >= 2, "two blobs must yield at least 2 slots");
     for (p1, p2) in run1.iter().zip(run2.iter()) {
         let dx = p1.0 - p2.0;
         let dy = p1.1 - p2.1;
-        assert!((dx*dx + dy*dy).sqrt() < 0.01,
-            "slot positions must be identical across runs: {:?} vs {:?}", p1, p2);
+        assert!(
+            (dx * dx + dy * dy).sqrt() < 0.01,
+            "slot positions must be identical across runs: {:?} vs {:?}",
+            p1,
+            p2
+        );
     }
 }
 
@@ -1167,7 +1388,7 @@ fn synthetic_multi_blob_deterministic_ordering() {
 /// PHOT slots from one frame.
 #[test]
 fn snapshot_carries_multiple_phot_slots_after_multi_blob() {
-    use bionic_v0::phot_camera::{SyntheticCameraFrameProvider, SynthCamStep, BlobSpec};
+    use bionic_v0::phot_camera::{BlobSpec, SynthCamStep, SyntheticCameraFrameProvider};
     use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
     use bionic_v0::viewport::Viewport;
 
@@ -1175,8 +1396,18 @@ fn snapshot_carries_multiple_phot_slots_after_multi_blob() {
     let script = vec![
         SynthCamStep::Idle,
         SynthCamStep::MultiBlob(vec![
-            BlobSpec { cx: 0.15, cy: 0.5, r: 0.12, brightness: 0.9 },
-            BlobSpec { cx: 0.85, cy: 0.5, r: 0.12, brightness: 0.9 },
+            BlobSpec {
+                cx: 0.15,
+                cy: 0.5,
+                r: 0.12,
+                brightness: 0.9,
+            },
+            BlobSpec {
+                cx: 0.85,
+                cy: 0.5,
+                r: 0.12,
+                brightness: 0.9,
+            },
         ]),
     ];
     let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
@@ -1198,14 +1429,23 @@ fn snapshot_carries_multiple_phot_slots_after_multi_blob() {
     let snap = read_snapshot(&paths.final_path).unwrap();
 
     // Count active PHOT slots in the snapshot.
-    let phot_count = snap.slots.iter()
+    let phot_count = snap
+        .slots
+        .iter()
         .filter(|s| s.active && (s.source_modality & bionic_v0::MOD_PHOT) != 0)
         .count();
-    assert!(phot_count >= 2,
-        "snapshot must carry at least 2 active PHOT slots after multi-blob frame; got {}", phot_count);
+    assert!(
+        phot_count >= 2,
+        "snapshot must carry at least 2 active PHOT slots after multi-blob frame; got {}",
+        phot_count
+    );
 
     // Each active PHOT slot must have valid spatial data.
-    for s in snap.slots.iter().filter(|s| s.active && (s.source_modality & bionic_v0::MOD_PHOT) != 0) {
+    for s in snap
+        .slots
+        .iter()
+        .filter(|s| s.active && (s.source_modality & bionic_v0::MOD_PHOT) != 0)
+    {
         if let Some(sp) = s.spatial {
             assert!(sp.valid, "active PHOT slot spatial must be valid");
             assert!(sp.pos_x >= 0.0 && sp.pos_x <= 1.0);
@@ -1251,4 +1491,356 @@ fn real_camera_path_does_not_change_claim_architecture() {
             "claimed slot must have PHOT in source_modality"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// PHOT ingress → consequence accumulation wiring tests
+//
+// These verify that real PHOT adapter ticks naturally drive the consequence
+// window lifecycle (begin / extend / close) via the accumulation helpers.
+// No result, target, success, or imitation semantics are introduced here.
+// ---------------------------------------------------------------------------
+
+/// PHOT motion frames must begin a consequence window.
+/// Before wiring: n_windows == 0 → assertion fails.
+#[test]
+fn phot_motion_begins_consequence_window() {
+    use bionic_v0::action_consequence::ConsequenceWindowPhase;
+
+    let vp = Arc::new(Viewport::new());
+    // Use moving blobs so each frame diff produces motion.
+    let script = vec![
+        SynthCamStep::Idle,
+        SynthCamStep::Blob {
+            cx: 0.3,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        },
+        SynthCamStep::Blob {
+            cx: 0.5,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        },
+        SynthCamStep::Blob {
+            cx: 0.7,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        },
+    ];
+    let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
+    let mut adapter = RealPhotAdapter::new(provider);
+
+    let base_t = 1_000_000u64;
+    for step in 0..4u64 {
+        adapter.tick(&vp, base_t + step * 33_333);
+    }
+
+    let st = vp.read_action_consequence();
+    assert!(
+        st.n_windows >= 1,
+        "PHOT motion must begin a consequence window; got n_windows={}",
+        st.n_windows
+    );
+    assert_eq!(
+        st.n_pairs, 0,
+        "pure ingress accumulation must not create consequence pairs"
+    );
+    assert_eq!(
+        st.windows[0].phase,
+        ConsequenceWindowPhase::Open,
+        "window must be Open while motion is ongoing"
+    );
+}
+
+/// Consecutive PHOT motion frames must extend the same Open window, not open new ones.
+/// Before wiring: n_windows == 0 → assertion fails.
+#[test]
+fn phot_consecutive_motion_extends_same_open_window() {
+    use bionic_v0::action_consequence::ConsequenceWindowPhase;
+
+    let vp = Arc::new(Viewport::new());
+    let mut script = vec![SynthCamStep::Idle];
+    // Use moving blobs so each consecutive frame diff produces motion.
+    let positions = [0.2, 0.3, 0.4, 0.5, 0.6];
+    for cx in &positions {
+        script.push(SynthCamStep::Blob {
+            cx: *cx,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        });
+    }
+    let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
+    let mut adapter = RealPhotAdapter::new(provider);
+
+    let base_t = 1_000_000u64;
+    for step in 0..6u64 {
+        adapter.tick(&vp, base_t + step * 33_333);
+    }
+
+    let st = vp.read_action_consequence();
+    assert!(
+        st.n_windows >= 1,
+        "consecutive PHOT motion must produce at least one window; got {}",
+        st.n_windows
+    );
+    assert_eq!(
+        st.n_windows, 1,
+        "consecutive motion must extend, not multiply, consequence windows; got {}",
+        st.n_windows
+    );
+    assert_eq!(
+        st.windows[0].phase,
+        ConsequenceWindowPhase::Open,
+        "window must remain Open while motion continues"
+    );
+    assert_eq!(
+        st.n_pairs, 0,
+        "accumulation must not produce consequence pairs"
+    );
+}
+
+/// After motion stops and quiescence threshold is crossed, the Open window must close.
+/// Before wiring: no windows → no closed window → assertion fails.
+#[test]
+fn phot_quiescence_closes_consequence_window() {
+    use bionic_v0::action_consequence::ConsequenceWindowPhase;
+
+    let vp = Arc::new(Viewport::new());
+    let mut script = vec![SynthCamStep::Idle];
+    script.push(SynthCamStep::Blob {
+        cx: 0.5,
+        cy: 0.5,
+        r: 0.12,
+        brightness: 0.9,
+    });
+    script.push(SynthCamStep::Blob {
+        cx: 0.5,
+        cy: 0.5,
+        r: 0.12,
+        brightness: 0.9,
+    });
+    // 20 idle frames × 33 ms = 660 ms > 300 ms quiescence threshold.
+    for _ in 0..20 {
+        script.push(SynthCamStep::Idle);
+    }
+    let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
+    let mut adapter = RealPhotAdapter::new(provider);
+
+    let base_t = 1_000_000u64;
+    for step in 0..23u64 {
+        adapter.tick(&vp, base_t + step * 33_333);
+    }
+
+    let st = vp.read_action_consequence();
+    assert!(
+        st.n_windows >= 1,
+        "must have at least one window; got n_windows={}",
+        st.n_windows
+    );
+    let has_closed = st
+        .windows
+        .iter()
+        .any(|w| w.phase == ConsequenceWindowPhase::Closed);
+    assert!(
+        has_closed,
+        "window must close after PHOT quiescence (660 ms of idle > 300 ms threshold)"
+    );
+}
+
+/// A new PHOT motion burst after the first window closes must open a second window.
+/// Before wiring: n_windows == 0 → assertion fails.
+#[test]
+fn phot_new_motion_after_close_opens_new_window() {
+    use bionic_v0::action_consequence::ConsequenceWindowPhase;
+
+    let vp = Arc::new(Viewport::new());
+    let mut script = vec![SynthCamStep::Idle];
+    // First burst: moving blobs
+    let positions1 = [0.2, 0.4, 0.6];
+    for cx in &positions1 {
+        script.push(SynthCamStep::Blob {
+            cx: *cx,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        });
+    }
+    // 20 × 33 ms = 660 ms gap — closes the first window.
+    for _ in 0..20 {
+        script.push(SynthCamStep::Idle);
+    }
+    // Second burst: moving blobs in different direction
+    let positions2 = [0.8, 0.6, 0.4];
+    for cx in &positions2 {
+        script.push(SynthCamStep::Blob {
+            cx: *cx,
+            cy: 0.3,
+            r: 0.12,
+            brightness: 0.9,
+        });
+    }
+    // Total steps: 1 + 3 + 20 + 3 = 27.
+    let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
+    let mut adapter = RealPhotAdapter::new(provider);
+
+    let base_t = 1_000_000u64;
+    for step in 0..27u64 {
+        adapter.tick(&vp, base_t + step * 33_333);
+    }
+
+    let st = vp.read_action_consequence();
+    assert!(
+        st.n_windows >= 2,
+        "second burst after close must open a new window; got n_windows={}",
+        st.n_windows
+    );
+    let n_closed = st
+        .windows
+        .iter()
+        .filter(|w| w.phase == ConsequenceWindowPhase::Closed)
+        .count();
+    let n_open = st
+        .windows
+        .iter()
+        .filter(|w| w.phase == ConsequenceWindowPhase::Open)
+        .count();
+    assert!(
+        n_closed >= 1,
+        "first window must be Closed after the gap; closed={}",
+        n_closed
+    );
+    assert!(
+        n_open >= 1,
+        "second burst must leave an Open window; open={}",
+        n_open
+    );
+    assert_eq!(
+        st.n_pairs, 0,
+        "accumulation must not produce consequence pairs"
+    );
+}
+
+/// PHOT ingress accumulation must produce only numeric/time substrate fields.
+/// No consequence pairs, no success/target/result semantics.
+/// Before wiring: n_windows == 0 → first assert fails.
+#[test]
+fn phot_ingress_accumulation_no_result_or_success_semantics() {
+    let vp = Arc::new(Viewport::new());
+    let mut script = vec![SynthCamStep::Idle];
+    for _ in 0..5 {
+        script.push(SynthCamStep::Blob {
+            cx: 0.5,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        });
+    }
+    let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
+    let mut adapter = RealPhotAdapter::new(provider);
+
+    let base_t = 1_000_000u64;
+    for step in 0..6u64 {
+        adapter.tick(&vp, base_t + step * 33_333);
+    }
+
+    let st = vp.read_action_consequence();
+    assert!(
+        st.n_windows >= 1,
+        "PHOT motion must accumulate consequence windows; got n_windows={}",
+        st.n_windows
+    );
+    assert_eq!(
+        st.n_pairs, 0,
+        "pure PHOT ingress accumulation must not produce consequence pairs"
+    );
+    let w = &st.windows[0];
+    assert!(
+        w.start_t_us > 0,
+        "start_t_us must be set from real substrate time"
+    );
+    assert!(
+        w.magnitude >= 0.0,
+        "magnitude must be a non-negative numeric value"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase: live write-to-consequence temporal pairing via PHOT path.
+//
+// When a real write epoch exists in the shared substrate AND PHOT motion
+// accumulates a consequence window, the adapter tick must automatically form
+// a minimal temporal link (no result, success, target, or meaning semantics).
+// ---------------------------------------------------------------------------
+
+/// PHOT motion after a write epoch must auto-pair epoch with consequence window.
+/// Before wiring: n_pairs == 0 → assertion fails.
+#[test]
+fn phot_motion_after_write_epoch_forms_live_temporal_pair() {
+    use bionic_v0::action_output::{ActionOutputEvent, ActionOutputFeedback, OutputChannelKind};
+
+    let vp = Arc::new(Viewport::new());
+
+    // Seed a real write epoch *before* PHOT motion begins.
+    let epoch_t: u64 = 800_000;
+    vp.apply_action_output_event(ActionOutputEvent {
+        channel_kind: OutputChannelKind::GenericWrite,
+        feedback: ActionOutputFeedback::Begin,
+        magnitude: 0.3,
+        event_t_us: epoch_t,
+    });
+    let write_seq = vp.read_action_output().channels[0].current_write_seq;
+
+    // PHOT motion ticks start after the epoch, within the engineering time window.
+    let script = vec![
+        SynthCamStep::Idle,
+        SynthCamStep::Blob {
+            cx: 0.5,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        },
+        SynthCamStep::Blob {
+            cx: 0.5,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        },
+        SynthCamStep::Blob {
+            cx: 0.5,
+            cy: 0.5,
+            r: 0.12,
+            brightness: 0.9,
+        },
+    ];
+    let provider = Box::new(SyntheticCameraFrameProvider::new(script, 0, 33_333));
+    let mut adapter = RealPhotAdapter::new(provider);
+
+    let base_t: u64 = 1_000_000; // 200 ms after epoch — well within TEMPORAL_PAIR_MAX_DELAY_US
+    for step in 0..4u64 {
+        adapter.tick(&vp, base_t + step * 33_333);
+    }
+
+    let st = vp.read_action_consequence();
+    assert!(
+        st.n_windows >= 1,
+        "PHOT motion must accumulate consequence windows"
+    );
+    assert!(
+        st.n_pairs >= 1,
+        "PHOT motion after write epoch must form a live temporal pair; got n_pairs={}",
+        st.n_pairs
+    );
+    assert_eq!(
+        st.pairs[0].write_seq, write_seq,
+        "pair must reference the real write epoch"
+    );
+    // Delay is numeric-only: time from epoch start to window start. No success/result field.
+    assert!(
+        st.pairs[0].delay_us > 0,
+        "delay_us must be positive (epoch precedes window)"
+    );
 }

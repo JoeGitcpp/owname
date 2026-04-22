@@ -120,4 +120,24 @@ impl LanguageBindingState {
             });
         }
     }
+
+    pub fn tick_maintenance(&mut self, now_us: u64, idle_window_us: u64, decay_step: f64) {
+        if self.traces.is_empty() {
+            self.n_bindings = 0;
+            return;
+        }
+
+        let mut decayed = Vec::with_capacity(self.traces.len());
+        for mut trace in self.traces.drain(..) {
+            if now_us.saturating_sub(trace.last_update_t_us) >= idle_window_us {
+                trace.strength = BindingStrength::new(trace.strength.value - decay_step);
+                trace.status = BindingStatus::Weakened;
+            }
+            if trace.strength.value > 0.0 {
+                decayed.push(trace);
+            }
+        }
+        self.traces = decayed;
+        self.n_bindings = self.traces.len();
+    }
 }

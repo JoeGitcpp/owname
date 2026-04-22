@@ -13,9 +13,7 @@ use std::sync::Arc;
 
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::{EventEvidence, SlotClaim, Viewport};
-use bionic_v0::{
-    MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES, PHOT_BANDS, VIB_BANDS,
-};
+use bionic_v0::{MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES, PHOT_BANDS, VIB_BANDS};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -158,7 +156,8 @@ fn lead_lag_detects_consistent_precedence() {
     assert!(
         (ab.lead_lag_score + ba.lead_lag_score).abs() < 1e-9,
         "lead_lag scores must sum to zero across directed pair; got {:.6} + {:.6}",
-        ab.lead_lag_score, ba.lead_lag_score
+        ab.lead_lag_score,
+        ba.lead_lag_score
     );
 }
 
@@ -230,8 +229,14 @@ fn snapshot_roundtrip_preserves_relation_state() {
     let data = read_snapshot(&paths.final_path).expect("read ok");
 
     let gr = &data.global_relations;
-    assert_eq!(gr.n_active_edges, gr_before.n_active_edges, "n_active_edges");
-    assert_eq!(gr.last_update_t_us, gr_before.last_update_t_us, "last_update_t_us");
+    assert_eq!(
+        gr.n_active_edges, gr_before.n_active_edges,
+        "n_active_edges"
+    );
+    assert_eq!(
+        gr.last_update_t_us, gr_before.last_update_t_us,
+        "last_update_t_us"
+    );
 
     for i in 0..N_REL_EDGES {
         let a = &gr_before.edges[i];
@@ -239,14 +244,26 @@ fn snapshot_roundtrip_preserves_relation_state() {
         assert_eq!(b.src_slot_id, a.src_slot_id, "edge[{}].src_slot_id", i);
         assert_eq!(b.dst_slot_id, a.dst_slot_id, "edge[{}].dst_slot_id", i);
         assert_eq!(b.active, a.active, "edge[{}].active", i);
-        assert!((b.co_change_score - a.co_change_score).abs() < 1e-12,
-            "edge[{}].co_change_score roundtrip", i);
-        assert!((b.lead_lag_score - a.lead_lag_score).abs() < 1e-12,
-            "edge[{}].lead_lag_score roundtrip", i);
-        assert!((b.predictive_score - a.predictive_score).abs() < 1e-12,
-            "edge[{}].predictive_score roundtrip", i);
-        assert!((b.relation_confidence - a.relation_confidence).abs() < 1e-12,
-            "edge[{}].relation_confidence roundtrip", i);
+        assert!(
+            (b.co_change_score - a.co_change_score).abs() < 1e-12,
+            "edge[{}].co_change_score roundtrip",
+            i
+        );
+        assert!(
+            (b.lead_lag_score - a.lead_lag_score).abs() < 1e-12,
+            "edge[{}].lead_lag_score roundtrip",
+            i
+        );
+        assert!(
+            (b.predictive_score - a.predictive_score).abs() < 1e-12,
+            "edge[{}].predictive_score roundtrip",
+            i
+        );
+        assert!(
+            (b.relation_confidence - a.relation_confidence).abs() < 1e-12,
+            "edge[{}].relation_confidence roundtrip",
+            i
+        );
     }
 }
 
@@ -288,7 +305,10 @@ fn observer_sees_relation_state() {
         "snapshot co_change_score(A→B) must be readable and > 0.5; got {:.4}",
         ab.co_change_score
     );
-    assert!(gr.n_active_edges >= 2, "at least 2 directed edges must be active");
+    assert!(
+        gr.n_active_edges >= 2,
+        "at least 2 directed edges must be active"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +330,10 @@ fn claim_architecture_remains_unchanged_after_relations() {
         nomination_seq_hint: 1,
     };
     let claim1 = vp.claim_slot_for_event(&ev1);
-    assert!(matches!(claim1, SlotClaim::Allocated(_)), "first VIB must allocate");
+    assert!(
+        matches!(claim1, SlotClaim::Allocated(_)),
+        "first VIB must allocate"
+    );
     let slot_id = claim1.slot_id().unwrap();
 
     // Run relation refreshes.

@@ -11,7 +11,13 @@ use bionic_v0::{
 };
 use std::sync::Arc;
 
-fn ev(modality: u8, t: u64, spatial: Option<SpatialEvidence>, energy: f64, surprise: f64) -> EventEvidence {
+fn ev(
+    modality: u8,
+    t: u64,
+    spatial: Option<SpatialEvidence>,
+    energy: f64,
+    surprise: f64,
+) -> EventEvidence {
     EventEvidence {
         modality_bit: modality,
         event_t_us: t,
@@ -108,7 +114,10 @@ fn same_modality_continuation_beats_cross_modal_when_scores_close() {
     }
     let dbg = vp.read_last_claim_debug();
     // Modality score on the winner should match the same-modality bonus.
-    assert!(dbg.best_modality_score > 0.9, "same-mod modality score should be ~1.0");
+    assert!(
+        dbg.best_modality_score > 0.9,
+        "same-mod modality score should be ~1.0"
+    );
 }
 
 #[test]
@@ -182,7 +191,10 @@ fn claim_scoring_still_respects_previous_phase_guards() {
     let claim = vp.claim_slot_for_event(&ev(MOD_VIB, t_late, None, 1e-3, 0.0));
     match claim {
         SlotClaim::Allocated(id) => assert_ne!(id, stale, "stale slot must not be reused"),
-        other => panic!("expected Allocated (stale should hard-gate), got {:?}", other),
+        other => panic!(
+            "expected Allocated (stale should hard-gate), got {:?}",
+            other
+        ),
     }
 
     // (b) Cross-modal: outside CROSS_MODAL_WINDOW_US must not reuse.
@@ -194,13 +206,21 @@ fn claim_scoring_still_respects_previous_phase_guards() {
         MOD_PHOT,
         t_phot,
         Some(SpatialEvidence {
-            pos_x: 0.5, pos_y: 0.5, span_x: 0.1, span_y: 0.1, precision: 0.5,
+            pos_x: 0.5,
+            pos_y: 0.5,
+            span_x: 0.1,
+            span_y: 0.1,
+            precision: 0.5,
         }),
-        1e-3, 0.0,
+        1e-3,
+        0.0,
     ));
     match claim {
         SlotClaim::Allocated(id) => assert_ne!(id, vib_slot),
-        other => panic!("expected Allocated (cross-modal window hard-gate), got {:?}", other),
+        other => panic!(
+            "expected Allocated (cross-modal window hard-gate), got {:?}",
+            other
+        ),
     }
 
     // (c) Cross-modal: spatial far-apart must not reuse even inside window.
@@ -212,12 +232,20 @@ fn claim_scoring_still_respects_previous_phase_guards() {
         MOD_VIB,
         t0 + 1_000,
         Some(SpatialEvidence {
-            pos_x: 0.9, pos_y: 0.9, span_x: 0.05, span_y: 0.05, precision: 0.5,
+            pos_x: 0.9,
+            pos_y: 0.9,
+            span_x: 0.05,
+            span_y: 0.05,
+            precision: 0.5,
         }),
-        1e-3, 0.0,
+        1e-3,
+        0.0,
     ));
     match claim {
         SlotClaim::Allocated(id) => assert_ne!(id, phot_slot),
-        other => panic!("expected Allocated (far-spatial hard-gate), got {:?}", other),
+        other => panic!(
+            "expected Allocated (far-spatial hard-gate), got {:?}",
+            other
+        ),
     }
 }
