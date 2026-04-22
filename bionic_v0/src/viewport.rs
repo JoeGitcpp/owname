@@ -665,6 +665,8 @@ fn edge_idx(src: usize, dst: usize) -> usize {
     }
 }
 
+const VPC_FAMILY_RELATION: u8 = 3;
+
 // Helpers used by refresh_slot_fusion. Not methods to avoid borrow conflicts.
 
 fn freshness_weight(last_t_us: u64, now_us: u64) -> f64 {
@@ -2037,6 +2039,8 @@ impl Viewport {
     pub fn refresh_global_relation_predictor(&self, now_us: u64) {
         let mut gr = self.global_relations.write().unwrap();
         let mut bank = self.relation_pred_bank.write().unwrap();
+        let mut lifecycle_traces = Vec::new();
+        let mut resolved_publications = Vec::new();
 
         for i in 0..N_REL_EDGES {
             let edge = &mut gr.edges[i];
@@ -2089,10 +2093,42 @@ impl Viewport {
             if ps.warmup < REL_PRED_WARMUP_MIN {
                 edge.pred.relation_err = 0.0;
                 edge.pred.relation_precision = 0.0;
+                lifecycle_traces.push((
+                    i,
+                    edge.src_slot_id,
+                    edge.dst_slot_id,
+                    PredictorLifecycleState::Warmup,
+                ));
             } else {
                 edge.pred.relation_err = rms_err;
                 edge.pred.relation_precision = ps.ema_mse.min(REL_PRED_PRECISION_MAX);
+                resolved_publications.push((i, edge.src_slot_id, edge.dst_slot_id));
             }
+        }
+
+        drop(bank);
+        drop(gr);
+
+        for (edge_index, src_slot_id, dst_slot_id, lifecycle) in lifecycle_traces {
+            self.record_vpc_relation_edge_predictor_trace(
+                VPC_FAMILY_RELATION,
+                edge_index,
+                src_slot_id,
+                dst_slot_id,
+                now_us,
+                now_us,
+                lifecycle,
+            );
+        }
+        for (edge_index, src_slot_id, dst_slot_id) in resolved_publications {
+            self.record_vpc_relation_edge_resolved_publication(
+                VPC_FAMILY_RELATION,
+                edge_index,
+                src_slot_id,
+                dst_slot_id,
+                now_us,
+                now_us,
+            );
         }
     }
 
@@ -2424,6 +2460,64 @@ impl Viewport {
             target_end_t_us: target_t_us,
         };
         self.record_vpc_predictor_trace(predictor_family, domain, horizon, lifecycle);
+    }
+
+    pub fn record_vpc_relation_edge_predictor_trace(
+        &self,
+        predictor_family: u8,
+        edge_index: usize,
+        src_slot_id: u8,
+        dst_slot_id: u8,
+        publish_t_us: u64,
+        target_t_us: u64,
+        lifecycle: PredictorLifecycleState,
+    ) {
+        let domain = ObservationDomainRef {
+            kind: ObservationDomainKind::RelationEdge,
+            primary: edge_index as u16,
+            secondary: src_slot_id as u16,
+            tertiary: dst_slot_id as u16,
+        };
+        let horizon = PredictionHorizon {
+            kind: HorizonKind::Point,
+            publish_t_us,
+            target_start_t_us: target_t_us,
+            target_end_t_us: target_t_us,
+        };
+        self.record_vpc_predictor_trace(predictor_family, domain, horizon, lifecycle);
+    }
+
+    pub fn record_vpc_relation_edge_resolved_publication(
+        &self,
+        predictor_family: u8,
+        edge_index: usize,
+        src_slot_id: u8,
+        dst_slot_id: u8,
+        publish_t_us: u64,
+        target_t_us: u64,
+    ) -> u32 {
+        let domain = ObservationDomainRef {
+            kind: ObservationDomainKind::RelationEdge,
+            primary: edge_index as u16,
+            secondary: src_slot_id as u16,
+            tertiary: dst_slot_id as u16,
+        };
+        let horizon = PredictionHorizon {
+            kind: HorizonKind::Point,
+            publish_t_us,
+            target_start_t_us: target_t_us,
+            target_end_t_us: target_t_us,
+        };
+        self.vpc_contract
+            .write()
+            .unwrap()
+            .record_resolved_publication(PredictionPublicationTrace {
+                predictor_family,
+                domain,
+                horizon,
+                alignment: ErrAlignmentKind::PointExact,
+                status: PublicationStatus::Resolved,
+            })
     }
 
     pub fn record_vpc_axis_publication(

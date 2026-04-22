@@ -124,6 +124,18 @@ impl VpcContractState {
         idx
     }
 
+    pub fn record_resolved_publication(&mut self, publication: PredictionPublicationTrace) -> u32 {
+        let idx = self.publications.len() as u32;
+        self.record_predictor_trace(
+            publication.predictor_family,
+            publication.domain,
+            publication.horizon,
+            PredictorLifecycleState::ResolvedPublication,
+        );
+        self.publications.push(publication);
+        idx
+    }
+
     pub fn resolve_open_publication(
         &mut self,
         predictor_family: u8,

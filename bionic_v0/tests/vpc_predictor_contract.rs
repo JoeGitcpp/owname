@@ -3,12 +3,49 @@ use std::sync::Arc;
 use bionic_v0::predictor::Ar2Predictor;
 use bionic_v0::viewport::Viewport;
 use bionic_v0::vpc::{
-    HorizonKind, ObservationDomainKind, PredictorLifecycleState, VpcContractState,
+    ErrAlignmentKind, HorizonKind, ObservationDomainKind, PredictorLifecycleState,
+    PublicationStatus, VpcContractState,
 };
-use bionic_v0::MOD_PHOT;
+use bionic_v0::{MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, PHOT_BANDS, VIB_BANDS};
 
 const VPC_FAMILY_AR2: u8 = 1;
 const VPC_FAMILY_PHOT: u8 = 2;
+const VPC_FAMILY_RELATION: u8 = 3;
+
+fn relation_edge_idx(src: usize, dst: usize) -> usize {
+    assert_ne!(src, dst);
+    if dst < src {
+        src * (N_OBJECT_SLOTS - 1) + dst
+    } else {
+        src * (N_OBJECT_SLOTS - 1) + dst - 1
+    }
+}
+
+fn tick_relation_slot(vp: &Arc<Viewport>, slot_id: usize, t_us: u64) {
+    let vib_obs = [0.1f64; VIB_BANDS];
+    let vib_pred = [0.09f64; VIB_BANDS];
+    let vib_err = [0.01f64; VIB_BANDS];
+    let vib_prec = [0.5f64; VIB_BANDS];
+    vp.write_slot_vib(slot_id, t_us, &vib_obs, &vib_pred, &vib_err, &vib_prec);
+    vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
+
+    let phot_obs = vec![0.2f64; PHOT_BANDS];
+    let phot_pred = vec![0.18f64; PHOT_BANDS];
+    let phot_err = vec![0.02f64; PHOT_BANDS];
+    let phot_prec = vec![0.4f64; PHOT_BANDS];
+    vp.write_slot_phot(slot_id, t_us, &phot_obs, &phot_pred, &phot_err, &phot_prec);
+    vp.refresh_slot_fusion(slot_id, MOD_PHOT, t_us);
+    vp.refresh_slot_high_layer(slot_id, t_us);
+}
+
+fn run_relation_cycle(vp: &Arc<Viewport>, slot_a: usize, slot_b: usize, t_a: u64, t_b: u64) {
+    tick_relation_slot(vp, slot_a, t_a);
+    tick_relation_slot(vp, slot_b, t_b);
+    let t_cycle = t_a.max(t_b);
+    vp.refresh_global_attention(t_cycle);
+    vp.refresh_global_relations(t_cycle);
+    vp.refresh_global_relation_predictor(t_cycle);
+}
 
 #[test]
 fn predictor_family_contract_state_starts_empty_and_engineering_only() {
@@ -106,5 +143,54 @@ fn phot_predictor_contract_resolves_after_warmup_with_slot_local_provenance() {
             && trace.domain.primary == slot_id as u16
             && trace.horizon.kind == HorizonKind::Point
             && trace.lifecycle == PredictorLifecycleState::ResolvedPublication
+    }));
+}
+
+#[test]
+fn relation_predictor_contract_warmup_records_edge_local_trace_without_confidence() {
+    let vp = Arc::new(Viewport::new());
+    let slot_a = vp.allocate_slot(MOD_VIB, 10_000, 1).expect("slot a");
+    let slot_b = vp.allocate_slot(MOD_VIB, 10_000, 2).expect("slot b");
+
+    run_relation_cycle(&vp, slot_a, slot_b, 10_000, 10_000);
+
+    let st = vp.read_vpc_contract();
+    let edge_idx = relation_edge_idx(slot_a, slot_b) as u16;
+    assert!(st.predictor_traces.iter().any(|trace| {
+        trace.predictor_family == VPC_FAMILY_RELATION
+            && trace.domain.kind == ObservationDomainKind::RelationEdge
+            && trace.domain.primary == edge_idx
+            && trace.horizon.kind == HorizonKind::Point
+            && trace.lifecycle == PredictorLifecycleState::Warmup
+    }));
+
+    let gr = vp.read_global_relations();
+    let edge = gr.edges[relation_edge_idx(slot_a, slot_b)];
+    assert_eq!(edge.pred.relation_err, 0.0);
+    assert_eq!(edge.pred.relation_precision, 0.0);
+}
+
+#[test]
+fn relation_predictor_contract_resolves_same_cycle_edge_publication() {
+    let vp = Arc::new(Viewport::new());
+    let slot_a = vp.allocate_slot(MOD_VIB, 10_000, 1).expect("slot a");
+    let slot_b = vp.allocate_slot(MOD_VIB, 10_000, 2).expect("slot b");
+    let resolve_t_us = 20_000;
+
+    run_relation_cycle(&vp, slot_a, slot_b, 10_000, 10_000);
+    run_relation_cycle(&vp, slot_a, slot_b, resolve_t_us, resolve_t_us);
+
+    let edge_idx = relation_edge_idx(slot_a, slot_b) as u16;
+    let st = vp.read_vpc_contract();
+    assert!(st.publications.iter().any(|trace| {
+        trace.predictor_family == VPC_FAMILY_RELATION
+            && trace.domain.kind == ObservationDomainKind::RelationEdge
+            && trace.domain.primary == edge_idx
+            && trace.horizon.kind == HorizonKind::Point
+            && trace.horizon.publish_t_us == resolve_t_us
+            && trace.horizon.target_start_t_us == resolve_t_us
+            && trace.horizon.target_end_t_us == resolve_t_us
+            && trace.alignment == ErrAlignmentKind::PointExact
+            && trace.status == PublicationStatus::Resolved
     }));
 }
