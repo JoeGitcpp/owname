@@ -11,6 +11,10 @@ use crate::language_binding::{
 };
 use crate::object_high_layer::ObjectHighLayerState;
 use crate::probe_law::ProbeLawState;
+use crate::vpc::{
+    ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
+    PredictionPublicationTrace, PublicationStatus, VpcContractState,
+};
 use crate::viewport::{
     AmbientModalitySnapshot, AxisRing, BandFamilyState, CrossModalFusionState,
     GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,
@@ -158,6 +162,9 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
 
     // v24: language-binding trace substrate
     write_language_binding(&mut buf, &vp.read_language_binding());
+
+    // v33: VPC timing / provenance trace substrate
+    write_vpc_contract(&mut buf, &vp.read_vpc_contract());
 
     // v25: action-output substrate (write-out side, 2026-04-21)
     write_action_output(&mut buf, &vp.read_action_output());
@@ -365,6 +372,8 @@ pub struct SnapshotData {
     pub global_reasoning_memory: GlobalReasoningMemorySummary,
     // v24: trace-only language binding state
     pub language_binding: LanguageBindingState,
+    // v33: VPC timing / provenance trace state
+    pub vpc_contract: VpcContractState,
     // v21 (semantic-readiness) and v22 (symbolizer) removed by cleanup spec
     // 2026-04-20.
     // v25: action-output substrate (write-out side)
@@ -683,6 +692,12 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         LanguageBindingState::default()
     };
 
+    let vpc_contract = if version >= 33 {
+        read_vpc_contract_snapshot(&bytes, &mut cur)
+    } else {
+        VpcContractState::default()
+    };
+
     let action_output = if version >= 25 {
         read_action_output_snapshot(&bytes, &mut cur, version)
     } else {
@@ -739,6 +754,7 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         global_reasoning,
         global_reasoning_memory,
         language_binding,
+        vpc_contract,
         action_output,
         action_consequence,
         probe_law,
@@ -1272,6 +1288,193 @@ fn external_pattern_kind_code(kind: ExternalPatternKind) -> u8 {
         ExternalPatternKind::AudiblePattern => 1,
         ExternalPatternKind::GesturePattern => 2,
         ExternalPatternKind::SymbolSequence => 3,
+    }
+}
+
+fn write_vpc_contract(buf: &mut Vec<u8>, st: &VpcContractState) {
+    buf.extend_from_slice(&(st.publications.len() as u32).to_le_bytes());
+    for trace in &st.publications {
+        buf.push(trace.predictor_family);
+        buf.push(observation_domain_kind_code(trace.domain.kind));
+        buf.extend_from_slice(&trace.domain.primary.to_le_bytes());
+        buf.extend_from_slice(&trace.domain.secondary.to_le_bytes());
+        buf.extend_from_slice(&trace.domain.tertiary.to_le_bytes());
+        buf.push(horizon_kind_code(trace.horizon.kind));
+        buf.extend_from_slice(&trace.horizon.publish_t_us.to_le_bytes());
+        buf.extend_from_slice(&trace.horizon.target_start_t_us.to_le_bytes());
+        buf.extend_from_slice(&trace.horizon.target_end_t_us.to_le_bytes());
+        buf.push(err_alignment_kind_code(trace.alignment));
+        buf.push(publication_status_code(trace.status));
+    }
+
+    buf.extend_from_slice(&(st.open_predictions.len() as u32).to_le_bytes());
+    for trace in &st.open_predictions {
+        buf.push(trace.predictor_family);
+        buf.push(observation_domain_kind_code(trace.domain.kind));
+        buf.extend_from_slice(&trace.domain.primary.to_le_bytes());
+        buf.extend_from_slice(&trace.domain.secondary.to_le_bytes());
+        buf.extend_from_slice(&trace.domain.tertiary.to_le_bytes());
+        buf.push(horizon_kind_code(trace.horizon.kind));
+        buf.extend_from_slice(&trace.horizon.publish_t_us.to_le_bytes());
+        buf.extend_from_slice(&trace.horizon.target_start_t_us.to_le_bytes());
+        buf.extend_from_slice(&trace.horizon.target_end_t_us.to_le_bytes());
+        buf.push(err_alignment_kind_code(trace.alignment));
+        buf.extend_from_slice(&trace.publication_index.to_le_bytes());
+    }
+}
+
+fn read_vpc_contract_snapshot(bytes: &[u8], cur: &mut usize) -> VpcContractState {
+    fn rd_u16(b: &[u8], c: &mut usize) -> u16 {
+        let mut a = [0u8; 2];
+        a.copy_from_slice(&b[*c..*c + 2]);
+        *c += 2;
+        u16::from_le_bytes(a)
+    }
+    fn rd_u32(b: &[u8], c: &mut usize) -> u32 {
+        let mut a = [0u8; 4];
+        a.copy_from_slice(&b[*c..*c + 4]);
+        *c += 4;
+        u32::from_le_bytes(a)
+    }
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+
+    let n_publications = rd_u32(bytes, cur) as usize;
+    let mut publications = Vec::with_capacity(n_publications);
+    for _ in 0..n_publications {
+        let predictor_family = bytes[*cur];
+        *cur += 1;
+        let domain_kind = observation_domain_kind_from_code(bytes[*cur]);
+        *cur += 1;
+        let domain = ObservationDomainRef {
+            kind: domain_kind,
+            primary: rd_u16(bytes, cur),
+            secondary: rd_u16(bytes, cur),
+            tertiary: rd_u16(bytes, cur),
+        };
+        let horizon_kind = horizon_kind_from_code(bytes[*cur]);
+        *cur += 1;
+        let horizon = PredictionHorizon {
+            kind: horizon_kind,
+            publish_t_us: rd_u64(bytes, cur),
+            target_start_t_us: rd_u64(bytes, cur),
+            target_end_t_us: rd_u64(bytes, cur),
+        };
+        let alignment = err_alignment_kind_from_code(bytes[*cur]);
+        *cur += 1;
+        let status = publication_status_from_code(bytes[*cur]);
+        *cur += 1;
+        publications.push(PredictionPublicationTrace {
+            predictor_family,
+            domain,
+            horizon,
+            alignment,
+            status,
+        });
+    }
+
+    let n_open = rd_u32(bytes, cur) as usize;
+    let mut open_predictions = Vec::with_capacity(n_open);
+    for _ in 0..n_open {
+        let predictor_family = bytes[*cur];
+        *cur += 1;
+        let domain_kind = observation_domain_kind_from_code(bytes[*cur]);
+        *cur += 1;
+        let domain = ObservationDomainRef {
+            kind: domain_kind,
+            primary: rd_u16(bytes, cur),
+            secondary: rd_u16(bytes, cur),
+            tertiary: rd_u16(bytes, cur),
+        };
+        let horizon_kind = horizon_kind_from_code(bytes[*cur]);
+        *cur += 1;
+        let horizon = PredictionHorizon {
+            kind: horizon_kind,
+            publish_t_us: rd_u64(bytes, cur),
+            target_start_t_us: rd_u64(bytes, cur),
+            target_end_t_us: rd_u64(bytes, cur),
+        };
+        let alignment = err_alignment_kind_from_code(bytes[*cur]);
+        *cur += 1;
+        let publication_index = rd_u32(bytes, cur);
+        open_predictions.push(crate::vpc::OpenPredictionTrace {
+            predictor_family,
+            domain,
+            horizon,
+            alignment,
+            publication_index,
+        });
+    }
+
+    VpcContractState {
+        publications,
+        open_predictions,
+    }
+}
+
+fn observation_domain_kind_code(kind: ObservationDomainKind) -> u8 {
+    match kind {
+        ObservationDomainKind::Axis => 0,
+        ObservationDomainKind::SlotFamily => 1,
+        ObservationDomainKind::RelationEdge => 2,
+        ObservationDomainKind::ReasoningFragment => 3,
+    }
+}
+
+fn observation_domain_kind_from_code(code: u8) -> ObservationDomainKind {
+    match code {
+        1 => ObservationDomainKind::SlotFamily,
+        2 => ObservationDomainKind::RelationEdge,
+        3 => ObservationDomainKind::ReasoningFragment,
+        _ => ObservationDomainKind::Axis,
+    }
+}
+
+fn horizon_kind_code(kind: HorizonKind) -> u8 {
+    match kind {
+        HorizonKind::Point => 0,
+        HorizonKind::Window => 1,
+    }
+}
+
+fn horizon_kind_from_code(code: u8) -> HorizonKind {
+    match code {
+        1 => HorizonKind::Window,
+        _ => HorizonKind::Point,
+    }
+}
+
+fn err_alignment_kind_code(kind: ErrAlignmentKind) -> u8 {
+    match kind {
+        ErrAlignmentKind::PointExact => 0,
+        ErrAlignmentKind::WindowInclusive => 1,
+    }
+}
+
+fn err_alignment_kind_from_code(code: u8) -> ErrAlignmentKind {
+    match code {
+        1 => ErrAlignmentKind::WindowInclusive,
+        _ => ErrAlignmentKind::PointExact,
+    }
+}
+
+fn publication_status_code(status: PublicationStatus) -> u8 {
+    match status {
+        PublicationStatus::Open => 0,
+        PublicationStatus::Resolved => 1,
+        PublicationStatus::Expired => 2,
+    }
+}
+
+fn publication_status_from_code(code: u8) -> PublicationStatus {
+    match code {
+        1 => PublicationStatus::Resolved,
+        2 => PublicationStatus::Expired,
+        _ => PublicationStatus::Open,
     }
 }
 
