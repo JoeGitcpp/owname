@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use bionic_v0::action_output::{ActionOutputEvent, ActionOutputFeedback, OutputChannelKind};
+use bionic_v0::language_binding::{BindingEvent, BindingFeedback, BindingTargetRef, ExternalPatternKind};
 use bionic_v0::viewport::Viewport;
 
 // ─── 1. Similar write and consequence curves yield high similarity ─────────────
@@ -59,5 +60,34 @@ fn dissimilar_curves_yield_low_similarity() {
     assert!(
         st.pairs[0].curve_similarity < 0.3,
         "Dissimilar magnitudes must yield low curve_similarity"
+    );
+}
+
+// ─── 3. Strong binding injects attention bias ─────────────────────────────────
+
+#[test]
+fn strong_binding_injects_attention_bias() {
+    let vp = Arc::new(Viewport::new());
+
+    // Create a strong binding to slot 0
+    for i in 0..5 {
+        vp.apply_binding_event_from_adapter(BindingEvent {
+            pattern_kind: ExternalPatternKind::AudiblePattern,
+            pattern_hash: 0xBEEF,
+            target: BindingTargetRef::ObjectSlot { slot_id: 0 },
+            feedback: BindingFeedback::Support,
+            evidence_ref: i as u64,
+            event_t_us: 1_000 + i as u64 * 1_000,
+        });
+    }
+
+    // Run binding resonance tick
+    vp.tick_binding_resonance(10_000);
+
+    let attn = vp.read_global_attention();
+    // Slot 0 should have received an attention bias
+    assert!(
+        attn.slot_biases[0] > 0.0,
+        "Strong binding must inject positive attention bias"
     );
 }
