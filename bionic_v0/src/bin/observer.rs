@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bionic_v0::language_binding::{BindingStatus, BindingTargetRef, ExternalPatternKind};
 use bionic_v0::snapshot::{read_snapshot, SnapshotData};
+use bionic_v0::vpc::{ObservationDomainKind, PublicationStatus};
 use bionic_v0::{
     CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED, HEALTH_FAULT, HEALTH_OK,
     HEALTH_QUIET, HEALTH_STALE,
@@ -41,7 +42,8 @@ fn main() {
          rel:s->d:co|ll|pr|cf|pc|pl|pp|pf|err|rp|age_ms;...\t\
          rsn:sl|ce|ni|slots[...]|edges[...]:w...\t\
          mem:nov|per|rst|rec|fill|dom\t\
-          bind:n|traces[...]|ep:n|epochs[...]\t\
+          bind:n|traces[...]|vpc:n|pub[...]|open[...]\t\
+         ep:n|epochs[...]\t\
          prb:i|s|ph|o"
     );
 
@@ -109,6 +111,23 @@ fn binding_target_label(target: BindingTargetRef) -> String {
             start_t_us,
             end_t_us,
         } => format!("t{}-{}", start_t_us, end_t_us),
+    }
+}
+
+fn vpc_domain_label(kind: ObservationDomainKind, primary: u16) -> String {
+    match kind {
+        ObservationDomainKind::Axis => format!("ax{}", primary),
+        ObservationDomainKind::SlotFamily => format!("sf{}", primary),
+        ObservationDomainKind::RelationEdge => format!("re{}", primary),
+        ObservationDomainKind::ReasoningFragment => format!("rf{}", primary),
+    }
+}
+
+fn vpc_status_label(status: PublicationStatus) -> &'static str {
+    match status {
+        PublicationStatus::Open => "op",
+        PublicationStatus::Resolved => "rs",
+        PublicationStatus::Expired => "ex",
     }
 }
 
@@ -407,6 +426,50 @@ fn print_row(snap: &SnapshotData) {
     };
     row.push_str(&format!("\tbind:n{}|{}", bind.n_bindings, trace_str));
 
+    let vpc = &snap.vpc_contract;
+    let pub_str = if vpc.publications.is_empty() {
+        "-".to_string()
+    } else {
+        vpc.publications
+            .iter()
+            .map(|trace| {
+                format!(
+                    "pf{}:{}|{}->{}|{}",
+                    trace.predictor_family,
+                    vpc_domain_label(trace.domain.kind, trace.domain.primary),
+                    trace.horizon.publish_t_us,
+                    trace.horizon.target_end_t_us,
+                    vpc_status_label(trace.status),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    };
+    let open_str = if vpc.open_predictions.is_empty() {
+        "-".to_string()
+    } else {
+        vpc.open_predictions
+            .iter()
+            .map(|trace| {
+                format!(
+                    "pf{}:{}|{}->{}|pi{}",
+                    trace.predictor_family,
+                    vpc_domain_label(trace.domain.kind, trace.domain.primary),
+                    trace.horizon.publish_t_us,
+                    trace.horizon.target_end_t_us,
+                    trace.publication_index,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    };
+    row.push_str(&format!(
+        "\tvpc:n{}|pub[{}]|open[{}]",
+        vpc.publications.len(),
+        pub_str,
+        open_str
+    ));
+
     let ao = &snap.action_output;
     let ch_str: String = ao
         .channels
@@ -437,7 +500,7 @@ fn print_row(snap: &SnapshotData) {
         }
     ));
 
-    // v27: write epoch history — numeric/time/phase only; no target, result, or meaning.
+    // v27: write epoch history — numeric/time/phase only; no target or result labels.
     let ep_str: String = ao
         .write_epoch_history
         .iter()

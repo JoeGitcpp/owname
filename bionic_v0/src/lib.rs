@@ -10,6 +10,7 @@ pub mod snapshot;
 pub mod source;
 pub mod synthetic_vib;
 pub mod vib;
+pub mod vpc;
 pub mod viewport;
 
 pub const HISTORY_CAP: usize = 1024;
@@ -260,7 +261,8 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // last_update_t_us, short history). Old snapshots (v29) are rejected.
 // v31: curve_similarity added to ActionConsequencePair.
 // v32: slot_biases added to GlobalAttentionState.
-pub const SNAPSHOT_VERSION: u64 = 32;
+// v33: VPC contract trace substrate added (publication/open timing provenance).
+pub const SNAPSHOT_VERSION: u64 = 33;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.
