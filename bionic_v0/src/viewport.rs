@@ -3,19 +3,20 @@ use std::sync::RwLock;
 
 use crate::action_consequence::ActionConsequenceState;
 use crate::action_output::ActionOutputState;
-use crate::language_binding::{BindingEvent, BindingTrace, LanguageBindingState};
+use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, LanguageBindingState};
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::PhotSlotPredictor;
 use crate::probe_law::ProbeLawState;
 use crate::{
-    AXIS_COUNT, BINDING_MAINTENANCE_DECAY_STEP, BINDING_MAINTENANCE_IDLE_US,
-    CLAIM_CROSS_MODALITY_BASE, CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED,
-    CLAIM_LOG_ENERGY_BAND, CLAIM_REUSE_MIN_SCORE, CLAIM_SAME_MODALITY_BONUS, CLAIM_SURPRISE_BAND,
-    CLAIM_W_ENERGY, CLAIM_W_MODALITY, CLAIM_W_SPATIAL, CLAIM_W_SURPRISE, CLAIM_W_TIME,
-    CROSS_MODAL_SPATIAL_DIST, CROSS_MODAL_WINDOW_US, HEALTH_FAULT, HEALTH_OK, HEALTH_QUIET,
-    HEALTH_STALE, HISTORY_CAP, MOD_MECH, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES,
-    N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES,
-    QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REASONING_HISTORY_ALPHA, REASONING_HISTORY_RING_CAP,
+    AXIS_COUNT, ATTN_PRECISION_BIAS_MAX, BINDING_ATTN_ALPHA, BINDING_MAINTENANCE_DECAY_STEP,
+    BINDING_MAINTENANCE_IDLE_US, BINDING_RESONANCE_THRESHOLD, CLAIM_CROSS_MODALITY_BASE,
+    CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED, CLAIM_LOG_ENERGY_BAND,
+    CLAIM_REUSE_MIN_SCORE, CLAIM_SAME_MODALITY_BONUS, CLAIM_SURPRISE_BAND, CLAIM_W_ENERGY,
+    CLAIM_W_MODALITY, CLAIM_W_SPATIAL, CLAIM_W_SURPRISE, CLAIM_W_TIME, CROSS_MODAL_SPATIAL_DIST,
+    CROSS_MODAL_WINDOW_US, HEALTH_FAULT, HEALTH_OK, HEALTH_QUIET, HEALTH_STALE, HISTORY_CAP,
+    MOD_MECH, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES, N_ROUTING_FOCUS_EDGES,
+    N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES, QUIET_ENERGY_THRESHOLD,
+    QUIET_WINDOW_US, REASONING_HISTORY_ALPHA, REASONING_HISTORY_RING_CAP,
     REASONING_INTENSITY_THRESHOLD, REL_ALPHA, REL_PRED_ALPHA, REL_PRED_MSE_ALPHA,
     REL_PRED_PRECISION_MAX, REL_PRED_WARMUP_MIN, SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS,
 };
@@ -317,6 +318,9 @@ pub struct GlobalAttentionState {
     pub focused_score: f64,
     /// Number of active slots considered in the last refresh.
     pub n_active: u8,
+    /// Per-slot bias injected by binding resonance. Added to attention
+    /// shares during refresh. [0, ATTN_PRECISION_BIAS_MAX].
+    pub slot_biases: [f64; N_OBJECT_SLOTS],
 }
 
 impl Default for GlobalAttentionState {
@@ -328,6 +332,7 @@ impl Default for GlobalAttentionState {
             attention_entropy: 0.0,
             focused_score: 0.0,
             n_active: 0,
+            slot_biases: [0.0f64; N_OBJECT_SLOTS],
         }
     }
 }
@@ -1600,6 +1605,25 @@ impl Viewport {
         );
     }
 
+    pub fn tick_binding_resonance(&self, now_us: u64) {
+        let _ = now_us;
+        let bindings = self.language_binding.read().unwrap();
+        for trace in bindings.traces.iter() {
+            if trace.strength.value < BINDING_RESONANCE_THRESHOLD {
+                continue;
+            }
+            if let BindingTargetRef::ObjectSlot { slot_id } = trace.target {
+                let slot_id = slot_id as usize;
+                let mut attn = self.global_attention.write().unwrap();
+                if slot_id < attn.slot_biases.len() {
+                    let bias = trace.strength.value * BINDING_ATTN_ALPHA;
+                    attn.slot_biases[slot_id] = (attn.slot_biases[slot_id] + bias)
+                        .min(ATTN_PRECISION_BIAS_MAX);
+                }
+            }
+        }
+    }
+
     /// Phase 5A: recompute the fusion subtree for an active slot.
     ///
     /// Called by each modality adapter after writing its own data. The
@@ -1831,6 +1855,7 @@ impl Viewport {
             attention_entropy,
             focused_score,
             n_active,
+            slot_biases: [0.0f64; N_OBJECT_SLOTS],
         };
     }
 

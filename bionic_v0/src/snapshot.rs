@@ -963,6 +963,9 @@ fn write_global_attention(buf: &mut Vec<u8>, ga: &GlobalAttentionState) {
     buf.extend_from_slice(&ga.attention_entropy.to_le_bytes());
     buf.extend_from_slice(&ga.focused_score.to_le_bytes());
     buf.extend_from_slice(&(ga.n_active as u64).to_le_bytes());
+    for &b in ga.slot_biases.iter() {
+        buf.extend_from_slice(&b.to_le_bytes());
+    }
 }
 
 fn read_global_attention_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalAttentionState {
@@ -996,6 +999,10 @@ fn read_global_attention_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalAttent
     let attention_entropy = rd_f64(bytes, cur);
     let focused_score = rd_f64(bytes, cur);
     let n_active = rd_u64(bytes, cur) as u8;
+    let mut slot_biases = [0.0f64; N_OBJECT_SLOTS];
+    for i in 0..N_OBJECT_SLOTS {
+        slot_biases[i] = rd_f64(bytes, cur);
+    }
     GlobalAttentionState {
         focused_slot_id,
         top_slot_ids,
@@ -1003,6 +1010,7 @@ fn read_global_attention_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalAttent
         attention_entropy,
         focused_score,
         n_active,
+        slot_biases,
     }
 }
 

@@ -259,11 +259,18 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v30: probe_law substrate added (intensity, suppression, phase, output_intensity,
 // last_update_t_us, short history). Old snapshots (v29) are rejected.
 // v31: curve_similarity added to ActionConsequencePair.
-pub const SNAPSHOT_VERSION: u64 = 31;
+// v32: slot_biases added to GlobalAttentionState.
+pub const SNAPSHOT_VERSION: u64 = 32;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.
 pub const ATTN_PRECISION_BIAS_MAX: f64 = 2.0;
+
+/// Minimum binding strength to trigger attention bias injection.
+pub const BINDING_RESONANCE_THRESHOLD: f64 = 0.5;
+
+/// Alpha for binding → attention bias injection.
+pub const BINDING_ATTN_ALPHA: f64 = 0.05;
 
 // --- Phase 5D: Cross-object temporal relation substrate ---
 
