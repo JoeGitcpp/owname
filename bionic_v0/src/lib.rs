@@ -10,6 +10,7 @@ pub mod snapshot;
 pub mod source;
 pub mod synthetic_vib;
 pub mod vib;
+pub mod vpc;
 pub mod viewport;
 
 pub const HISTORY_CAP: usize = 1024;

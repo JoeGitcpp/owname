@@ -7,6 +7,7 @@ use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, Lang
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::PhotSlotPredictor;
 use crate::probe_law::ProbeLawState;
+use crate::vpc::{OpenPredictionTrace, PredictionPublicationTrace, VpcContractState};
 use crate::{
     AXIS_COUNT, ATTN_ERR_REBALANCE_ALPHA, ATTN_PRECISION_BIAS_MAX, BINDING_ATTN_ALPHA,
     BINDING_MAINTENANCE_DECAY_STEP, BINDING_MAINTENANCE_IDLE_US, BINDING_RESONANCE_THRESHOLD,
@@ -977,6 +978,11 @@ pub struct Viewport {
     /// decides whether those structures exist.
     pub language_binding: RwLock<LanguageBindingState>,
 
+    /// VPC contract trace substrate — timing / provenance only.
+    /// Tracks publication and open-prediction metadata without altering
+    /// observation truth or granting any ontological authority.
+    pub vpc_contract: RwLock<VpcContractState>,
+
     // semantic_readiness and symbolizer subtrees were removed by cleanup
     // spec 2026-04-20. Substrate now terminates at global_reasoning_history
     // / global_reasoning_memory_summary.
@@ -1044,6 +1050,7 @@ impl Viewport {
             global_reasoning_history: RwLock::new(GlobalReasoningHistoryState::new()),
             global_reasoning_memory_summary: RwLock::new(GlobalReasoningMemorySummary::default()),
             language_binding: RwLock::new(LanguageBindingState::default()),
+            vpc_contract: RwLock::new(VpcContractState::default()),
             action_output: RwLock::new(ActionOutputState::default()),
             action_output_write_seq: AtomicU64::new(0),
             action_consequence_window_seq: AtomicU64::new(0),
@@ -2331,6 +2338,18 @@ impl Viewport {
 
     pub fn read_global_reasoning_memory_summary(&self) -> GlobalReasoningMemorySummary {
         *self.global_reasoning_memory_summary.read().unwrap()
+    }
+
+    pub fn read_vpc_contract(&self) -> VpcContractState {
+        self.vpc_contract.read().unwrap().clone()
+    }
+
+    pub fn push_vpc_publication(&self, trace: PredictionPublicationTrace) {
+        self.vpc_contract.write().unwrap().push_publication(trace);
+    }
+
+    pub fn push_vpc_open_prediction(&self, trace: OpenPredictionTrace) {
+        self.vpc_contract.write().unwrap().push_open_prediction(trace);
     }
 
     // refresh_semantic_readiness / read_semantic_readiness /
