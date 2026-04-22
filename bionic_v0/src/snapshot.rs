@@ -1411,6 +1411,7 @@ fn read_vpc_contract_snapshot(bytes: &[u8], cur: &mut usize) -> VpcContractState
     }
 
     VpcContractState {
+        predictor_traces: Vec::new(),
         publications,
         open_predictions,
     }

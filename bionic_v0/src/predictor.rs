@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::vpc::PredictorLifecycleState;
 use crate::viewport::{Sample, Viewport};
 
 pub struct Ar2Predictor {
@@ -39,6 +40,15 @@ impl Ar2Predictor {
     pub fn tick(&mut self, vp: &Arc<Viewport>) {
         let last_two: Vec<Sample> = vp.read_latest_observations(self.axis, 2);
         if last_two.len() < 2 {
+            if let Some(sample) = last_two.first() {
+                vp.record_vpc_axis_predictor_trace(
+                    VPC_FAMILY_AR2,
+                    self.axis,
+                    sample.t_us,
+                    sample.t_us + self.horizon_us,
+                    PredictorLifecycleState::InsufficientContext,
+                );
+            }
             return;
         }
         let x_now = last_two[0].value;

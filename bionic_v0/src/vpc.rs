@@ -42,6 +42,22 @@ pub enum PublicationStatus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PredictorLifecycleState {
+    InsufficientContext,
+    Warmup,
+    OpenPublication,
+    ResolvedPublication,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PredictorFamilyTrace {
+    pub predictor_family: u8,
+    pub domain: ObservationDomainRef,
+    pub horizon: PredictionHorizon,
+    pub lifecycle: PredictorLifecycleState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PredictionPublicationTrace {
     pub predictor_family: u8,
     pub domain: ObservationDomainRef,
@@ -61,11 +77,27 @@ pub struct OpenPredictionTrace {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VpcContractState {
+    pub predictor_traces: Vec<PredictorFamilyTrace>,
     pub publications: Vec<PredictionPublicationTrace>,
     pub open_predictions: Vec<OpenPredictionTrace>,
 }
 
 impl VpcContractState {
+    pub fn record_predictor_trace(
+        &mut self,
+        predictor_family: u8,
+        domain: ObservationDomainRef,
+        horizon: PredictionHorizon,
+        lifecycle: PredictorLifecycleState,
+    ) {
+        self.predictor_traces.push(PredictorFamilyTrace {
+            predictor_family,
+            domain,
+            horizon,
+            lifecycle,
+        });
+    }
+
     pub fn record_open_publication(
         &mut self,
         publication: PredictionPublicationTrace,
@@ -75,6 +107,12 @@ impl VpcContractState {
         alignment: ErrAlignmentKind,
     ) -> u32 {
         let idx = self.publications.len() as u32;
+        self.record_predictor_trace(
+            predictor_family,
+            domain,
+            horizon,
+            PredictorLifecycleState::OpenPublication,
+        );
         self.publications.push(publication);
         self.open_predictions.push(OpenPredictionTrace {
             predictor_family,
@@ -106,6 +144,12 @@ impl VpcContractState {
         if let Some(publication) = self.publications.get_mut(open.publication_index as usize) {
             publication.status = PublicationStatus::Resolved;
         }
+        self.record_predictor_trace(
+            open.predictor_family,
+            open.domain,
+            open.horizon,
+            PredictorLifecycleState::ResolvedPublication,
+        );
         true
     }
 }

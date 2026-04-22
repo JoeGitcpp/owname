@@ -9,7 +9,7 @@ use crate::phot_predictor::PhotSlotPredictor;
 use crate::probe_law::ProbeLawState;
 use crate::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
-    PredictionPublicationTrace, PublicationStatus, VpcContractState,
+    PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
 };
 use crate::{
     AXIS_COUNT, ATTN_ERR_REBALANCE_ALPHA, ATTN_PRECISION_BIAS_MAX, BINDING_ATTN_ALPHA,
@@ -2345,6 +2345,44 @@ impl Viewport {
 
     pub fn read_vpc_contract(&self) -> VpcContractState {
         self.vpc_contract.read().unwrap().clone()
+    }
+
+    pub fn record_vpc_predictor_trace(
+        &self,
+        predictor_family: u8,
+        domain: ObservationDomainRef,
+        horizon: PredictionHorizon,
+        lifecycle: PredictorLifecycleState,
+    ) {
+        self.vpc_contract.write().unwrap().record_predictor_trace(
+            predictor_family,
+            domain,
+            horizon,
+            lifecycle,
+        );
+    }
+
+    pub fn record_vpc_axis_predictor_trace(
+        &self,
+        predictor_family: u8,
+        axis: usize,
+        publish_t_us: u64,
+        target_t_us: u64,
+        lifecycle: PredictorLifecycleState,
+    ) {
+        let domain = ObservationDomainRef {
+            kind: ObservationDomainKind::Axis,
+            primary: axis as u16,
+            secondary: 0,
+            tertiary: 0,
+        };
+        let horizon = PredictionHorizon {
+            kind: HorizonKind::Point,
+            publish_t_us,
+            target_start_t_us: target_t_us,
+            target_end_t_us: target_t_us,
+        };
+        self.record_vpc_predictor_trace(predictor_family, domain, horizon, lifecycle);
     }
 
     pub fn record_vpc_axis_publication(
