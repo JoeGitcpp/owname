@@ -91,3 +91,31 @@ fn strong_binding_injects_attention_bias() {
         "Strong binding must inject positive attention bias"
     );
 }
+
+// ─── 4. Typical delay from pairs adjusts probe timing ─────────────────────────
+
+#[test]
+fn typical_delay_from_pairs_adjusts_probe_timing() {
+    let vp = Arc::new(Viewport::new());
+
+    // Create several pairs with similar delays (~500ms)
+    for i in 0..5 {
+        let t_epoch = i as u64 * 2_000_000;
+        vp.apply_action_output_event(ActionOutputEvent {
+            channel_kind: OutputChannelKind::GenericWrite,
+            feedback: ActionOutputFeedback::Begin,
+            magnitude: 0.3,
+            event_t_us: t_epoch,
+        });
+        vp.accumulate_ingress_change(t_epoch + 500_000, 0.3);
+        vp.try_auto_pair_latest_epoch_to_window(t_epoch + 500_000);
+    }
+
+    // Run delay distribution feedback
+    let typical = vp.compute_typical_consequence_delay();
+    // Should converge around 500ms
+    assert!(
+        typical > 400_000 && typical < 600_000,
+        "Typical delay should be around 500ms, got {}", typical
+    );
+}
