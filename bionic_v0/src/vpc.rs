@@ -66,11 +66,46 @@ pub struct VpcContractState {
 }
 
 impl VpcContractState {
-    pub fn push_publication(&mut self, trace: PredictionPublicationTrace) {
-        self.publications.push(trace);
+    pub fn record_open_publication(
+        &mut self,
+        publication: PredictionPublicationTrace,
+        predictor_family: u8,
+        domain: ObservationDomainRef,
+        horizon: PredictionHorizon,
+        alignment: ErrAlignmentKind,
+    ) -> u32 {
+        let idx = self.publications.len() as u32;
+        self.publications.push(publication);
+        self.open_predictions.push(OpenPredictionTrace {
+            predictor_family,
+            domain,
+            horizon,
+            alignment,
+            publication_index: idx,
+        });
+        idx
     }
 
-    pub fn push_open_prediction(&mut self, trace: OpenPredictionTrace) {
-        self.open_predictions.push(trace);
+    pub fn resolve_open_publication(
+        &mut self,
+        predictor_family: u8,
+        domain: ObservationDomainRef,
+        target_start_t_us: u64,
+        target_end_t_us: u64,
+    ) -> bool {
+        let Some(open_idx) = self.open_predictions.iter().position(|trace| {
+            trace.predictor_family == predictor_family
+                && trace.domain == domain
+                && trace.horizon.target_start_t_us == target_start_t_us
+                && trace.horizon.target_end_t_us == target_end_t_us
+        }) else {
+            return false;
+        };
+
+        let open = self.open_predictions.remove(open_idx);
+        if let Some(publication) = self.publications.get_mut(open.publication_index as usize) {
+            publication.status = PublicationStatus::Resolved;
+        }
+        true
     }
 }

@@ -7,7 +7,10 @@ use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, Lang
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::PhotSlotPredictor;
 use crate::probe_law::ProbeLawState;
-use crate::vpc::{OpenPredictionTrace, PredictionPublicationTrace, VpcContractState};
+use crate::vpc::{
+    ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
+    PredictionPublicationTrace, PublicationStatus, VpcContractState,
+};
 use crate::{
     AXIS_COUNT, ATTN_ERR_REBALANCE_ALPHA, ATTN_PRECISION_BIAS_MAX, BINDING_ATTN_ALPHA,
     BINDING_MAINTENANCE_DECAY_STEP, BINDING_MAINTENANCE_IDLE_US, BINDING_RESONANCE_THRESHOLD,
@@ -2344,12 +2347,58 @@ impl Viewport {
         self.vpc_contract.read().unwrap().clone()
     }
 
-    pub fn push_vpc_publication(&self, trace: PredictionPublicationTrace) {
-        self.vpc_contract.write().unwrap().push_publication(trace);
+    pub fn record_vpc_axis_publication(
+        &self,
+        predictor_family: u8,
+        axis: usize,
+        publish_t_us: u64,
+        target_t_us: u64,
+    ) -> u32 {
+        let domain = ObservationDomainRef {
+            kind: ObservationDomainKind::Axis,
+            primary: axis as u16,
+            secondary: 0,
+            tertiary: 0,
+        };
+        let horizon = PredictionHorizon {
+            kind: HorizonKind::Point,
+            publish_t_us,
+            target_start_t_us: target_t_us,
+            target_end_t_us: target_t_us,
+        };
+        self.vpc_contract.write().unwrap().record_open_publication(
+            PredictionPublicationTrace {
+                predictor_family,
+                domain,
+                horizon,
+                alignment: ErrAlignmentKind::PointExact,
+                status: PublicationStatus::Open,
+            },
+            predictor_family,
+            domain,
+            horizon,
+            ErrAlignmentKind::PointExact,
+        )
     }
 
-    pub fn push_vpc_open_prediction(&self, trace: OpenPredictionTrace) {
-        self.vpc_contract.write().unwrap().push_open_prediction(trace);
+    pub fn resolve_vpc_axis_publication(
+        &self,
+        predictor_family: u8,
+        axis: usize,
+        target_t_us: u64,
+    ) -> bool {
+        let domain = ObservationDomainRef {
+            kind: ObservationDomainKind::Axis,
+            primary: axis as u16,
+            secondary: 0,
+            tertiary: 0,
+        };
+        self.vpc_contract.write().unwrap().resolve_open_publication(
+            predictor_family,
+            domain,
+            target_t_us,
+            target_t_us,
+        )
     }
 
     // refresh_semantic_readiness / read_semantic_readiness /
