@@ -183,8 +183,18 @@ impl Viewport {
                 .map(|c| c.phase)
         };
 
-        // Step 3: compute event to fire based on channel phase + probe phase.
-        let decay_magnitude = (current_output_intensity * PROBE_SUPPRESSION_ALPHA).max(1e-9);
+        // Step 3: compute typical consequence delay for timing resonance.
+        let typical_delay = self.compute_typical_consequence_delay();
+        let delay_factor = if typical_delay > 0 {
+            (typical_delay as f64 / 1_000_000.0).clamp(0.1, 5.0)
+        } else {
+            1.0
+        };
+
+        // Step 4: compute event to fire based on channel phase + probe phase.
+        let decay_magnitude =
+            ((current_output_intensity * PROBE_SUPPRESSION_ALPHA) / delay_factor).max(1e-9);
+        let mag = (intensity / delay_factor).clamp(0.0, 1.0);
 
         let maybe_event: Option<ActionOutputEvent> = match (channel_phase, probe_phase) {
             // No channel or Idle channel + Rising/Active → Begin
@@ -193,7 +203,7 @@ impl Viewport {
                 Some(ActionOutputEvent {
                     channel_kind: OutputChannelKind::GenericWrite,
                     feedback: ActionOutputFeedback::Begin,
-                    magnitude: intensity,
+                    magnitude: mag,
                     event_t_us: now_us,
                 })
             }
@@ -202,7 +212,7 @@ impl Viewport {
                 Some(ActionOutputEvent {
                     channel_kind: OutputChannelKind::GenericWrite,
                     feedback: ActionOutputFeedback::Adjust,
-                    magnitude: intensity,
+                    magnitude: mag,
                     event_t_us: now_us,
                 })
             }
@@ -211,7 +221,7 @@ impl Viewport {
                 Some(ActionOutputEvent {
                     channel_kind: OutputChannelKind::GenericWrite,
                     feedback: ActionOutputFeedback::Begin,
-                    magnitude: intensity,
+                    magnitude: mag,
                     event_t_us: now_us,
                 })
             }
@@ -239,12 +249,12 @@ impl Viewport {
             _ => None,
         };
 
-        // Step 4: fire event if applicable.
+        // Step 5: fire event if applicable.
         if let Some(event) = maybe_event {
             self.apply_action_output_event(event);
         }
 
-        // Step 5: update output_intensity in probe_law write lock.
+        // Step 6: update output_intensity in probe_law write lock.
         let mut st = self.probe_law.write().unwrap();
         st.output_intensity = match probe_phase {
             ProbePhase::Active | ProbePhase::Rising => intensity,

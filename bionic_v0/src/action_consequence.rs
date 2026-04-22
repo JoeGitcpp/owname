@@ -438,6 +438,29 @@ impl Viewport {
     ///
     /// `pair_t_us` is set to the viewport's shared substrate clock (`clock_us`)
     /// at call time.
+    pub fn compute_typical_consequence_delay(&self) -> u64 {
+        let ac = self.action_consequence.read().unwrap();
+        if ac.pairs.is_empty() {
+            return 0;
+        }
+
+        let recent: Vec<u64> = ac
+            .pairs
+            .iter()
+            .rev()
+            .take(16)
+            .map(|p| p.delay_us)
+            .collect();
+
+        if recent.is_empty() {
+            return 0;
+        }
+
+        let mut sorted = recent.clone();
+        sorted.sort();
+        sorted[sorted.len() / 2]
+    }
+
     pub fn pair_action_consequence(&self, write_seq: u64, window_id: u64, delay_us: u64) -> bool {
         // write_seq 0 is the null sentinel.
         if write_seq == 0 {
