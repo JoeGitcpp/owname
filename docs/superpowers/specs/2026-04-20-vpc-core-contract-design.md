@@ -9,6 +9,7 @@
 > - [2026-04-20-bionic-v0-architecture-audit-cleanup-design.md](./2026-04-20-bionic-v0-architecture-audit-cleanup-design.md)
 > - [2026-04-20-language-binding-layer-design.md](./2026-04-20-language-binding-layer-design.md)
 > - [2026-04-22-vpc-time-and-error-contract-design.md](./2026-04-22-vpc-time-and-error-contract-design.md)
+> - [2026-04-22-vpc-predictor-contract-design.md](./2026-04-22-vpc-predictor-contract-design.md)
 > **目的**：冻结 VPC 的最小理论闭环、跨尺度预测定义与质量口径，作为后续感官层、语言绑定层与更高层结构的前置地基
 
 ---
@@ -60,6 +61,8 @@ VPC 收口只做 3 件事：
 4. `err 定义合同`
 5. `update 本地性合同`
 6. `precision 合同`
+
+其中 `Predictor 合同` 的 family-level 实现边界，现由 [2026-04-22-vpc-predictor-contract-design.md](./2026-04-22-vpc-predictor-contract-design.md) 固定。
 
 以下内容重要，但不属于 VPC 核心，不应阻塞 VPC 收口：
 
@@ -353,3 +356,5 @@ AI 脑内的“等待结果后继续”不应被定义成程序式 blocking。
 - 长远预测如何与短期预测共存而不互相污染
 
 本优先话题已在 [2026-04-22-vpc-time-and-error-contract-design.md](./2026-04-22-vpc-time-and-error-contract-design.md) 中作为正式子 spec 收口；后续剩余工作转为实现合同测试与最小 substrate 落地。
+
+在此之后，下一优先级的话题是 `Predictor 合同`，其 family-level 合同与落地边界已在 [2026-04-22-vpc-predictor-contract-design.md](./2026-04-22-vpc-predictor-contract-design.md) 中收口。
