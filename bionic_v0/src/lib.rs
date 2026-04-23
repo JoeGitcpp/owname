@@ -10,6 +10,7 @@ pub mod snapshot;
 pub mod source;
 pub mod surface_history;
 pub mod surface_projection;
+pub mod surface_render;
 pub mod synthetic_vib;
 pub mod vib;
 pub mod vpc;
