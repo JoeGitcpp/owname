@@ -17,7 +17,7 @@ use bionic_v0::{
 // ---------------------------------------------------------------------------
 
 /// Warmup guard: a slot that has seen fewer than PHOT_PRED_WARMUP_MIN frames
-/// must not emit a non-zero precision (i.e., must not fake confidence).
+/// must not emit a non-zero surprise (i.e., must not fake confidence).
 /// We drive exactly two event frames (warmup fills both) and read the slot.
 #[test]
 fn phot_predictor_warmup_does_not_fake_confidence() {
@@ -47,17 +47,17 @@ fn phot_predictor_warmup_does_not_fake_confidence() {
     // Tick 2 = second blob event → predictor warmup call 2.
     adapter.tick(&vp, 1_066_666);
 
-    // After exactly 2 predictor updates (both warmup), precision must be 0.
+    // After exactly 2 predictor updates (both warmup), surprise must be 0.
     let mut found_phot = false;
     for i in 0..N_OBJECT_SLOTS {
         let s = vp.read_slot(i).unwrap();
         if s.active && (s.source_modality & MOD_PHOT) != 0 {
             if let Some(phot) = s.phot.as_ref() {
                 found_phot = true;
-                for (bi, &p) in phot.precision.iter().enumerate() {
+                for (bi, &p) in phot.surprise.iter().enumerate() {
                     assert!(
-                        p < 1e-12,
-                        "band {}: precision={} must be zero during warmup",
+                        p.abs() < 1e-12,
+                        "band {}: surprise={} must be zero during warmup",
                         bi,
                         p
                     );

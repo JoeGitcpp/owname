@@ -17,7 +17,7 @@ fn make_hl_state(object_err: f64) -> ObjectHighLayerState {
     ObjectHighLayerState {
         predicted_confidence: 0.0,
         predicted_alignment: 0.0,
-        predicted_precision: 0.0,
+        predicted_surprise: 0.0,
         object_err,
         attention_bias: 0.5,
         last_update_t_us: 0,

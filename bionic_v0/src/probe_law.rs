@@ -327,7 +327,7 @@ impl Viewport {
 
     /// Relation-instability trigger (Task 7).
     ///
-    /// Fires a Begin event when the maximum relation_precision (EMA of
+    /// Fires a Begin event when the maximum relation_surprise (EMA of
     /// relation_err²) across all active edges strictly exceeds
     /// RELATION_INSTABILITY_TRIGGER_THRESHOLD.
     /// Begin always opens a new write epoch.
@@ -336,23 +336,23 @@ impl Viewport {
     /// Lock ordering: read global_relations (drop), fire event (write lock
     /// inside apply_action_output_event).
     pub fn tick_relation_instability_trigger(&self, now_us: u64) {
-        let max_precision = {
+        let max_surprise = {
             let gr = self.global_relations.read().unwrap();
             gr.edges
                 .iter()
                 .filter(|e| e.active)
-                .map(|e| e.pred.relation_precision)
+                .map(|e| e.pred.relation_surprise)
                 .fold(0.0_f64, f64::max)
         };
 
-        if max_precision <= RELATION_INSTABILITY_TRIGGER_THRESHOLD {
+        if max_surprise <= RELATION_INSTABILITY_TRIGGER_THRESHOLD {
             return;
         }
 
         self.apply_action_output_event(ActionOutputEvent {
             channel_kind: OutputChannelKind::GenericWrite,
             feedback: ActionOutputFeedback::Begin,
-            magnitude: max_precision.clamp(0.0, 1.0),
+            magnitude: max_surprise.clamp(0.0, 1.0),
             event_t_us: now_us,
         });
     }

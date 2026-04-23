@@ -192,21 +192,21 @@ pub const INGRESS_ACCUMULATION_THRESHOLD: f64 = 0.01;
 pub mod phot_predictor;
 
 /// Minimum observations before the PHOT slot predictor emits real predictions.
-/// Warm-up calls seed the smoother and output err=0 / precision=0.
+/// Warm-up calls seed the smoother and output err=0 / surprise=0.
 pub const PHOT_PRED_WARMUP_MIN: u32 = 2;
 
 /// AR-1 exponential-smoothing alpha for PHOT band predictions.
 /// Higher → tracks faster, noisier; lower → smoother, slower to converge.
 pub const PHOT_PRED_ALPHA: f64 = 0.3;
 
-/// EMA alpha for PHOT per-band precision update (= EMA of squared err).
-pub const PHOT_PRED_PRECISION_ALPHA: f64 = 0.1;
+/// EMA alpha for PHOT per-band surprise update (= EMA of squared err).
+pub const PHOT_PRED_SURPRISE_ALPHA: f64 = 0.05;
 
-/// Lower bound for PHOT band precision.
-pub const PHOT_PRED_PRECISION_MIN: f64 = 0.0;
+/// Lower bound for PHOT band surprise.
+pub const PHOT_PRED_SURPRISE_MIN: f64 = 0.0;
 
-/// Upper bound for PHOT band precision.
-pub const PHOT_PRED_PRECISION_MAX: f64 = 100.0;
+/// Upper bound for PHOT band surprise.
+pub const PHOT_PRED_SURPRISE_MAX: f64 = 1.0;
 
 // --- Phase 4D: multi-event PHOT ---
 
@@ -222,7 +222,7 @@ pub const PHOT_REGION_MIN_PIXELS: usize = 6;
 // --- Phase 5B: Object-level high-layer predictor ---
 pub mod object_high_layer;
 
-/// AR-1 EMA alpha for high-layer feature smoothers (confidence, alignment, precision).
+/// AR-1 EMA alpha for high-layer feature smoothers (confidence, alignment, surprise).
 pub const OBJECT_HL_ALPHA: f64 = 0.2;
 
 /// EMA alpha for err² used to compute attention_bias. Slower than ALPHA so
@@ -249,10 +249,10 @@ pub const PROBE_HISTORY_CAP: usize = 8;
 /// fires a Begin event. Range [0,1]; 0.5 targets the upper half of the load range.
 pub const SURPRISE_TRIGGER_THRESHOLD: f64 = 0.5;
 
-/// Engineering approximation: relation_precision (EMA of relation_err²) threshold
+/// Engineering approximation: relation_surprise (EMA of relation_err²) threshold
 /// for the relation-instability action-output trigger. Strictly above this on any
 /// active edge, tick_relation_instability_trigger fires a Begin event.
-/// relation_precision inputs are in [0, REL_PRED_PRECISION_MAX]; 0.3 sits in the
+/// relation_surprise inputs are in [0, REL_PRED_SURPRISE_MAX]; 0.3 sits in the
 /// lower third, catching sustained surprises before they compound.
 pub const RELATION_INSTABILITY_TRIGGER_THRESHOLD: f64 = 0.3;
 
@@ -263,7 +263,9 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v32: slot_biases added to GlobalAttentionState.
 // v33: VPC contract trace substrate added (publication/open timing provenance).
 // v34: VPC predictor-family lifecycle traces added to snapshot payload.
-pub const SNAPSHOT_VERSION: u64 = 34;
+// v35: precision→surprise rename + unified [0,1] scale (PHOT [0,100]→[0,1],
+//      relation [0,2]→[0,1], HighLevel [0.2,8]→[0,1]).
+pub const SNAPSHOT_VERSION: u64 = 35;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.
@@ -304,17 +306,17 @@ pub const REL_ALPHA: f64 = 0.15;
 /// the predictor tracks score changes more responsively than the scores themselves.
 pub const REL_PRED_ALPHA: f64 = 0.3;
 
-/// EMA alpha for relation_precision (= EMA of relation_err²). Slower than
-/// REL_PRED_ALPHA so precision accumulates evidence over multiple cycles.
-pub const REL_PRED_MSE_ALPHA: f64 = 0.1;
+/// EMA alpha for relation_surprise (= EMA of relation_err²). Slower than
+/// REL_PRED_ALPHA so surprise accumulates evidence over multiple cycles.
+pub const REL_PRED_SURPRISE_ALPHA: f64 = 0.1;
 
 /// Minimum predictor cycles before a relation edge emits non-zero relation_err
-/// and relation_precision. Prevents new edges from faking high confidence.
+/// and relation_surprise. Prevents new edges from faking high confidence.
 pub const REL_PRED_WARMUP_MIN: u32 = 2;
 
-/// Upper bound for relation_precision (= EMA of relation_err²). The inputs
-/// are in [-1,1] so the max RMS² ≈ 1.75; 2.0 gives headroom.
-pub const REL_PRED_PRECISION_MAX: f64 = 2.0;
+/// Upper bound for relation_surprise (= EMA of relation_err²). The inputs
+/// are in [-1,1] so the max RMS² ≈ 1.75; 1.0 gives a tighter cap.
+pub const REL_PRED_SURPRISE_MAX: f64 = 1.0;
 
 // --- Phase 5F: Cross-object reasoning / routing substrate ---
 

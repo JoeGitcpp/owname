@@ -52,7 +52,7 @@ fn phot_snapshot_roundtrip_preserves_health_ambient_slot_and_spatial() {
     assert_eq!(fam.observed, phot_obs);
     assert_eq!(fam.predicted, phot_pred);
     assert_eq!(fam.err, phot_err);
-    assert_eq!(fam.precision, phot_prec);
+    assert_eq!(fam.surprise, phot_prec);
 
     // --- spatial survives ---
     let sp = rs.spatial.expect("spatial present");

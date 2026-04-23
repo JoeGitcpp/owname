@@ -26,15 +26,15 @@ fn tick_relation_slot(vp: &Arc<Viewport>, slot_id: usize, t_us: u64) {
     let vib_obs = [0.1f64; VIB_BANDS];
     let vib_pred = [0.09f64; VIB_BANDS];
     let vib_err = [0.01f64; VIB_BANDS];
-    let vib_prec = [0.5f64; VIB_BANDS];
-    vp.write_slot_vib(slot_id, t_us, &vib_obs, &vib_pred, &vib_err, &vib_prec);
+    let vib_surp = [0.5f64; VIB_BANDS];
+    vp.write_slot_vib(slot_id, t_us, &vib_obs, &vib_pred, &vib_err, &vib_surp);
     vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
 
     let phot_obs = vec![0.2f64; PHOT_BANDS];
     let phot_pred = vec![0.18f64; PHOT_BANDS];
     let phot_err = vec![0.02f64; PHOT_BANDS];
-    let phot_prec = vec![0.4f64; PHOT_BANDS];
-    vp.write_slot_phot(slot_id, t_us, &phot_obs, &phot_pred, &phot_err, &phot_prec);
+    let phot_surp = vec![0.4f64; PHOT_BANDS];
+    vp.write_slot_phot(slot_id, t_us, &phot_obs, &phot_pred, &phot_err, &phot_surp);
     vp.refresh_slot_fusion(slot_id, MOD_PHOT, t_us);
     vp.refresh_slot_high_layer(slot_id, t_us);
 }
@@ -109,7 +109,7 @@ fn phot_predictor_contract_warmup_records_slot_family_trace_without_fake_confide
     let slot = vp.read_slot(slot_id).expect("slot snapshot");
     let phot = slot.phot.expect("phot family");
     assert!(phot.err.iter().all(|v| v.abs() < 1e-12));
-    assert!(phot.precision.iter().all(|v| v.abs() < 1e-12));
+    assert!(phot.surprise.iter().all(|v| v.abs() < 1e-12));
 
     let st = vp.read_vpc_contract();
     assert!(st.predictor_traces.iter().any(|trace| {
@@ -135,7 +135,7 @@ fn phot_predictor_contract_resolves_after_warmup_with_slot_local_provenance() {
     let slot = vp.read_slot(slot_id).expect("slot snapshot");
     let phot = slot.phot.expect("phot family");
     assert!(phot.err.iter().any(|v| v.abs() > 1e-9));
-    assert!(phot.precision.iter().any(|v| *v > 0.0));
+    assert!(phot.surprise.iter().any(|v| *v > 0.0));
 
     let st = vp.read_vpc_contract();
     assert!(st.predictor_traces.iter().any(|trace| {
@@ -168,7 +168,7 @@ fn relation_predictor_contract_warmup_records_edge_local_trace_without_confidenc
     let gr = vp.read_global_relations();
     let edge = gr.edges[relation_edge_idx(slot_a, slot_b)];
     assert_eq!(edge.pred.relation_err, 0.0);
-    assert_eq!(edge.pred.relation_precision, 0.0);
+    assert_eq!(edge.pred.relation_surprise, 0.0);
 }
 
 #[test]
@@ -257,11 +257,11 @@ fn predictor_contract_hygiene_warmup_stays_open_and_non_confident() {
 
     let phot = vp.read_slot(phot_slot).expect("phot slot").phot.expect("phot");
     assert!(phot.err.iter().all(|v| v.abs() < 1e-12));
-    assert!(phot.precision.iter().all(|v| v.abs() < 1e-12));
+    assert!(phot.surprise.iter().all(|v| v.abs() < 1e-12));
 
     let relation_edge = vp.read_global_relations().edges[relation_edge_idx(relation_a, relation_b)];
     assert_eq!(relation_edge.pred.relation_err, 0.0);
-    assert_eq!(relation_edge.pred.relation_precision, 0.0);
+    assert_eq!(relation_edge.pred.relation_surprise, 0.0);
 
     let st = vp.read_vpc_contract();
     assert!(

@@ -270,10 +270,10 @@ impl VibAdapter {
 
         let mut predicted = [0.0f64; VIB_BANDS];
         let mut err = [0.0f64; VIB_BANDS];
-        let mut precision = [0.0f64; VIB_BANDS];
+        let mut surprise = [0.0f64; VIB_BANDS];
         for axis in 0..VIB_BANDS {
-            let (_a, _b, p, last_err, _mse, _u) = vp.read_predictor(axis);
-            precision[axis] = p;
+            let (_a, _b, s, last_err, _mse, _u) = vp.read_predictor(axis);
+            surprise[axis] = s;
             err[axis] = last_err;
             if let Some(pred) = {
                 let r = vp.predicted[axis].read().unwrap();
@@ -282,7 +282,7 @@ impl VibAdapter {
                 predicted[axis] = pred.value;
             }
         }
-        vp.write_slot_vib(slot_id, t_us, bands, &predicted, &err, &precision);
+        vp.write_slot_vib(slot_id, t_us, bands, &predicted, &err, &surprise);
         vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
         vp.refresh_slot_high_layer(slot_id, t_us);
 
@@ -804,13 +804,13 @@ impl ModalityAdapter for SyntheticVibAdapter {
 
         let predicted = [0.0f64; VIB_BANDS];
         let mut err = [0.0f64; VIB_BANDS];
-        let mut precision = [0.0f64; VIB_BANDS];
+        let mut surprise = [0.0f64; VIB_BANDS];
         for axis in 0..VIB_BANDS {
-            let (_a, _b, p, last_err, _mse, _u) = vp.read_predictor(axis);
-            precision[axis] = p;
+            let (_a, _b, s, last_err, _mse, _u) = vp.read_predictor(axis);
+            surprise[axis] = s;
             err[axis] = last_err;
         }
-        vp.write_slot_vib(slot_id, now_us, &frame.bands, &predicted, &err, &precision);
+        vp.write_slot_vib(slot_id, now_us, &frame.bands, &predicted, &err, &surprise);
         vp.refresh_slot_fusion(slot_id, MOD_VIB, now_us);
         vp.refresh_slot_high_layer(slot_id, now_us);
 

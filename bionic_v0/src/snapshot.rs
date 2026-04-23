@@ -85,10 +85,10 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
     buf.extend_from_slice(&vp.read_phot_last_frame_t_us().to_le_bytes());
 
     for axis in 0..AXIS_COUNT {
-        let (a, b, precision, last_err, mse, updates) = vp.read_predictor(axis);
+        let (a, b, surprise, last_err, mse, updates) = vp.read_predictor(axis);
         buf.extend_from_slice(&a.to_le_bytes());
         buf.extend_from_slice(&b.to_le_bytes());
-        buf.extend_from_slice(&precision.to_le_bytes());
+        buf.extend_from_slice(&surprise.to_le_bytes());
         buf.extend_from_slice(&last_err.to_le_bytes());
         buf.extend_from_slice(&mse.to_le_bytes());
         buf.extend_from_slice(&updates.to_le_bytes());
@@ -113,7 +113,7 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
     //
     // Family block:
     //   present:u8, [ n_bands:u16, observed*n_bands, predicted*n_bands,
-    //                 err*n_bands, precision*n_bands ] if present
+    //                 err*n_bands, surprise*n_bands ] if present
     buf.extend_from_slice(&(N_OBJECT_SLOTS as u32).to_le_bytes());
     for slot_id in 0..N_OBJECT_SLOTS {
         let snap = vp.read_slot(slot_id).unwrap_or_default();
@@ -217,7 +217,6 @@ fn write_fusion(buf: &mut Vec<u8>, f: Option<CrossModalFusionState>) {
             buf.extend_from_slice(&s.cross_modal_confidence.to_le_bytes());
             buf.extend_from_slice(&s.vib_weight.to_le_bytes());
             buf.extend_from_slice(&s.phot_weight.to_le_bytes());
-            buf.extend_from_slice(&s.fused_precision.to_le_bytes());
             buf.extend_from_slice(&s.fused_surprise.to_le_bytes());
             buf.push(if s.is_cross_modal { 1u8 } else { 0u8 });
         }
@@ -231,7 +230,7 @@ fn write_high_layer(buf: &mut Vec<u8>, hl: Option<ObjectHighLayerState>) {
             buf.push(1u8);
             buf.extend_from_slice(&s.predicted_confidence.to_le_bytes());
             buf.extend_from_slice(&s.predicted_alignment.to_le_bytes());
-            buf.extend_from_slice(&s.predicted_precision.to_le_bytes());
+            buf.extend_from_slice(&s.predicted_surprise.to_le_bytes());
             buf.extend_from_slice(&s.object_err.to_le_bytes());
             buf.extend_from_slice(&s.attention_bias.to_le_bytes());
             buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
@@ -261,7 +260,7 @@ fn write_family(buf: &mut Vec<u8>, fam: Option<&BandFamilyState>) {
             for v in &f.err {
                 buf.extend_from_slice(&v.to_le_bytes());
             }
-            for v in &f.precision {
+            for v in &f.surprise {
                 buf.extend_from_slice(&v.to_le_bytes());
             }
         }
@@ -282,7 +281,7 @@ fn write_ring(buf: &mut Vec<u8>, ring: &AxisRing) {
 pub struct SnapshotAxis {
     pub a: f64,
     pub b: f64,
-    pub precision: f64,
+    pub surprise: f64,
     pub last_err: f64,
     pub mse: f64,
     pub updates: u64,
@@ -296,7 +295,7 @@ pub struct SnapshotBandFamily {
     pub observed: Vec<f64>,
     pub predicted: Vec<f64>,
     pub err: Vec<f64>,
-    pub precision: Vec<f64>,
+    pub surprise: Vec<f64>,
 }
 
 pub struct SnapshotSlot {
@@ -562,7 +561,7 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
     for _ in 0..axis_count {
         let a = rd_f64(&bytes, &mut cur);
         let b = rd_f64(&bytes, &mut cur);
-        let precision = rd_f64(&bytes, &mut cur);
+        let surprise = rd_f64(&bytes, &mut cur);
         let last_err = rd_f64(&bytes, &mut cur);
         let mse = rd_f64(&bytes, &mut cur);
         let updates = rd_u64(&bytes, &mut cur);
@@ -574,7 +573,7 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         axes.push(SnapshotAxis {
             a,
             b,
-            precision,
+            surprise,
             last_err,
             mse,
             updates,
@@ -824,7 +823,6 @@ fn read_fusion(bytes: &[u8], cur: &mut usize) -> Option<CrossModalFusionState> {
     let cross_modal_confidence = rd_f64(bytes, cur);
     let vib_weight = rd_f64(bytes, cur);
     let phot_weight = rd_f64(bytes, cur);
-    let fused_precision = rd_f64(bytes, cur);
     let fused_surprise = rd_f64(bytes, cur);
     let is_cross_modal = bytes[*cur] != 0;
     *cur += 1;
@@ -837,7 +835,6 @@ fn read_fusion(bytes: &[u8], cur: &mut usize) -> Option<CrossModalFusionState> {
         cross_modal_confidence,
         vib_weight,
         phot_weight,
-        fused_precision,
         fused_surprise,
         is_cross_modal,
     })
@@ -863,14 +860,14 @@ fn read_high_layer(bytes: &[u8], cur: &mut usize) -> Option<ObjectHighLayerState
     }
     let predicted_confidence = rd_f64(bytes, cur);
     let predicted_alignment = rd_f64(bytes, cur);
-    let predicted_precision = rd_f64(bytes, cur);
+    let predicted_surprise = rd_f64(bytes, cur);
     let object_err = rd_f64(bytes, cur);
     let attention_bias = rd_f64(bytes, cur);
     let last_update_t_us = rd_u64(bytes, cur);
     Some(ObjectHighLayerState {
         predicted_confidence,
         predicted_alignment,
-        predicted_precision,
+        predicted_surprise,
         object_err,
         attention_bias,
         last_update_t_us,
@@ -909,16 +906,16 @@ fn read_family(bytes: &[u8], cur: &mut usize) -> Option<SnapshotBandFamily> {
     for _ in 0..n {
         err.push(rd_f64(bytes, cur));
     }
-    let mut precision = Vec::with_capacity(n);
+    let mut surprise = Vec::with_capacity(n);
     for _ in 0..n {
-        precision.push(rd_f64(bytes, cur));
+        surprise.push(rd_f64(bytes, cur));
     }
     Some(SnapshotBandFamily {
         n_bands,
         observed,
         predicted,
         err,
-        precision,
+        surprise,
     })
 }
 
@@ -1050,7 +1047,7 @@ fn write_global_relations(buf: &mut Vec<u8>, gr: &GlobalRelationState) {
         buf.extend_from_slice(&edge.pred.predicted_predictive.to_le_bytes());
         buf.extend_from_slice(&edge.pred.predicted_confidence.to_le_bytes());
         buf.extend_from_slice(&edge.pred.relation_err.to_le_bytes());
-        buf.extend_from_slice(&edge.pred.relation_precision.to_le_bytes());
+        buf.extend_from_slice(&edge.pred.relation_surprise.to_le_bytes());
         buf.extend_from_slice(&edge.pred.last_predict_t_us.to_le_bytes());
     }
 }
@@ -1086,7 +1083,7 @@ fn read_global_relations_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalRelati
         let predicted_predictive = rd_f64(bytes, cur);
         let predicted_confidence = rd_f64(bytes, cur);
         let relation_err = rd_f64(bytes, cur);
-        let relation_precision = rd_f64(bytes, cur);
+        let relation_surprise = rd_f64(bytes, cur);
         let last_predict_t_us = rd_u64(bytes, cur);
         use crate::viewport::RelationEdgePredictionState;
         edges[i] = RelationEdgeState {
@@ -1104,7 +1101,7 @@ fn read_global_relations_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalRelati
                 predicted_predictive,
                 predicted_confidence,
                 relation_err,
-                relation_precision,
+                relation_surprise,
                 last_predict_t_us,
             },
         };

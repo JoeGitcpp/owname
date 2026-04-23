@@ -24,7 +24,7 @@ use crate::{OBJECT_HL_ALPHA, OBJECT_HL_ERR_ALPHA, OBJECT_HL_WARMUP_MIN};
 /// fields; they never recompute them. All fields are numeric.
 ///
 /// `object_err` is the instantaneous RMS prediction error across the three
-/// fusion-level features (confidence, alignment, precision). It rises when the
+/// fusion-level features (confidence, alignment, surprise). It rises when the
 /// fused object state is unpredictable, falls when the state is stable.
 ///
 /// `attention_bias` is a slow-reacting stability proxy derived from an EMA of
@@ -36,8 +36,8 @@ pub struct ObjectHighLayerState {
     pub predicted_confidence: f64,
     /// AR-1 prediction of temporal_alignment_score for this step.
     pub predicted_alignment: f64,
-    /// AR-1 prediction of fused_precision for this step.
-    pub predicted_precision: f64,
+    /// AR-1 prediction of fused_surprise for this step.
+    pub predicted_surprise: f64,
     /// RMS prediction error across the three feature channels.
     pub object_err: f64,
     /// [0,1] stability proxy: 1 / (1 + sqrt(err_sq_ema)). Near 1.0 when stable.
@@ -59,7 +59,7 @@ pub struct ObjectHighLayerState {
 pub struct ObjectHighLayerPredictor {
     smoothed_confidence: f64,
     smoothed_alignment: f64,
-    smoothed_precision: f64,
+    smoothed_surprise: f64,
     /// EMA of object_err²; drives the slow-reacting attention_bias.
     err_sq_ema: f64,
     /// Total calls to `update`, including warm-up calls.
@@ -71,7 +71,7 @@ impl ObjectHighLayerPredictor {
         Self {
             smoothed_confidence: 0.0,
             smoothed_alignment: 0.0,
-            smoothed_precision: 0.0,
+            smoothed_surprise: 0.0,
             err_sq_ema: 0.0,
             n_updates: 0,
         }
@@ -90,18 +90,18 @@ impl ObjectHighLayerPredictor {
         &mut self,
         confidence: f64,
         alignment: f64,
-        precision: f64,
+        surprise: f64,
         now_us: u64,
     ) -> ObjectHighLayerState {
         if self.n_updates < OBJECT_HL_WARMUP_MIN {
             self.smoothed_confidence = confidence;
             self.smoothed_alignment = alignment;
-            self.smoothed_precision = precision;
+            self.smoothed_surprise = surprise;
             self.n_updates += 1;
             return ObjectHighLayerState {
                 predicted_confidence: confidence,
                 predicted_alignment: alignment,
-                predicted_precision: precision,
+                predicted_surprise: surprise,
                 object_err: 0.0,
                 attention_bias: 0.5,
                 last_update_t_us: now_us,
@@ -111,13 +111,13 @@ impl ObjectHighLayerPredictor {
         // AR-1: prediction = previous smoothed value.
         let pred_c = self.smoothed_confidence;
         let pred_a = self.smoothed_alignment;
-        let pred_p = self.smoothed_precision;
+        let pred_s = self.smoothed_surprise;
 
         let err_c = confidence - pred_c;
         let err_a = alignment - pred_a;
-        let err_p = precision - pred_p;
+        let err_s = surprise - pred_s;
 
-        let object_err = ((err_c * err_c + err_a * err_a + err_p * err_p) / 3.0).sqrt();
+        let object_err = ((err_c * err_c + err_a * err_a + err_s * err_s) / 3.0).sqrt();
 
         // EMA of err²: slow-reacting signal for attention_bias.
         self.err_sq_ema = OBJECT_HL_ERR_ALPHA * object_err * object_err
@@ -131,15 +131,15 @@ impl ObjectHighLayerPredictor {
             OBJECT_HL_ALPHA * confidence + (1.0 - OBJECT_HL_ALPHA) * self.smoothed_confidence;
         self.smoothed_alignment =
             OBJECT_HL_ALPHA * alignment + (1.0 - OBJECT_HL_ALPHA) * self.smoothed_alignment;
-        self.smoothed_precision =
-            OBJECT_HL_ALPHA * precision + (1.0 - OBJECT_HL_ALPHA) * self.smoothed_precision;
+        self.smoothed_surprise =
+            OBJECT_HL_ALPHA * surprise + (1.0 - OBJECT_HL_ALPHA) * self.smoothed_surprise;
 
         self.n_updates += 1;
 
         ObjectHighLayerState {
             predicted_confidence: pred_c,
             predicted_alignment: pred_a,
-            predicted_precision: pred_p,
+            predicted_surprise: pred_s,
             object_err,
             attention_bias,
             last_update_t_us: now_us,

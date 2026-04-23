@@ -3,7 +3,7 @@
 //! Contracts verified:
 //!   1. Stable relation drives relation_err down as the AR-1 EMA converges.
 //!   2. Abrupt lead_lag change spikes relation_err from its near-zero baseline.
-//!   3. Warmup prevents fake non-zero relation_err / relation_precision.
+//!   3. Warmup prevents fake non-zero relation_err / relation_surprise.
 //!   4. Snapshot roundtrip preserves all RelationEdgePredictionState fields.
 //!   5. Ordered refresh contract holds: predictor runs after relations, same t.
 //!   6. Claim/scoring architecture is completely unaffected.
@@ -174,7 +174,7 @@ fn relation_change_spikes_err() {
 // Test 3: warmup_does_not_fake_relation_confidence
 //
 // After exactly one full refresh cycle, active edges must report
-// relation_err = 0.0 and relation_precision = 0.0 (warmup gate).
+// relation_err = 0.0 and relation_surprise = 0.0 (warmup gate).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -206,9 +206,9 @@ fn warmup_does_not_fake_relation_confidence() {
             edge.pred.relation_err, edge.src_slot_id, edge.dst_slot_id
         );
         assert_eq!(
-            edge.pred.relation_precision, 0.0,
-            "warmup edge must report relation_precision=0 (no fake confidence); got {} for edge {}→{}",
-            edge.pred.relation_precision, edge.src_slot_id, edge.dst_slot_id
+            edge.pred.relation_surprise, 0.0,
+            "warmup edge must report relation_surprise=0 (no fake confidence); got {} for edge {}→{}",
+            edge.pred.relation_surprise, edge.src_slot_id, edge.dst_slot_id
         );
     }
 }
@@ -278,8 +278,8 @@ fn snapshot_roundtrip_preserves_relation_prediction_state() {
             i
         );
         assert!(
-            (b.pred.relation_precision - a.pred.relation_precision).abs() < 1e-12,
-            "edge[{}].pred.relation_precision roundtrip",
+            (b.pred.relation_surprise - a.pred.relation_surprise).abs() < 1e-12,
+            "edge[{}].pred.relation_surprise roundtrip",
             i
         );
         assert_eq!(

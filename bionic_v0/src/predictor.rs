@@ -55,10 +55,10 @@ impl Ar2Predictor {
         let x_prev = last_two[1].value;
         let t_now = last_two[0].t_us;
 
-        let (precision, _a_vp, _b_vp, _e, _mse, _u) = {
+        let (surprise, _a_vp, _b_vp, _e, _mse, _u) = {
             let ps = vp.predictors[self.axis].read().unwrap();
             (
-                ps.precision,
+                ps.surprise,
                 ps.a,
                 ps.b,
                 ps.last_err,
@@ -76,7 +76,7 @@ impl Ar2Predictor {
             };
             if observed_seq > pp.seq_at_prediction && t_now >= pp.target_t_us {
                 let err = x_now - pp.predicted_value;
-                let eff_lr = self.base_lr * precision;
+                let eff_lr = self.base_lr * surprise;
                 let da = eff_lr * err * pp.used_x0;
                 let db = eff_lr * err * pp.used_x1;
                 self.a = (self.a + da).clamp(-self.clip, self.clip);

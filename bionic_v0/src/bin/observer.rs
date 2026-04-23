@@ -180,7 +180,7 @@ fn print_row(snap: &SnapshotData) {
         let err = ax.err.last().map(|s| s.1).unwrap_or(f64::NAN);
         row.push_str(&format!(
             "\t{:.5}|{:.5}|{:+.5}|{:.5}|{:.3}",
-            obs, pred, err, ax.mse, ax.precision
+            obs, pred, err, ax.mse, ax.surprise
         ));
     }
 
@@ -222,14 +222,14 @@ fn print_row(snap: &SnapshotData) {
         let phot_block = match s.phot.as_ref() {
             None => "-".to_string(),
             Some(f) => {
-                // Phase 4C: show obs>pred±err[prec] per band.
+                // Phase 4C: show obs>pred±err[surp] per band.
                 let parts: Vec<String> = (0..f.observed.len())
                     .map(|i| {
                         let obs = f.observed.get(i).copied().unwrap_or(f64::NAN);
                         let pred = f.predicted.get(i).copied().unwrap_or(f64::NAN);
                         let err = f.err.get(i).copied().unwrap_or(f64::NAN);
-                        let prec = f.precision.get(i).copied().unwrap_or(f64::NAN);
-                        format!("{:.4}>{:.4}{:+.4}[{:.3}]", obs, pred, err, prec)
+                        let surp = f.surprise.get(i).copied().unwrap_or(f64::NAN);
+                        format!("{:.4}>{:.4}{:+.4}[{:.3}]", obs, pred, err, surp)
                     })
                     .collect();
                 parts.join(",")
@@ -253,10 +253,10 @@ fn print_row(snap: &SnapshotData) {
             Some(hl) => {
                 let hl_age_ms = snap.clock_us.saturating_sub(hl.last_update_t_us) as f64 / 1000.0;
                 format!(
-                    "hl:c{:.3}|a{:.3}|p{:.3}|err{:.4}|bias{:.3}|{:.0}ms",
+                    "hl:c{:.3}|a{:.3}|s{:.3}|err{:.4}|bias{:.3}|{:.0}ms",
                     hl.predicted_confidence,
                     hl.predicted_alignment,
-                    hl.predicted_precision,
+                    hl.predicted_surprise,
                     hl.object_err,
                     hl.attention_bias,
                     hl_age_ms,
@@ -339,7 +339,7 @@ fn print_row(snap: &SnapshotData) {
         }
         let pred_age_ms = snap.clock_us.saturating_sub(edge.pred.last_predict_t_us) as f64 / 1000.0;
         rel_parts.push(format!(
-            "s{}->d{}:co{:.3}|ll{:+.3}|pr{:.3}|cf{:.2}|pc{:.3}|pl{:+.3}|pp{:.3}|pf{:.2}|err{:.4}|rp{:.4}|{:.0}ms",
+            "s{}->d{}:co{:.3}|ll{:+.3}|pr{:.3}|cf{:.2}|pc{:.3}|pl{:+.3}|pp{:.3}|pf{:.2}|err{:.4}|rs{:.4}|{:.0}ms",
             edge.src_slot_id,
             edge.dst_slot_id,
             edge.co_change_score,
@@ -351,7 +351,7 @@ fn print_row(snap: &SnapshotData) {
             edge.pred.predicted_predictive,
             edge.pred.predicted_confidence,
             edge.pred.relation_err,
-            edge.pred.relation_precision,
+            edge.pred.relation_surprise,
             pred_age_ms,
         ));
     }

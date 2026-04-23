@@ -9,11 +9,11 @@
 //!   * No semantic labels, object names, or tracking IDs.
 //!   * Not shared across slots — every slot is independent.
 //!   * Does not influence claim/scoring — only writes band-family output.
-//!   * Precision tracks surprise (EMA of err²); it is numeric, not a label.
+//!   * Surprise tracks prediction error (EMA of err²); it is numeric, not a label.
 
 use crate::{
-    PHOT_BANDS, PHOT_PRED_ALPHA, PHOT_PRED_PRECISION_ALPHA, PHOT_PRED_PRECISION_MAX,
-    PHOT_PRED_PRECISION_MIN, PHOT_PRED_WARMUP_MIN,
+    PHOT_BANDS, PHOT_PRED_ALPHA, PHOT_PRED_SURPRISE_ALPHA, PHOT_PRED_SURPRISE_MAX,
+    PHOT_PRED_SURPRISE_MIN, PHOT_PRED_WARMUP_MIN,
 };
 
 pub const VPC_FAMILY_PHOT: u8 = 2;
@@ -22,25 +22,25 @@ pub const VPC_FAMILY_PHOT: u8 = 2;
 pub struct PhotPrediction {
     pub predicted: Vec<f64>,
     pub err: Vec<f64>,
-    pub precision: Vec<f64>,
+    pub surprise: Vec<f64>,
 }
 
 /// Slot-local AR-1 predictor for PHOT bands.
 ///
 /// Each band is tracked independently with:
 ///   * exponential smoothing (`smoothed`) as the AR-1 state
-///   * a running EMA of squared error as `precision`
+///   * a running EMA of squared error as `surprise`
 ///
 /// During warm-up (`n_updates < PHOT_PRED_WARMUP_MIN`), the output carries
-/// `err = 0` and `precision = 0` so callers can distinguish "not yet
+/// `err = 0` and `surprise = 0` so callers can distinguish "not yet
 /// predicting" from a real low-error state.
 pub struct PhotSlotPredictor {
     /// Number of bands this predictor was initialized for.
     n_bands: usize,
     /// AR-1 exponential-smoothing state, one element per band.
     smoothed: [f64; PHOT_BANDS],
-    /// Per-band precision (EMA of squared error). Rises with surprise.
-    precision: [f64; PHOT_BANDS],
+    /// Per-band surprise (EMA of squared error). Rises with prediction error.
+    surprise: [f64; PHOT_BANDS],
     /// Total calls to `update`, including warm-up calls.
     pub n_updates: u32,
 }
@@ -51,7 +51,7 @@ impl PhotSlotPredictor {
         Self {
             n_bands,
             smoothed: [0.0; PHOT_BANDS],
-            precision: [PHOT_PRED_PRECISION_MIN; PHOT_BANDS],
+            surprise: [PHOT_PRED_SURPRISE_MIN; PHOT_BANDS],
             n_updates: 0,
         }
     }
@@ -60,11 +60,11 @@ impl PhotSlotPredictor {
     /// prediction output for this step.
     ///
     /// Warm-up (n_updates < PHOT_PRED_WARMUP_MIN): seeds the smoother from
-    /// the observed values and emits zero err / zero precision so callers
+    /// the observed values and emits zero err / zero surprise so callers
     /// cannot mistake a warm-up tick for a confident low-error prediction.
     ///
     /// After warm-up: issues an AR-1 prediction (previous smoothed value),
-    /// computes err = observed - predicted, updates precision via EMA of err²,
+    /// computes err = observed - predicted, updates surprise via EMA of err²,
     /// then updates the AR-1 state.
     pub fn update(&mut self, observed: &[f64]) -> PhotPrediction {
         let n = self.n_bands.min(observed.len());
@@ -78,7 +78,7 @@ impl PhotSlotPredictor {
             return PhotPrediction {
                 predicted: observed[..n].to_vec(),
                 err: vec![0.0; n],
-                precision: vec![PHOT_PRED_PRECISION_MIN; n],
+                surprise: vec![PHOT_PRED_SURPRISE_MIN; n],
             };
         }
 
@@ -90,13 +90,13 @@ impl PhotSlotPredictor {
             .map(|(o, p)| o - p)
             .collect();
 
-        // Precision tracks surprise: rises with err², falls when err is small.
+        // Surprise tracks prediction error: rises with err², falls when err is small.
         for i in 0..n {
             let e2 = err[i] * err[i];
-            self.precision[i] = PHOT_PRED_PRECISION_ALPHA * e2
-                + (1.0 - PHOT_PRED_PRECISION_ALPHA) * self.precision[i];
-            self.precision[i] =
-                self.precision[i].clamp(PHOT_PRED_PRECISION_MIN, PHOT_PRED_PRECISION_MAX);
+            self.surprise[i] = PHOT_PRED_SURPRISE_ALPHA * e2
+                + (1.0 - PHOT_PRED_SURPRISE_ALPHA) * self.surprise[i];
+            self.surprise[i] =
+                self.surprise[i].clamp(PHOT_PRED_SURPRISE_MIN, PHOT_PRED_SURPRISE_MAX);
         }
 
         // Update the AR-1 smoother state for next step.
@@ -109,7 +109,7 @@ impl PhotSlotPredictor {
         PhotPrediction {
             predicted,
             err,
-            precision: self.precision[..n].to_vec(),
+            surprise: self.surprise[..n].to_vec(),
         }
     }
 }
@@ -130,17 +130,17 @@ mod tests {
         // First warm-up call.
         let out = pred.update(&obs);
         assert_eq!(
-            out.precision,
+            out.surprise,
             vec![0.0; 4],
-            "warmup call 1: precision must be zero"
+            "warmup call 1: surprise must be zero"
         );
         assert_eq!(out.err, vec![0.0; 4], "warmup call 1: err must be zero");
         // Second warm-up call (n_updates=1, still < WARMUP_MIN=2).
         let out2 = pred.update(&obs);
         assert_eq!(
-            out2.precision,
+            out2.surprise,
             vec![0.0; 4],
-            "warmup call 2: precision must be zero"
+            "warmup call 2: surprise must be zero"
         );
         assert_eq!(out2.err, vec![0.0; 4], "warmup call 2: err must be zero");
         // Third call: now predicting. With constant obs, err should still be ~0.
@@ -224,10 +224,10 @@ mod tests {
         }
     }
 
-    /// Precision tracks surprise: low err → precision stays low,
-    /// high err → precision rises.
+    /// Surprise tracks prediction quality: low err → surprise stays low,
+    /// high err → surprise rises.
     #[test]
-    fn phot_precision_tracks_prediction_quality() {
+    fn phot_surprise_tracks_prediction_quality() {
         let mut pred = PhotSlotPredictor::new(1);
         let stable = [0.5_f64];
 
@@ -238,19 +238,19 @@ mod tests {
             pred.update(&stable);
         }
         let stable_out = pred.update(&stable);
-        let precision_after_stable = stable_out.precision[0];
+        let surprise_after_stable = stable_out.surprise[0];
 
         // Spike: large sudden change.
         let spike_obs = [5.0_f64];
         pred.update(&spike_obs);
         let spike_out = pred.update(&spike_obs);
-        let precision_after_spike = spike_out.precision[0];
+        let surprise_after_spike = spike_out.surprise[0];
 
         assert!(
-            precision_after_spike > precision_after_stable,
-            "precision must rise after high-err spike: stable={} spike={}",
-            precision_after_stable,
-            precision_after_spike
+            surprise_after_spike > surprise_after_stable,
+            "surprise must rise after high-err spike: stable={} spike={}",
+            surprise_after_stable,
+            surprise_after_spike
         );
     }
 }

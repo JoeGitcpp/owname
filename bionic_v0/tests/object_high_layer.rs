@@ -288,8 +288,8 @@ fn snapshot_roundtrip_preserves_high_layer_state() {
         "predicted_alignment roundtrip failed"
     );
     assert!(
-        (hl.predicted_precision - hl_before.predicted_precision).abs() < 1e-12,
-        "predicted_precision roundtrip failed"
+        (hl.predicted_surprise - hl_before.predicted_surprise).abs() < 1e-12,
+        "predicted_surprise roundtrip failed"
     );
     assert!(
         (hl.object_err - hl_before.object_err).abs() < 1e-12,

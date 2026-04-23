@@ -199,14 +199,13 @@ fn relation_instability_above_threshold_fires_begin() {
     {
         let mut gr = vp.global_relations.write().unwrap();
         gr.edges[0].active = true;
-        // Engineering approximation: relation_precision is EMA of relation_err².
-        gr.edges[0].pred.relation_precision = RELATION_INSTABILITY_TRIGGER_THRESHOLD + 0.1;
+        gr.edges[0].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD + 0.1;
     }
     vp.tick_relation_instability_trigger(1_000_000);
     let ao = vp.read_action_output();
     assert_eq!(
         ao.n_write_epochs, 1,
-        "active edge with high relation_precision must fire Begin"
+        "active edge with high relation_surprise must fire Begin"
     );
 }
 
@@ -216,14 +215,13 @@ fn relation_instability_at_threshold_fires_nothing() {
     {
         let mut gr = vp.global_relations.write().unwrap();
         gr.edges[0].active = true;
-        gr.edges[0].pred.relation_precision = RELATION_INSTABILITY_TRIGGER_THRESHOLD;
-        // equal — no fire
+        gr.edges[0].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD;
     }
     vp.tick_relation_instability_trigger(1_000_000);
     let ao = vp.read_action_output();
     assert_eq!(
         ao.n_write_epochs, 0,
-        "relation_precision exactly at threshold must not fire (strictly greater required)"
+        "relation_surprise exactly at threshold must not fire (strictly greater required)"
     );
 }
 
@@ -233,11 +231,11 @@ fn relation_instability_below_threshold_fires_nothing() {
     {
         let mut gr = vp.global_relations.write().unwrap();
         gr.edges[0].active = true;
-        gr.edges[0].pred.relation_precision = RELATION_INSTABILITY_TRIGGER_THRESHOLD * 0.5;
+        gr.edges[0].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD * 0.5;
     }
     vp.tick_relation_instability_trigger(1_000_000);
     let ao = vp.read_action_output();
-    assert_eq!(ao.n_write_epochs, 0, "low relation_precision must not fire");
+    assert_eq!(ao.n_write_epochs, 0, "low relation_surprise must not fire");
 }
 
 #[test]
@@ -245,34 +243,32 @@ fn relation_instability_inactive_edge_ignored() {
     let vp = Viewport::new();
     {
         let mut gr = vp.global_relations.write().unwrap();
-        gr.edges[0].active = false; // inactive — must be ignored regardless of precision
-        gr.edges[0].pred.relation_precision = 1.0;
+        gr.edges[0].active = false;
+        gr.edges[0].pred.relation_surprise = 1.0;
     }
     vp.tick_relation_instability_trigger(1_000_000);
     let ao = vp.read_action_output();
     assert_eq!(
         ao.n_write_epochs, 0,
-        "inactive edge must not trigger even with high precision"
+        "inactive edge must not trigger even with high surprise"
     );
 }
 
 #[test]
-fn relation_instability_max_precision_across_edges() {
+fn relation_instability_max_surprise_across_edges() {
     let vp = Viewport::new();
     {
         let mut gr = vp.global_relations.write().unwrap();
-        // Edge 0 active but below threshold.
         gr.edges[0].active = true;
-        gr.edges[0].pred.relation_precision = RELATION_INSTABILITY_TRIGGER_THRESHOLD * 0.5;
-        // Edge 1 active and above threshold.
+        gr.edges[0].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD * 0.5;
         gr.edges[1].active = true;
-        gr.edges[1].pred.relation_precision = RELATION_INSTABILITY_TRIGGER_THRESHOLD + 0.2;
+        gr.edges[1].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD + 0.2;
     }
     vp.tick_relation_instability_trigger(1_000_000);
     let ao = vp.read_action_output();
     assert_eq!(
         ao.n_write_epochs, 1,
-        "max precision across active edges determines trigger; one high edge must fire"
+        "max surprise across active edges determines trigger; one high edge must fire"
     );
 }
 

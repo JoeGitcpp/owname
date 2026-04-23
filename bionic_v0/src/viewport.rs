@@ -22,7 +22,7 @@ use crate::{
     N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES,
     PHOT_PRED_WARMUP_MIN, QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REASONING_HISTORY_ALPHA,
     REASONING_HISTORY_RING_CAP, REASONING_INTENSITY_THRESHOLD, REPLAY_ALPHA, REL_ALPHA,
-    REL_PRED_ALPHA, REL_PRED_MSE_ALPHA, REL_PRED_PRECISION_MAX, REL_PRED_WARMUP_MIN,
+    REL_PRED_ALPHA, REL_PRED_SURPRISE_MAX, REL_PRED_SURPRISE_ALPHA, REL_PRED_WARMUP_MIN,
     SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS,
 };
 
@@ -113,7 +113,7 @@ impl AxisRing {
 pub struct PredictorState {
     pub a: f64,
     pub b: f64,
-    pub precision: f64,
+    pub surprise: f64,
     pub last_err: f64,
     pub total_updates: u64,
     pub mean_sq_err: f64,
@@ -124,7 +124,7 @@ impl PredictorState {
         Self {
             a: 0.0,
             b: 0.0,
-            precision: 1.0,
+            surprise: 0.0,
             last_err: 0.0,
             total_updates: 0,
             mean_sq_err: 0.0,
@@ -217,7 +217,7 @@ pub struct AmbientSnapshot {
 /// BandFamilyState — per-modality live-curve fragment.
 ///
 /// Each modality writes its own `n_bands`-wide strip (observed / predicted /
-/// err / precision). Length is not constrained across modalities: VIB's band
+/// err / surprise). Length is not constrained across modalities: VIB's band
 /// count and PHOT's band count are independent.
 #[derive(Clone, Debug)]
 pub struct BandFamilyState {
@@ -225,7 +225,7 @@ pub struct BandFamilyState {
     pub observed: Vec<f64>,
     pub predicted: Vec<f64>,
     pub err: Vec<f64>,
-    pub precision: Vec<f64>,
+    pub surprise: Vec<f64>,
 }
 
 impl BandFamilyState {
@@ -236,7 +236,7 @@ impl BandFamilyState {
             observed: vec![0.0; n],
             predicted: vec![0.0; n],
             err: vec![0.0; n],
-            precision: vec![0.0; n],
+            surprise: vec![0.0; n],
         }
     }
 }
@@ -290,9 +290,7 @@ pub struct CrossModalFusionState {
     pub vib_weight: f64,
     /// [0,1] PHOT freshness weight; 0 when PHOT never wrote or is stale.
     pub phot_weight: f64,
-    /// Weighted mean of per-band precision values across active modalities.
-    pub fused_precision: f64,
-    /// Weighted mean of per-band |err| values across active modalities.
+    /// Weighted mean of per-band surprise values across active modalities [0,1].
     pub fused_surprise: f64,
     /// True iff both VIB and PHOT are present with vib_weight > 0.01 and
     /// phot_weight > 0.01. Single-modality slots are never is_cross_modal.
@@ -372,7 +370,7 @@ impl Default for GlobalAttentionState {
 // ---------------------------------------------------------------------------
 
 /// Snapshot-visible prediction output for one directed relation edge.
-/// All fields numeric-only. `relation_err` and `relation_precision` are 0
+/// All fields numeric-only. `relation_err` and `relation_surprise` are 0
 /// during the warmup window and must not be interpreted as high-confidence.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RelationEdgePredictionState {
@@ -388,7 +386,7 @@ pub struct RelationEdgePredictionState {
     /// 0 during warmup (`warmup < REL_PRED_WARMUP_MIN`).
     pub relation_err: f64,
     /// EMA of `relation_err²`. Rises with sustained surprise, 0 during warmup.
-    pub relation_precision: f64,
+    pub relation_surprise: f64,
     /// Wall-clock µs of the last predictor update. 0 = never run.
     pub last_predict_t_us: u64,
 }
@@ -401,7 +399,7 @@ pub struct RelationEdgePredState {
     pub ema_lag: f64,
     pub ema_pred: f64,
     pub ema_conf: f64,
-    /// EMA of relation_err² — feeds relation_precision.
+    /// EMA of relation_err² — feeds relation_surprise.
     pub ema_mse: f64,
     /// Number of active cycles seen since last reset. Gating warmup output.
     pub warmup: u32,
@@ -677,21 +675,15 @@ fn freshness_weight(last_t_us: u64, now_us: u64) -> f64 {
     clamp01(1.0 - dt as f64 / SLOT_IDLE_US as f64)
 }
 
-fn mean_band_precision(fam: Option<&BandFamilyState>) -> f64 {
+fn mean_band_surprise(fam: Option<&BandFamilyState>) -> f64 {
     match fam {
         None => 0.0,
-        Some(f) if f.precision.is_empty() => 0.0,
-        Some(f) => f.precision.iter().sum::<f64>() / f.precision.len() as f64,
+        Some(f) if f.surprise.is_empty() => 0.0,
+        Some(f) => f.surprise.iter().sum::<f64>() / f.surprise.len() as f64,
     }
 }
 
-fn mean_abs_band_err(fam: Option<&BandFamilyState>) -> f64 {
-    match fam {
-        None => 0.0,
-        Some(f) if f.err.is_empty() => 0.0,
-        Some(f) => f.err.iter().map(|e| e.abs()).sum::<f64>() / f.err.len() as f64,
-    }
-}
+
 
 // ---------------------------------------------------------------------------
 // Phase 3C: EventEvidence contract + SlotClaim decision.
@@ -1393,7 +1385,7 @@ impl Viewport {
         observed: &[f64; VIB_BANDS],
         predicted: &[f64; VIB_BANDS],
         err: &[f64; VIB_BANDS],
-        precision: &[f64; VIB_BANDS],
+        surprise: &[f64; VIB_BANDS],
     ) {
         if slot_id >= N_OBJECT_SLOTS {
             return;
@@ -1409,7 +1401,7 @@ impl Viewport {
             observed: observed.to_vec(),
             predicted: predicted.to_vec(),
             err: err.to_vec(),
-            precision: precision.to_vec(),
+            surprise: surprise.to_vec(),
         });
     }
 
@@ -1423,13 +1415,13 @@ impl Viewport {
         observed: &[f64],
         predicted: &[f64],
         err: &[f64],
-        precision: &[f64],
+        surprise: &[f64],
     ) {
         if slot_id >= N_OBJECT_SLOTS {
             return;
         }
         let n = observed.len();
-        if predicted.len() != n || err.len() != n || precision.len() != n {
+        if predicted.len() != n || err.len() != n || surprise.len() != n {
             return;
         }
         let mut s = self.slots[slot_id].write().unwrap();
@@ -1443,12 +1435,12 @@ impl Viewport {
             observed: observed.to_vec(),
             predicted: predicted.to_vec(),
             err: err.to_vec(),
-            precision: precision.to_vec(),
+            surprise: surprise.to_vec(),
         });
     }
 
     /// Phase 4C: write PHOT band data into a slot, running the slot-local AR-1
-    /// predictor to produce real `predicted`, `err`, and `precision` values.
+    /// predictor to produce real `predicted`, `err`, and `surprise` values.
     ///
     /// The predictor state (`phot_pred`) lives inside the slot and resets
     /// automatically when the slot is cleared by `sweep_slots`. Adapters call
@@ -1458,9 +1450,9 @@ impl Viewport {
     /// Rules:
     ///   * Slot must be active; no-op otherwise.
     ///   * Predictor warms up for `PHOT_PRED_WARMUP_MIN` calls; during warmup
-    ///     `err=0` and `precision=0` to prevent fake-confidence reads.
+    ///     `err=0` and `surprise=0` to prevent fake-confidence reads.
     ///   * After warmup: `predicted` = previous AR-1 state, `err` = residual,
-    ///     `precision` = EMA of squared err (rises with surprise).
+    ///     `surprise` = EMA of squared err (rises with prediction error).
     ///   * Does NOT touch claim/scoring or any other modality's fields.
     pub fn update_slot_phot_with_predictor(&self, slot_id: usize, t_us: u64, observed: &[f64]) {
         if slot_id >= N_OBJECT_SLOTS {
@@ -1479,7 +1471,7 @@ impl Viewport {
                 s.phot_pred = Some(PhotSlotPredictor::new(n));
             }
             let out = s.phot_pred.as_mut().unwrap().update(observed);
-            let lifecycle = if s.phot_pred.as_ref().unwrap().n_updates <= PHOT_PRED_WARMUP_MIN {
+            let lifecycle = if s.phot_pred.as_ref().unwrap().n_updates < PHOT_PRED_WARMUP_MIN {
                 PredictorLifecycleState::Warmup
             } else {
                 PredictorLifecycleState::ResolvedPublication
@@ -1491,7 +1483,7 @@ impl Viewport {
                 observed: observed.to_vec(),
                 predicted: out.predicted,
                 err: out.err,
-                precision: out.precision,
+                surprise: out.surprise,
             });
             lifecycle
         };
@@ -1513,13 +1505,13 @@ impl Viewport {
         observed: &[f64],
         predicted: &[f64],
         err: &[f64],
-        precision: &[f64],
+        surprise: &[f64],
     ) {
         if slot_id >= N_OBJECT_SLOTS {
             return;
         }
         let n = observed.len();
-        if predicted.len() != n || err.len() != n || precision.len() != n {
+        if predicted.len() != n || err.len() != n || surprise.len() != n {
             return;
         }
         let mut s = self.slots[slot_id].write().unwrap();
@@ -1533,7 +1525,7 @@ impl Viewport {
             observed: observed.to_vec(),
             predicted: predicted.to_vec(),
             err: err.to_vec(),
-            precision: precision.to_vec(),
+            surprise: surprise.to_vec(),
         });
     }
 
@@ -1692,10 +1684,8 @@ impl Viewport {
         }
 
         let source_modality = s.source_modality;
-        let vib_prec = mean_band_precision(s.vib.as_ref());
-        let phot_prec = mean_band_precision(s.phot.as_ref());
-        let vib_surprise_val = mean_abs_band_err(s.vib.as_ref());
-        let phot_surprise_val = mean_abs_band_err(s.phot.as_ref());
+        let vib_surprise = mean_band_surprise(s.vib.as_ref());
+        let phot_surprise = mean_band_surprise(s.phot.as_ref());
 
         // Freshness weights: decay linearly to 0 over SLOT_IDLE_US.
         let vib_weight = freshness_weight(last_vib_t_us, now_us);
@@ -1724,13 +1714,8 @@ impl Viewport {
         };
 
         let total_w = vib_weight + phot_weight;
-        let fused_precision = if total_w > 1e-12 {
-            (vib_weight * vib_prec + phot_weight * phot_prec) / total_w
-        } else {
-            0.0
-        };
         let fused_surprise = if total_w > 1e-12 {
-            (vib_weight * vib_surprise_val + phot_weight * phot_surprise_val) / total_w
+            (vib_weight * vib_surprise + phot_weight * phot_surprise) / total_w
         } else {
             0.0
         };
@@ -1744,7 +1729,6 @@ impl Viewport {
             cross_modal_confidence,
             vib_weight,
             phot_weight,
-            fused_precision,
             fused_surprise,
             is_cross_modal,
         });
@@ -1757,7 +1741,7 @@ impl Viewport {
     ///   1. Reads `slot.fusion` — no-op if fusion is None (e.g. slot not yet
     ///      fused) or slot is inactive.
     ///   2. Initialises `slot.hl_pred` on first call.
-    ///   3. Feeds the three fusion scalars (confidence, alignment, precision)
+    ///   3. Feeds the three fusion scalars (confidence, alignment, surprise)
     ///      into the AR-1 predictor.
     ///   4. Writes the predictor output to `slot.high_layer`.
     ///
@@ -1782,7 +1766,7 @@ impl Viewport {
         let out = s.hl_pred.as_mut().unwrap().update(
             fusion.cross_modal_confidence,
             fusion.temporal_alignment_score,
-            fusion.fused_precision,
+            fusion.fused_surprise,
             now_us,
         );
         s.high_layer = Some(out);
@@ -2023,7 +2007,7 @@ impl Viewport {
     /// current. For each active edge, the predictor:
     ///   1. Computes per-dimension errors against the previous EMA prediction.
     ///   2. Updates the EMA for each of the 4 scores.
-    ///   3. Writes prediction output (predicted_*, relation_err, relation_precision)
+    ///   3. Writes prediction output (predicted_*, relation_err, relation_surprise)
     ///      back into `GlobalRelationState.edges[i].pred`.
     ///
     /// Inactive edges reset the predictor bank entry to Default so the next
@@ -2033,7 +2017,7 @@ impl Viewport {
     ///   * Takes write locks on both `global_relations` and `relation_pred_bank`.
     ///     These are different Viewport fields — no deadlock risk.
     ///   * During warmup (`warmup < REL_PRED_WARMUP_MIN`): `relation_err = 0`,
-    ///     `relation_precision = 0` — no fake high confidence.
+    ///     `relation_surprise = 0` — no fake high confidence.
     ///   * Does NOT touch claim/scoring, band families, fusion, adapters, or
     ///     the attention allocator.
     pub fn refresh_global_relation_predictor(&self, now_us: u64) {
@@ -2077,9 +2061,9 @@ impl Viewport {
                 / 4.0)
                 .sqrt();
 
-            // Update EMA of squared error (feeds relation_precision).
+            // Update EMA of squared error (feeds relation_surprise).
             ps.ema_mse =
-                (1.0 - REL_PRED_MSE_ALPHA) * ps.ema_mse + REL_PRED_MSE_ALPHA * rms_err * rms_err;
+                (1.0 - REL_PRED_SURPRISE_ALPHA) * ps.ema_mse + REL_PRED_SURPRISE_ALPHA * rms_err * rms_err;
 
             ps.warmup = ps.warmup.saturating_add(1);
 
@@ -2092,7 +2076,7 @@ impl Viewport {
 
             if ps.warmup < REL_PRED_WARMUP_MIN {
                 edge.pred.relation_err = 0.0;
-                edge.pred.relation_precision = 0.0;
+                edge.pred.relation_surprise = 0.0;
                 lifecycle_traces.push((
                     i,
                     edge.src_slot_id,
@@ -2101,7 +2085,7 @@ impl Viewport {
                 ));
             } else {
                 edge.pred.relation_err = rms_err;
-                edge.pred.relation_precision = ps.ema_mse.min(REL_PRED_PRECISION_MAX);
+                edge.pred.relation_surprise = ps.ema_mse.min(REL_PRED_SURPRISE_MAX);
                 resolved_publications.push((i, edge.src_slot_id, edge.dst_slot_id));
             }
         }
@@ -2636,9 +2620,9 @@ impl Viewport {
         ps.mean_sq_err = (1.0 - alpha) * ps.mean_sq_err + alpha * last_err * last_err;
     }
 
-    pub fn set_precision(&self, axis: usize, p: f64) {
+    pub fn set_surprise(&self, axis: usize, v: f64) {
         let mut ps = self.predictors[axis].write().unwrap();
-        ps.precision = p;
+        ps.surprise = v;
     }
 
     pub fn read_predictor(&self, axis: usize) -> (f64, f64, f64, f64, f64, u64) {
@@ -2646,7 +2630,7 @@ impl Viewport {
         (
             ps.a,
             ps.b,
-            ps.precision,
+            ps.surprise,
             ps.last_err,
             ps.mean_sq_err,
             ps.total_updates,
