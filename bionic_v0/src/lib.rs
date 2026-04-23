@@ -8,6 +8,7 @@ pub mod predictor;
 pub mod probe_law;
 pub mod snapshot;
 pub mod source;
+pub mod surface_projection;
 pub mod synthetic_vib;
 pub mod vib;
 pub mod vpc;
