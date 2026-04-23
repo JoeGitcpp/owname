@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
+use bionic_v0::vocal_adapter::sample_vocal_waveform;
 
 #[test]
 fn snapshot_roundtrip_preserves_vocal_substrate_state() {
@@ -12,4 +13,12 @@ fn snapshot_roundtrip_preserves_vocal_substrate_state() {
     write_snapshot(&vp, &paths).unwrap();
     let snap = read_snapshot(&paths.final_path).unwrap();
     assert!(snap.vocal_target.active_energy > 0.0);
+}
+
+#[test]
+fn vocal_adapter_converts_organ_state_into_nonzero_audio_samples() {
+    let vp = Arc::new(Viewport::new());
+    vp.begin_voicing(1_000, 0.6, 0.4, 0.7);
+    let samples = sample_vocal_waveform(&vp, 128);
+    assert!(samples.iter().any(|v| v.abs() > 0.0));
 }

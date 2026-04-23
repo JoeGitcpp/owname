@@ -13,6 +13,7 @@ pub mod surface_projection;
 pub mod surface_render;
 pub mod synthetic_vib;
 pub mod vib;
+pub mod vocal_adapter;
 pub mod vocal_imitation;
 pub mod vocal_memory;
 pub mod vocal_organ;
