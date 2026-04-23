@@ -14,9 +14,15 @@ path = "src/bin/body.rs"
 name = "observer"
 path = "src/bin/observer.rs"
 
+[[bin]]
+name = "observer_surface"
+path = "src/bin/observer_surface.rs"
+
 [dependencies]
 cpal = "0.15"
 nokhwa = { version = "0.10", features = ["input-avfoundation"] }
+pixels = "0.13"
+winit = "0.28"
 
 [profile.release]
 opt-level = 3
