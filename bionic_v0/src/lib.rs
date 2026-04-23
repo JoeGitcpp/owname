@@ -14,6 +14,7 @@ pub mod surface_render;
 pub mod synthetic_vib;
 pub mod vib;
 pub mod vocal_imitation;
+pub mod vocal_memory;
 pub mod vocal_organ;
 pub mod vocal_target;
 pub mod vpc;
