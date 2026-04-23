@@ -2895,4 +2895,58 @@ impl Viewport {
     pub fn read_vocal_memory(&self) -> VocalMemoryState {
         self.vocal_memory.read().unwrap().clone()
     }
+
+    pub fn tick_vocal_target_decay(&self, now_us: u64) {
+        let mut vt = self.vocal_target.write().unwrap();
+        vt.tick_decay(now_us);
+    }
+
+    pub fn tick_vocal_imitation_loop(&self, now_us: u64) {
+        let target = self.read_vocal_target();
+        
+        if target.active_energy < 0.01 {
+            let mut organ = self.vocal_organ.write().unwrap();
+            organ.tick_decay(now_us);
+            return;
+        }
+        
+        let organ = self.read_vocal_organ();
+        
+        let pitch_gap = (target.pitch_hint - organ.pitch_tension).abs();
+        let resonance_gap = (target.resonance_hint - organ.resonance_position).abs();
+        let total_gap = (pitch_gap + resonance_gap) / 2.0;
+        
+        {
+            let mut imit = self.vocal_imitation.write().unwrap();
+            imit.observe_gap(now_us, total_gap, organ.breath_drive);
+        }
+        
+        {
+            let mut organ = self.vocal_organ.write().unwrap();
+            if organ.phase == crate::vocal_organ::VocalOrganPhase::Idle {
+                organ.begin_voicing(now_us, target.active_energy * 0.5, target.pitch_hint, target.resonance_hint);
+            } else {
+                organ.adjust_toward(now_us, target.active_energy * 0.5, target.pitch_hint, target.resonance_hint);
+            }
+        }
+        
+        let imit = self.read_vocal_imitation();
+        if imit.last_gap < 0.2 && imit.converge_count >= 3 {
+            let organ = self.read_vocal_organ();
+            {
+                let mut mem = self.vocal_memory.write().unwrap();
+                mem.record_success(now_us, organ.breath_drive, organ.pitch_tension, organ.resonance_position);
+            }
+        }
+        
+        {
+            let mut vt = self.vocal_target.write().unwrap();
+            vt.tick_decay(now_us);
+        }
+    }
+
+    pub fn tick_vocal_memory(&self, now_us: u64) {
+        let mut mem = self.vocal_memory.write().unwrap();
+        mem.tick_decay(now_us);
+    }
 }

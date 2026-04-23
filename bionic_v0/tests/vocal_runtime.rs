@@ -20,5 +20,18 @@ fn vocal_adapter_converts_organ_state_into_nonzero_audio_samples() {
     let vp = Arc::new(Viewport::new());
     vp.begin_voicing(1_000, 0.6, 0.4, 0.7);
     let samples = sample_vocal_waveform(&vp, 128);
-    assert!(samples.iter().any(|v| v.abs() > 0.0));
+    assert!(samples.iter().any(|v: &f64| v.abs() > 0.0));
+}
+
+#[test]
+fn repeated_target_exposure_drives_organ_toward_target_and_strengthens_memory() {
+    let vp = Arc::new(Viewport::new());
+    for t in [1_000, 2_000, 3_000, 4_000, 5_000] {
+        vp.observe_vocal_target(t, 0.8, 0.35, 0.60, 0.20);
+        vp.tick_vocal_imitation_loop(t);
+    }
+    let organ = vp.read_vocal_organ();
+    let mem = vp.read_vocal_memory();
+    assert!(organ.breath_drive > 0.0);
+    assert!(!mem.prototypes.is_empty());
 }
