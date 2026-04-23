@@ -35,3 +35,16 @@ fn repeated_target_exposure_drives_organ_toward_target_and_strengthens_memory() 
     assert!(organ.breath_drive > 0.0);
     assert!(!mem.prototypes.is_empty());
 }
+
+#[test]
+fn observer_visible_snapshot_contains_vocal_activity_fields() {
+    let dir = std::env::temp_dir().join("bionic_v0_vocal_observer_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let paths = SnapshotPaths::new(&dir);
+    let vp = Arc::new(Viewport::new());
+    vp.observe_vocal_target(1_000, 0.9, 0.3, 0.5, 0.2);
+    vp.tick_vocal_imitation_loop(2_000);
+    write_snapshot(&vp, &paths).unwrap();
+    let snap = read_snapshot(&paths.final_path).unwrap();
+    assert!(snap.vocal_imitation.imitation_pressure >= 0.0);
+}
