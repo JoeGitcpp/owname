@@ -17,6 +17,31 @@ const INTERNAL_HEIGHT: usize = 90;
 const WINDOW_SCALE: u32 = 6;
 const POLL_INTERVAL_MS: u64 = 33;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DisplayConfig {
+    internal_width: u32,
+    internal_height: u32,
+    window_width: u32,
+    window_height: u32,
+    surface_width: u32,
+    surface_height: u32,
+}
+
+fn display_config() -> DisplayConfig {
+    let internal_width = INTERNAL_WIDTH as u32;
+    let internal_height = INTERNAL_HEIGHT as u32;
+    let window_width = internal_width * WINDOW_SCALE;
+    let window_height = internal_height * WINDOW_SCALE;
+    DisplayConfig {
+        internal_width,
+        internal_height,
+        window_width,
+        window_height,
+        surface_width: window_width,
+        surface_height: window_height,
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let runtime_dir = if args.len() > 1 {
@@ -27,11 +52,10 @@ fn main() {
     };
 
     let event_loop = EventLoop::new();
+    let display = display_config();
 
-    let window_size = winit::dpi::PhysicalSize::new(
-        INTERNAL_WIDTH as u32 * WINDOW_SCALE,
-        INTERNAL_HEIGHT as u32 * WINDOW_SCALE,
-    );
+    let window_size =
+        winit::dpi::PhysicalSize::new(display.window_width, display.window_height);
     let window = WindowBuilder::new()
         .with_title("Predictive Visual Surface")
         .with_resizable(false)
@@ -40,15 +64,12 @@ fn main() {
         .unwrap();
 
     let surface_texture = pixels::SurfaceTexture::new(
-        INTERNAL_WIDTH as u32,
-        INTERNAL_HEIGHT as u32,
+        display.surface_width,
+        display.surface_height,
         &window,
     );
-    let mut pixels = Pixels::new(
-        INTERNAL_WIDTH as u32,
-        INTERNAL_HEIGHT as u32,
-        surface_texture,
-    ).unwrap();
+    let mut pixels =
+        Pixels::new(display.internal_width, display.internal_height, surface_texture).unwrap();
 
     let mut history = SurfaceHistory::new(16);
     let mut last_poll = Instant::now();
@@ -72,7 +93,8 @@ fn main() {
                     history.update(&frame);
                     let trails = history.render_trails();
 
-                    let config = RenderConfig::new(INTERNAL_WIDTH, INTERNAL_HEIGHT);
+                    let config =
+                        RenderConfig::new(display.internal_width as usize, display.internal_height as usize);
                     let img = render_surface_frame(&frame, &trails, config);
 
                     let texture = pixels.frame_mut();
@@ -104,4 +126,25 @@ fn main() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_config_scales_window_but_keeps_internal_canvas() {
+        let cfg = display_config();
+        assert_eq!(cfg.internal_width, INTERNAL_WIDTH as u32);
+        assert_eq!(cfg.internal_height, INTERNAL_HEIGHT as u32);
+        assert_eq!(cfg.window_width, INTERNAL_WIDTH as u32 * WINDOW_SCALE);
+        assert_eq!(cfg.window_height, INTERNAL_HEIGHT as u32 * WINDOW_SCALE);
+    }
+
+    #[test]
+    fn display_config_uses_full_window_surface_extent() {
+        let cfg = display_config();
+        assert_eq!(cfg.surface_width, cfg.window_width);
+        assert_eq!(cfg.surface_height, cfg.window_height);
+    }
 }

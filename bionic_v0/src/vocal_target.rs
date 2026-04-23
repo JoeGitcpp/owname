@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VocalTargetState {
     pub active_energy: f64,
     pub pitch_hint: f64,

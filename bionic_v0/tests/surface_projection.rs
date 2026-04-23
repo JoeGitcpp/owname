@@ -1,12 +1,15 @@
-use bionic_v0::surface_projection::{project_surface_frame, SurfaceObjectGlyph};
+use bionic_v0::surface_projection::project_surface_frame;
 use bionic_v0::snapshot::{
     SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub, SnapshotData,
-    SnapshotLastClaim, SnapshotProbeLaw, SnapshotSlot, SnapshotSpatial,
+    SnapshotLastClaim, SnapshotProbeLaw, SnapshotSlot, SnapshotSpatial, SnapshotVocalMemory,
 };
 use bionic_v0::viewport::{
     GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,
 };
 use bionic_v0::language_binding::LanguageBindingState;
+use bionic_v0::vocal_imitation::VocalImitationState;
+use bionic_v0::vocal_organ::VocalOrganState;
+use bionic_v0::vocal_target::VocalTargetState;
 use bionic_v0::vpc::VpcContractState;
 
 fn make_empty_snapshot() -> SnapshotData {
@@ -48,6 +51,10 @@ fn make_empty_snapshot() -> SnapshotData {
         action_output: SnapshotActionOutput::default(),
         action_consequence: SnapshotActionConsequence::default(),
         probe_law: SnapshotProbeLaw::default(),
+        vocal_target: VocalTargetState::default(),
+        vocal_organ: VocalOrganState::default(),
+        vocal_imitation: VocalImitationState::default(),
+        vocal_memory: SnapshotVocalMemory::default(),
     }
 }
 

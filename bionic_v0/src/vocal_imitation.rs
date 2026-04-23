@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VocalImitationState {
     pub imitation_pressure: f64,
     pub suppression: f64,

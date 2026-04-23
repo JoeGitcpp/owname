@@ -5,7 +5,16 @@ pub enum VocalOrganPhase {
     Active,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+impl VocalOrganPhase {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            VocalOrganPhase::Idle => 0,
+            VocalOrganPhase::Active => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VocalOrganState {
     pub breath_drive: f64,
     pub pitch_tension: f64,

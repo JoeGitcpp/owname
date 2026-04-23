@@ -272,7 +272,8 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v34: VPC predictor-family lifecycle traces added to snapshot payload.
 // v35: precision→surprise rename + unified [0,1] scale (PHOT [0,100]→[0,1],
 //      relation [0,2]→[0,1], HighLevel [0.2,8]→[0,1]).
-pub const SNAPSHOT_VERSION: u64 = 35;
+// v36: vocal substrate added (vocal_target, vocal_organ, vocal_imitation, vocal_memory).
+pub const SNAPSHOT_VERSION: u64 = 36;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

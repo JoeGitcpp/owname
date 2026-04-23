@@ -43,28 +43,26 @@ pub fn render_surface_frame(
 }
 
 fn stamp_trail_point(
-    buffer: &mut Vec<[u8; 4]>,
+    buffer: &mut [[u8; 4]],
     point: &crate::surface_history::TrailPoint,
     width: usize,
     height: usize,
 ) {
     let px = (point.x * width as f64) as isize;
     let py = (point.y * height as f64) as isize;
-    let alpha = (point.alpha * 80.0) as u8;
+    let intensity = (point.alpha * 96.0) as u8;
 
     if px >= 0 && px < width as isize && py >= 0 && py < height as isize {
-        let idx = (py as usize * width + px as usize) * 4;
-        if idx + 3 < buffer.len() {
-            // Trail points use a dim blue-ish tone, purely as numeric projection
-            buffer[idx / 4][0] = buffer[idx / 4][0].max(alpha / 2);
-            buffer[idx / 4][1] = buffer[idx / 4][1].max(alpha / 2);
-            buffer[idx / 4][2] = buffer[idx / 4][2].max(alpha);
-        }
+        let idx = py as usize * width + px as usize;
+        buffer[idx][0] = buffer[idx][0].max(intensity);
+        buffer[idx][1] = buffer[idx][1].max(intensity);
+        buffer[idx][2] = buffer[idx][2].max(intensity);
+        buffer[idx][3] = 255;
     }
 }
 
 fn fill_object_blob(
-    buffer: &mut Vec<[u8; 4]>,
+    buffer: &mut [[u8; 4]],
     obj: &crate::surface_projection::SurfaceObjectGlyph,
     width: usize,
     height: usize,
@@ -79,7 +77,8 @@ fn fill_object_blob(
     let min_y = (cy - ry).max(0.0) as usize;
     let max_y = (cy + ry).min(height as f64 - 1.0) as usize;
 
-    let base_intensity = (obj.stability_hint * 200.0) as u8;
+    let base_intensity = ((0.35 + 0.65 * obj.stability_hint.clamp(0.0, 1.0))
+        * (96.0 + 159.0 * obj.attention_share.clamp(0.0, 1.0))) as u8;
 
     for y in min_y..=max_y {
         for x in min_x..=max_x {
@@ -89,10 +88,9 @@ fn fill_object_blob(
             if dx * dx + dy * dy <= 1.0 {
                 let idx = y * width + x;
                 if idx < buffer.len() {
-                    // Object blobs use a warm intensity, purely numeric
-                    buffer[idx][0] = base_intensity;
-                    buffer[idx][1] = (base_intensity as f64 * 0.7) as u8;
-                    buffer[idx][2] = (base_intensity as f64 * 0.3) as u8;
+                    buffer[idx][0] = buffer[idx][0].max(base_intensity);
+                    buffer[idx][1] = buffer[idx][1].max(base_intensity);
+                    buffer[idx][2] = buffer[idx][2].max(base_intensity);
                     buffer[idx][3] = 255;
                 }
             }

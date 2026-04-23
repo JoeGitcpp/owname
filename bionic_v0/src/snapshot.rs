@@ -11,6 +11,10 @@ use crate::language_binding::{
 };
 use crate::object_high_layer::ObjectHighLayerState;
 use crate::probe_law::ProbeLawState;
+use crate::vocal_imitation::VocalImitationState;
+use crate::vocal_memory::VocalMemoryState;
+use crate::vocal_organ::VocalOrganState;
+use crate::vocal_target::VocalTargetState;
 use crate::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
     PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
@@ -174,6 +178,12 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
 
     // v30: probe-law substrate
     write_probe_law(&mut buf, &vp.read_probe_law());
+
+    // v36: vocal substrate (vocal_target, vocal_organ, vocal_imitation, vocal_memory)
+    write_vocal_target(&mut buf, &vp.read_vocal_target());
+    write_vocal_organ(&mut buf, &vp.read_vocal_organ());
+    write_vocal_imitation(&mut buf, &vp.read_vocal_imitation());
+    write_vocal_memory(&mut buf, &vp.read_vocal_memory());
 
     // v21 (semantic readiness) and v22 (symbolizer / concept-id) sections
     // removed by cleanup spec 2026-04-20. Snapshot terminates at the
@@ -381,6 +391,11 @@ pub struct SnapshotData {
     pub action_consequence: SnapshotActionConsequence,
     // v30: probe-law substrate (numeric/time-only)
     pub probe_law: SnapshotProbeLaw,
+    // v36: vocal substrate (vocal_target, vocal_organ, vocal_imitation, vocal_memory)
+    pub vocal_target: VocalTargetState,
+    pub vocal_organ: VocalOrganState,
+    pub vocal_imitation: VocalImitationState,
+    pub vocal_memory: SnapshotVocalMemory,
 }
 
 /// Snapshot-visible representation of the action-output substrate (v25/v26/v27).
@@ -467,6 +482,25 @@ pub struct SnapshotProbeLaw {
     pub last_update_t_us: u64,
     pub history_len: u8,
     pub history: [f64; PROBE_HISTORY_CAP],
+}
+
+/// Snapshot-visible representation of vocal memory (v36).
+/// Numeric-only; no text, no TTS, no token ontology.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotVocalMemory {
+    pub n_prototypes: u32,
+    pub prototypes: Vec<SnapshotVocalPrototype>,
+    pub last_update_t_us: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SnapshotVocalPrototype {
+    pub breath_drive: f64,
+    pub pitch_tension: f64,
+    pub resonance_position: f64,
+    pub stability: f64,
+    pub reuse_success: u32,
+    pub last_update_t_us: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -715,6 +749,30 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         SnapshotProbeLaw::default()
     };
 
+    let vocal_target = if version >= 36 {
+        read_vocal_target_snapshot(&bytes, &mut cur)
+    } else {
+        VocalTargetState::default()
+    };
+
+    let vocal_organ = if version >= 36 {
+        read_vocal_organ_snapshot(&bytes, &mut cur)
+    } else {
+        VocalOrganState::default()
+    };
+
+    let vocal_imitation = if version >= 36 {
+        read_vocal_imitation_snapshot(&bytes, &mut cur)
+    } else {
+        VocalImitationState::default()
+    };
+
+    let vocal_memory = if version >= 36 {
+        read_vocal_memory_snapshot(&bytes, &mut cur)
+    } else {
+        SnapshotVocalMemory::default()
+    };
+
     // v21 (semantic-readiness) and v22 (symbolizer) sections removed by
     // cleanup spec 2026-04-20. Older snapshot files containing those bytes
     // are no longer readable; v23+ omits them entirely.
@@ -757,6 +815,10 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         action_output,
         action_consequence,
         probe_law,
+        vocal_target,
+        vocal_organ,
+        vocal_imitation,
+        vocal_memory,
     })
 }
 
@@ -1854,5 +1916,157 @@ fn read_probe_law_snapshot(bytes: &[u8], cur: &mut usize) -> SnapshotProbeLaw {
         last_update_t_us,
         history_len,
         history,
+    }
+}
+
+// ─── v36: vocal substrate ────────────────────────────────────────────────────
+
+fn write_vocal_target(buf: &mut Vec<u8>, s: &VocalTargetState) {
+    buf.extend_from_slice(&s.active_energy.to_le_bytes());
+    buf.extend_from_slice(&s.pitch_hint.to_le_bytes());
+    buf.extend_from_slice(&s.resonance_hint.to_le_bytes());
+    buf.extend_from_slice(&s.envelope_hint.to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_vocal_target_snapshot(bytes: &[u8], cur: &mut usize) -> VocalTargetState {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    VocalTargetState {
+        active_energy: rd_f64(bytes, cur),
+        pitch_hint: rd_f64(bytes, cur),
+        resonance_hint: rd_f64(bytes, cur),
+        envelope_hint: rd_f64(bytes, cur),
+        last_update_t_us: rd_u64(bytes, cur),
+    }
+}
+
+fn write_vocal_organ(buf: &mut Vec<u8>, s: &VocalOrganState) {
+    buf.extend_from_slice(&s.breath_drive.to_le_bytes());
+    buf.extend_from_slice(&s.pitch_tension.to_le_bytes());
+    buf.extend_from_slice(&s.resonance_position.to_le_bytes());
+    buf.extend_from_slice(&s.noise_mix.to_le_bytes());
+    buf.push(s.phase.as_u8());
+    buf.extend_from_slice(&[0u8; 7]);
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_vocal_organ_snapshot(bytes: &[u8], cur: &mut usize) -> VocalOrganState {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    use crate::vocal_organ::VocalOrganPhase;
+    let breath_drive = rd_f64(bytes, cur);
+    let pitch_tension = rd_f64(bytes, cur);
+    let resonance_position = rd_f64(bytes, cur);
+    let noise_mix = rd_f64(bytes, cur);
+    let phase_byte = bytes[*cur];
+    *cur += 8;
+    let phase = if phase_byte == 1 { VocalOrganPhase::Active } else { VocalOrganPhase::Idle };
+    let last_update_t_us = rd_u64(bytes, cur);
+    VocalOrganState {
+        breath_drive,
+        pitch_tension,
+        resonance_position,
+        noise_mix,
+        phase,
+        last_update_t_us,
+    }
+}
+
+fn write_vocal_imitation(buf: &mut Vec<u8>, s: &VocalImitationState) {
+    buf.extend_from_slice(&s.imitation_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.suppression.to_le_bytes());
+    buf.extend_from_slice(&s.last_gap.to_le_bytes());
+    buf.extend_from_slice(&(s.converge_count as u64).to_le_bytes());
+    buf.extend_from_slice(&(s.fail_count as u64).to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_vocal_imitation_snapshot(bytes: &[u8], cur: &mut usize) -> VocalImitationState {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    VocalImitationState {
+        imitation_pressure: rd_f64(bytes, cur),
+        suppression: rd_f64(bytes, cur),
+        last_gap: rd_f64(bytes, cur),
+        converge_count: rd_u64(bytes, cur) as u32,
+        fail_count: rd_u64(bytes, cur) as u32,
+        last_update_t_us: rd_u64(bytes, cur),
+    }
+}
+
+fn write_vocal_memory(buf: &mut Vec<u8>, s: &VocalMemoryState) {
+    buf.extend_from_slice(&(s.prototypes.len() as u64).to_le_bytes());
+    for p in &s.prototypes {
+        buf.extend_from_slice(&p.breath_drive.to_le_bytes());
+        buf.extend_from_slice(&p.pitch_tension.to_le_bytes());
+        buf.extend_from_slice(&p.resonance_position.to_le_bytes());
+        buf.extend_from_slice(&p.stability.to_le_bytes());
+        buf.extend_from_slice(&(p.reuse_success as u64).to_le_bytes());
+        buf.extend_from_slice(&p.last_update_t_us.to_le_bytes());
+    }
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_vocal_memory_snapshot(bytes: &[u8], cur: &mut usize) -> SnapshotVocalMemory {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    let n_prototypes = rd_u64(bytes, cur) as u32;
+    let mut prototypes = Vec::with_capacity(n_prototypes as usize);
+    for _ in 0..n_prototypes {
+        prototypes.push(SnapshotVocalPrototype {
+            breath_drive: rd_f64(bytes, cur),
+            pitch_tension: rd_f64(bytes, cur),
+            resonance_position: rd_f64(bytes, cur),
+            stability: rd_f64(bytes, cur),
+            reuse_success: rd_u64(bytes, cur) as u32,
+            last_update_t_us: rd_u64(bytes, cur),
+        });
+    }
+    let last_update_t_us = rd_u64(bytes, cur);
+    SnapshotVocalMemory {
+        n_prototypes,
+        prototypes,
+        last_update_t_us,
     }
 }

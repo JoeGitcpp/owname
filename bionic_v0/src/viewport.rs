@@ -7,6 +7,10 @@ use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, Lang
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::{PhotSlotPredictor, VPC_FAMILY_PHOT};
 use crate::probe_law::ProbeLawState;
+use crate::vocal_imitation::VocalImitationState;
+use crate::vocal_memory::VocalMemoryState;
+use crate::vocal_organ::VocalOrganState;
+use crate::vocal_target::VocalTargetState;
 use crate::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
     PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
@@ -999,6 +1003,15 @@ pub struct Viewport {
     /// Probe-law substrate (v30). Intensity + suppression + phase + short history.
     /// Numeric/time-only; no target, result, or semantic fields.
     pub probe_law: RwLock<ProbeLawState>,
+
+    /// Vocal substrate (v36). Short-lived external vocal target contour.
+    pub vocal_target: RwLock<VocalTargetState>,
+    /// Vocal substrate (v36). Primitive vocal organ trajectory state.
+    pub vocal_organ: RwLock<VocalOrganState>,
+    /// Vocal substrate (v36). Imitation pressure and convergence state.
+    pub vocal_imitation: RwLock<VocalImitationState>,
+    /// Vocal substrate (v36). Stable vocal prototypes memory.
+    pub vocal_memory: RwLock<VocalMemoryState>,
 }
 
 impl Viewport {
@@ -1054,6 +1067,10 @@ impl Viewport {
             action_consequence_window_seq: AtomicU64::new(0),
             action_consequence: RwLock::new(ActionConsequenceState::default()),
             probe_law: RwLock::new(ProbeLawState::default()),
+            vocal_target: RwLock::new(VocalTargetState::default()),
+            vocal_organ: RwLock::new(VocalOrganState::default()),
+            vocal_imitation: RwLock::new(VocalImitationState::default()),
+            vocal_memory: RwLock::new(VocalMemoryState::default()),
         }
     }
 
@@ -2841,5 +2858,41 @@ impl Viewport {
         }
 
         attn.last_replay_t_us = now_us;
+    }
+
+    // --- Vocal Substrate API (Phase 1, spec 2026-04-23) ---
+    // Numeric-only; no text, no TTS, no token ontology.
+
+    pub fn observe_vocal_target(
+        &self,
+        now_us: u64,
+        energy: f64,
+        pitch: f64,
+        resonance: f64,
+        envelope: f64,
+    ) {
+        let mut vt = self.vocal_target.write().unwrap();
+        vt.observe_external_contour(now_us, energy, pitch, resonance, envelope);
+    }
+
+    pub fn read_vocal_target(&self) -> VocalTargetState {
+        *self.vocal_target.read().unwrap()
+    }
+
+    pub fn begin_voicing(&self, now_us: u64, breath: f64, pitch: f64, resonance: f64) {
+        let mut vo = self.vocal_organ.write().unwrap();
+        vo.begin_voicing(now_us, breath, pitch, resonance);
+    }
+
+    pub fn read_vocal_organ(&self) -> VocalOrganState {
+        *self.vocal_organ.read().unwrap()
+    }
+
+    pub fn read_vocal_imitation(&self) -> VocalImitationState {
+        *self.vocal_imitation.read().unwrap()
+    }
+
+    pub fn read_vocal_memory(&self) -> VocalMemoryState {
+        self.vocal_memory.read().unwrap().clone()
     }
 }

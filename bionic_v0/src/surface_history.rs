@@ -1,8 +1,7 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::surface_projection::SurfaceFrame;
 
-/// A single trail point with a normalized position and decay weight.
 #[derive(Clone, Copy, Debug)]
 pub struct TrailPoint {
     pub x: f64,
@@ -10,16 +9,17 @@ pub struct TrailPoint {
     pub alpha: f64,
 }
 
-/// The trail history for a single object slot.
 #[derive(Debug)]
 pub struct SlotTrail {
+    pub slot_id: usize,
     pub points: Vec<TrailPoint>,
 }
 
-/// An observer-side ring buffer tracking recent positions for one slot.
+#[derive(Debug)]
 struct PositionRing {
     capacity: usize,
     positions: VecDeque<(f64, f64)>,
+    missing_frames: usize,
 }
 
 impl PositionRing {
@@ -27,72 +27,92 @@ impl PositionRing {
         Self {
             capacity,
             positions: VecDeque::with_capacity(capacity + 1),
+            missing_frames: 0,
         }
     }
 
     fn push(&mut self, x: f64, y: f64) {
         self.positions.push_back((x, y));
+        self.missing_frames = 0;
         while self.positions.len() > self.capacity {
             self.positions.pop_front();
         }
     }
 
-    fn iter(&self) -> impl Iterator<Item = &(f64, f64)> {
-        self.positions.iter()
+    fn mark_missing(&mut self) {
+        self.missing_frames = self.missing_frames.saturating_add(1);
     }
 
-    fn len(&self) -> usize {
-        self.positions.len()
+    fn decay_factor(&self, stale_after: usize) -> f64 {
+        if self.missing_frames == 0 {
+            return 1.0;
+        }
+        if stale_after == 0 {
+            return 0.0;
+        }
+        (1.0 - self.missing_frames as f64 / stale_after as f64).clamp(0.0, 1.0)
     }
 }
 
 /// Observer-side short history for visual surface trails.
 ///
-/// Maintains a bounded ring of recent projected positions per object.
+/// Maintains a bounded ring of recent projected positions keyed by stable slot id.
 /// History never writes back to snapshot/body.
 pub struct SurfaceHistory {
     capacity: usize,
-    rings: Vec<PositionRing>,
+    stale_after: usize,
+    rings: BTreeMap<usize, PositionRing>,
 }
 
 impl SurfaceHistory {
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            rings: Vec::new(),
+            stale_after: capacity.max(1),
+            rings: BTreeMap::new(),
         }
     }
 
-    /// Update history with a new surface frame.
-    /// Each object in the frame appends its center to its ring.
-    /// Rings are matched by position (index) in the frame.
     pub fn update(&mut self, frame: &SurfaceFrame) {
-        // Ensure we have enough rings for this frame's objects
-        while self.rings.len() < frame.objects.len() {
-            self.rings.push(PositionRing::new(self.capacity));
+        for ring in self.rings.values_mut() {
+            ring.mark_missing();
         }
 
-        // Append new positions
-        for (i, obj) in frame.objects.iter().enumerate() {
-            self.rings[i].push(obj.center_x, obj.center_y);
+        for obj in &frame.objects {
+            self.rings
+                .entry(obj.slot_id)
+                .or_insert_with(|| PositionRing::new(self.capacity))
+                .push(obj.center_x, obj.center_y);
         }
+
+        let stale_after = self.stale_after;
+        self.rings
+            .retain(|_, ring| !ring.positions.is_empty() && ring.missing_frames < stale_after);
     }
 
-    /// Render trails as decaying trail segments.
     pub fn render_trails(&self) -> Vec<SlotTrail> {
         let mut result = Vec::with_capacity(self.rings.len());
 
-        for ring in &self.rings {
+        for (&slot_id, ring) in &self.rings {
+            let decay = ring.decay_factor(self.stale_after);
+            if decay <= 0.0 {
+                continue;
+            }
+
             let points: Vec<TrailPoint> = ring
+                .positions
                 .iter()
                 .enumerate()
-                .map(|(i, &(x, y))| {
-                    let alpha = compute_decay_alpha(i, ring.len());
-                    TrailPoint { x, y, alpha }
+                .map(|(i, &(x, y))| TrailPoint {
+                    x,
+                    y,
+                    alpha: compute_decay_alpha(i, ring.positions.len()) * decay,
                 })
                 .collect();
 
-            result.push(SlotTrail { points });
+            if !points.is_empty() {
+                result.push(SlotTrail { slot_id, points });
+            }
         }
 
         result
@@ -104,5 +124,5 @@ fn compute_decay_alpha(index: usize, total: usize) -> f64 {
         return 1.0;
     }
     let ratio = index as f64 / (total - 1) as f64;
-    (1.0 - ratio).clamp(0.0, 1.0)
+    ratio.clamp(0.0, 1.0)
 }

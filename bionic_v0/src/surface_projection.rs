@@ -7,6 +7,7 @@ use crate::snapshot::{SnapshotData, SnapshotSpatial, SnapshotSlot};
 /// attached.
 #[derive(Clone, Copy, Debug)]
 pub struct SurfaceObjectGlyph {
+    pub slot_id: usize,
     pub center_x: f64,
     pub center_y: f64,
     pub radius_x: f64,
@@ -29,14 +30,14 @@ pub struct SurfaceFrame {
 pub fn project_surface_frame(snap: &SnapshotData) -> SurfaceFrame {
     let mut objects = Vec::new();
 
-    for slot in &snap.slots {
+    for (slot_id, slot) in snap.slots.iter().enumerate() {
         if !eligible_slot(slot) {
             continue;
         }
 
         if let Some(sp) = slot.spatial {
             if sp.valid {
-                let glyph = slot_to_glyph(slot, sp);
+                let glyph = slot_to_glyph(slot_id, slot, sp);
                 objects.push(glyph);
             }
         }
@@ -49,10 +50,11 @@ fn eligible_slot(slot: &SnapshotSlot) -> bool {
     slot.active
 }
 
-fn slot_to_glyph(slot: &SnapshotSlot, sp: SnapshotSpatial) -> SurfaceObjectGlyph {
+fn slot_to_glyph(slot_id: usize, slot: &SnapshotSlot, sp: SnapshotSpatial) -> SurfaceObjectGlyph {
     let stability_hint = compute_stability_hint(slot);
 
     SurfaceObjectGlyph {
+        slot_id,
         center_x: sp.pos_x,
         center_y: sp.pos_y,
         radius_x: sp.span_x.max(0.0),

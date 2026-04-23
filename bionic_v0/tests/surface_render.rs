@@ -5,6 +5,7 @@ use bionic_v0::surface_history::{SlotTrail, TrailPoint};
 fn single_object_frame(cx: f64, cy: f64, rx: f64, ry: f64) -> SurfaceFrame {
     SurfaceFrame {
         objects: vec![SurfaceObjectGlyph {
+            slot_id: 1,
             center_x: cx,
             center_y: cy,
             radius_x: rx,
@@ -33,6 +34,7 @@ fn one_trail(points: Vec<(f64, f64)>) -> Vec<SlotTrail> {
         })
         .collect();
     vec![SlotTrail {
+        slot_id: 1,
         points: trail_points,
     }]
 }
@@ -56,4 +58,17 @@ fn renderer_draws_trail_energy_behind_recent_motion() {
     let img = render_surface_frame(&frame, &trails, RenderConfig::new(64, 36));
 
     assert!(count_lit_pixels(&img) > 0);
+}
+
+#[test]
+fn renderer_uses_neutral_grayscale_projection_instead_of_fixed_palette() {
+    let frame = single_object_frame(0.5, 0.5, 0.2, 0.2);
+    let img = render_surface_frame(&frame, &empty_trails(), RenderConfig::new(64, 36));
+    let lit = img
+        .iter()
+        .find(|px| px[0] > 0 || px[1] > 0 || px[2] > 0)
+        .expect("at least one lit pixel");
+
+    assert_eq!(lit[0], lit[1]);
+    assert_eq!(lit[1], lit[2]);
 }
