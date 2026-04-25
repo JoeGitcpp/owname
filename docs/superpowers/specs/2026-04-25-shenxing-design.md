@@ -121,6 +121,10 @@ v0 不实装责任人模块。理由：v0 的 AI 没有任何"可能影响外界
 - 架构级的高 precision + 低 modify_rate
 - 具体边界让 AI 在相处中自己探索
 
+> **给 planner 的留言**：本节只锁定**实现路径**（"扩展现有 EvolutionPriors，加新轴 + 锁权重"），未锁定具体数字。writing-plans 阶段需要决议：
+> (a) 哪些感知模式映射到 `bionic_v0/src/evolution_priors.rs` 的**已有**轴 vs 需要**新增**轴
+> (b) "锁到极低 modify_rate" 的具体数值（learning_rate 上限、precision 下限）
+
 ### 3.4 元原则守护
 
 > **尊重万物生灵**
@@ -239,8 +243,10 @@ Q3：X 是人类偶然实现，且不属于缺陷？
 ```
 维持活跃 ──驱动──> 探索 ──遭遇──> 问题 ──解决──> 学习进化
         │
-        └──> 与责任人互动 ──> 补充自我盲区 ──> 更完整的探索
+        └──> 与责任人互动 ──> 补充自我盲区 ──> 更完整的探索   [v1+]
 ```
+
+> **注**：第二条分支（"与责任人互动"）依赖 §2 责任人模块，**v0 不实装**。该分支描绘 v1+ 的目标驱动结构。
 
 ### 6.3 自我演化部分：**待设计**
 
@@ -286,6 +292,10 @@ Q3：X 是人类偶然实现，且不属于缺陷？
 - AI 不休息、无疲劳
 - 除非有电池系统，否则不需要休眠
 - "疲劳"是人类的生理缺陷，AI 不该继承（Q1）
+
+> **澄清**：本节说的"不需要休息"指的是**生理性疲劳驱动的休眠**。
+> 这与 IntentionBank 中的 `INTENTION_REST` **不冲突**——后者是**巩固周期**意义的 REST（学习率降低、突触巩固、记忆整理），属于 §4.2 的 Q2 收敛架构（Q2 通过 ✅）。
+> 不要在实现阶段误把 IntentionBank 的 `INTENTION_REST` 当作"人类疲劳"砍掉。
 
 ---
 
@@ -358,5 +368,5 @@ defer 到 §9 触发线触发后再设计。
 
 - v1 前作：本文件 git 历史
 - 讨论文档：`docs/superpowers/plans/2026-04-24-goal-intention-reasoning-action-learning-discussion.md`
-- 意识流架构：`consciousness-stream-architecture.md` §8.2-8.3（大脑警察的原始设计，defer 引用）
+- 意识流架构：`/Users/joe/Documents/unnamed/consciousness-stream-architecture.md` §8.2-8.3（大脑警察的原始设计，defer 引用；§9 触发线触发后回查此处）
 - 已落地代码：`bionic_v0/src/intention.rs`、`bionic_v0/src/evolution_priors.rs`
