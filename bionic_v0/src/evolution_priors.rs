@@ -1,5 +1,59 @@
 use crate::VIB_BANDS;
 
+/// Identifies an axis in EvolutionPriors for modification-rate enforcement.
+/// Numeric-only (no semantic labels in the AI's body logic).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PriorAxis {
+    // Pre-existing axes (allow moderate learning)
+    VibBand,
+    Surprise,
+    VocalConverge,
+    SpatialAttention,
+    TemporalWindow,
+    SlotGrowth,
+    // v2.1 Layer 0 axes (near-immutable)
+    DisruptionBand,
+    DisruptionThreshold,
+    DisruptionMultiplier,
+    DistressAcoustic,
+}
+
+/// Per-axis cap on the absolute value of any single learned delta.
+/// Layer 0 axes get caps so low they are effectively immutable.
+#[derive(Clone, Debug)]
+pub struct ModifyRateCaps {
+    pub vib_band: f64,
+    pub surprise: f64,
+    pub vocal_converge: f64,
+    pub spatial_attention: f64,
+    pub temporal_window: f64,
+    pub slot_growth: f64,
+    // Layer 0 — near-immutable
+    pub disruption_band: f64,
+    pub disruption_threshold: f64,
+    pub disruption_multiplier: f64,
+    pub distress_acoustic: f64,
+}
+
+impl Default for ModifyRateCaps {
+    fn default() -> Self {
+        Self {
+            // Pre-existing axes: moderate learning rate cap
+            vib_band: 0.05,
+            surprise: 0.05,
+            vocal_converge: 0.05,
+            spatial_attention: 0.05,
+            temporal_window: 0.05,
+            slot_growth: 0.05,
+            // Layer 0 — orders of magnitude lower (effectively locked)
+            disruption_band: 0.001,
+            disruption_threshold: 0.001,
+            disruption_multiplier: 0.001,
+            distress_acoustic: 0.001,
+        }
+    }
+}
+
 /// Evolution priors - numeric bias parameters simulating millions of years of evolution
 /// Uses numerical indices, no semantic labels (emotion/feeling/concept_id)
 ///
@@ -52,6 +106,9 @@ pub struct EvolutionPriors {
     /// sustained high-band energy). Multiplies the band 2 contribution
     /// to disruption score.
     pub distress_acoustic_sensitivity: f64,
+
+    /// Per-axis modification rate caps. Layer 0 axes are near-immutable.
+    pub modify_rate_caps: ModifyRateCaps,
 }
 
 impl Default for EvolutionPriors {
@@ -82,6 +139,7 @@ impl Default for EvolutionPriors {
             disruption_err_threshold: 0.3,
             disruption_surprise_multiplier: 2.0,
             distress_acoustic_sensitivity: 1.5,
+            modify_rate_caps: ModifyRateCaps::default(),
         }
     }
 }
@@ -129,6 +187,30 @@ impl EvolutionPriors {
     pub fn slot_growth_threshold(&self) -> f64 {
         1.0 - self.slot_growth_sensitivity
     }
+
+    /// Look up the modify-rate cap for a given axis.
+    pub fn modify_rate_cap_for(&self, axis: PriorAxis) -> f64 {
+        match axis {
+            PriorAxis::VibBand => self.modify_rate_caps.vib_band,
+            PriorAxis::Surprise => self.modify_rate_caps.surprise,
+            PriorAxis::VocalConverge => self.modify_rate_caps.vocal_converge,
+            PriorAxis::SpatialAttention => self.modify_rate_caps.spatial_attention,
+            PriorAxis::TemporalWindow => self.modify_rate_caps.temporal_window,
+            PriorAxis::SlotGrowth => self.modify_rate_caps.slot_growth,
+            PriorAxis::DisruptionBand => self.modify_rate_caps.disruption_band,
+            PriorAxis::DisruptionThreshold => self.modify_rate_caps.disruption_threshold,
+            PriorAxis::DisruptionMultiplier => self.modify_rate_caps.disruption_multiplier,
+            PriorAxis::DistressAcoustic => self.modify_rate_caps.distress_acoustic,
+        }
+    }
+
+    /// Clamp a requested delta to the modify-rate cap for the axis.
+    /// Returns the clamped value; preserves sign.
+    pub fn clamp_modification(&self, axis: PriorAxis, requested_delta: f64) -> f64 {
+        let cap = self.modify_rate_cap_for(axis);
+        let mag = requested_delta.abs().min(cap);
+        requested_delta.signum() * mag
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +243,44 @@ mod tests {
         // Edge position should have lower attention
         let edge_attn = priors.spatial_attention((0.0, 0.0));
         assert!(edge_attn < center_attn);
+    }
+
+    #[test]
+    fn test_modify_rate_caps_layer_0_locked() {
+        let priors = EvolutionPriors::default();
+
+        // Layer 0 axes: extremely low cap (essentially immutable)
+        let disruption_cap = priors.modify_rate_cap_for(PriorAxis::DisruptionBand);
+        let distress_cap = priors.modify_rate_cap_for(PriorAxis::DistressAcoustic);
+        assert!(disruption_cap <= 0.005, "disruption cap should be near-immutable, got {}", disruption_cap);
+        assert!(distress_cap <= 0.005, "distress cap should be near-immutable, got {}", distress_cap);
+
+        // Non-Layer-0 axes: moderate cap (learning still possible)
+        let vib_band_cap = priors.modify_rate_cap_for(PriorAxis::VibBand);
+        let vocal_cap = priors.modify_rate_cap_for(PriorAxis::VocalConverge);
+        assert!(vib_band_cap > 0.01, "vib_band cap should allow learning, got {}", vib_band_cap);
+        assert!(vocal_cap > 0.01, "vocal_converge cap should allow learning, got {}", vocal_cap);
+
+        // Sanity: Layer 0 caps strictly less than non-Layer-0 caps
+        assert!(disruption_cap < vib_band_cap);
+        assert!(distress_cap < vocal_cap);
+    }
+
+    #[test]
+    fn test_clamp_modification_respects_cap() {
+        let priors = EvolutionPriors::default();
+
+        // Trying to apply a large delta to a locked axis: clamp to cap
+        let requested = 0.5;
+        let cap = priors.modify_rate_cap_for(PriorAxis::DisruptionBand);
+        let applied = priors.clamp_modification(PriorAxis::DisruptionBand, requested);
+        assert!(applied.abs() <= cap, "applied {} must respect cap {}", applied, cap);
+        assert_eq!(applied.signum(), requested.signum());
+
+        // Small delta within cap: passes through unchanged
+        let small_delta = cap * 0.5;
+        let applied_small = priors.clamp_modification(PriorAxis::DisruptionBand, small_delta);
+        assert!((applied_small - small_delta).abs() < 1e-12);
     }
 
     #[test]
