@@ -132,6 +132,22 @@ v0 不实装责任人模块。理由：v0 的 AI 没有任何"可能影响外界
 
 不是"不能杀生"这种具体规则，而是底层的存在倾向——通过偏置长出来。
 
+### 3.5 实现状态（更新于 2026-04-26）
+
+| 子项 | 状态 | 实现位置 |
+|---|---|---|
+| EvolutionPriors 接入 crate | ✅ 已落地 | `bionic_v0/src/lib.rs` |
+| disruption-sensitivity 数据字段（disruption_band / threshold / multiplier / distress_acoustic）| ✅ 已落地 | `bionic_v0/src/evolution_priors.rs` |
+| ModifyRateCaps（lock-weight 机制）+ clamp_modification API | ✅ 已落地 | `bionic_v0/src/evolution_priors.rs` |
+| compute_disruption_score 纯函数 | ✅ 已落地 | `bionic_v0/src/evolution_priors.rs` |
+| VibAdapter 持有 EvolutionPriors 并应用到 surprise 计算 | ✅ 已落地 | `bionic_v0/src/adapter.rs` |
+| 端到端测试：disruption pattern → 放大的 surprise | ✅ 已落地 | `bionic_v0/tests/disruption_surprise_amplification.rs` |
+| **PHOT（视觉）通道 disruption 信号** | ❌ TODO | 后续 plan |
+| **precision 路径整合（让 AI 不仅惊吓，还专注盯死破坏）**| ❌ TODO（方案 3 范围）| 后续 plan |
+| **学习路径实际调用 clamp_modification** | ❌ TODO（API 已铺，无 caller）| 触发：任何引入 EvolutionPriors mutation 的 PR |
+
+参考：`docs/superpowers/plans/2026-04-26-layer0-dna-bias-surprise-wiring.md`
+
 ---
 
 ## 4. 元原则：补充人类缺陷，而非模仿人类
