@@ -619,13 +619,15 @@ cd /Users/joe/Documents/unnamed/bionic_v0 && cargo test --test vib_adapter_prior
 
 文件：`bionic_v0/src/adapter.rs`
 
-(a) 在文件顶部加 import（`use bionic_v0::evolution_priors::EvolutionPriors;`，但因为是同 crate 用 `crate::evolution_priors::EvolutionPriors`）：
+(a) 在文件顶部加 import：
 
 定位到 `use crate::vocal_target::...`（line 27 附近），在它后面加：
 
 ```rust
 use crate::evolution_priors::EvolutionPriors;
 ```
+
+> 用 `crate::` 路径（同 crate 内部模块），不是 `bionic_v0::`。
 
 (b) 修改 `VibAdapter` struct（line 181 附近），在最后一个字段后追加：
 
@@ -868,7 +870,7 @@ cd /Users/joe/Documents/unnamed/bionic_v0 && cargo test --test disruption_surpri
     }
 ```
 
-> **注意**：`process_frame` 当前是 `fn`（私有方法）；如果 Rust 编译器告诉你私有方法在 cfg-test 函数里调用不通，把 `process_frame` 也加上 `pub(crate)` 或者 `#[cfg(any(test, debug_assertions))]` 暴露。
+> **注意**：`process_frame` 当前是私有方法。`process_frame_for_test` 在**同一个 `impl` 块**里调用它，所以可见性 OK，不需要加 pub。如果你把它移到别的 impl 块或别的文件，记得改可见性。
 
 - [ ] **Step 6.4：跑端到端测试**
 
