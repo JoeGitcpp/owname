@@ -1061,3 +1061,26 @@ git commit -m "docs(plan): mark layer0-dna-bias-surprise-wiring complete"
    - 检查是否 viewport 的 predictor 在 50 ticks 后还没收敛（可以试 100 / 200 ticks）
    - 检查 `latest_err` 在测试场景下是否真的有非零值（可能需要预先 push 一些 baseline 观测）
    - 极端情况：如果 viewport predictor 行为不可控，可以重写测试为"用 mock viewport，直接调用 compute_disruption_score 验证乘数关系"——退化为单测，不再是端到端，但仍能验证核心契约
+
+---
+
+## 完工记录
+
+- **完工日期**：2026-04-26
+- **新增测试数**：10（evolution_priors: 8 新测试；vib_adapter_priors: 2 测试；disruption_surprise_amplification: 2 测试；共 12 新增断言，其中 evolution_priors 原有 3 测试保留）
+- **总测试数**：257 passed, 1 failed（`vocal_body_contract` — pre-existing failure, unrelated to this plan）
+- **影响行数**：+564 / -2（6 files）
+- **Commit SHA 范围**：`d04ba14..2e4a1ec`（7 commits）
+  - `40c2ab7` Task 1: re-integrate evolution_priors into crate
+  - `a953797` Task 2: add disruption sensitivity fields
+  - `391254b` Task 3: add lock-weight (modify_rate_caps) mechanism
+  - `9143f4f` Task 4: add compute_disruption_score pure function
+  - `2047203` Task 5: VibAdapter holds Arc<EvolutionPriors>
+  - `4a426a1` Task 6: wire disruption sensitivity into VIB surprise
+  - `2e4a1ec` Task 7: add §3.5 implementation status
+- **未触及但相关的事**：
+  - PHOT modality 的 disruption 信号（视觉破坏 / 不对称破坏检测）→ 单独 plan
+  - precision 路径整合（让 AI 不仅惊吓，还专注盯死破坏）→ 方案 3 plan
+  - intention.rs 的 orphan 状态 → 后续 plan
+  - Layer 0 偏置在学习路径中实际被 clamp_modification 守护 → 当任何 mutation 路径引入时触发
+  - `vocal_body_contract` 测试失败（pre-existing, verified against base SHA d04ba14）
