@@ -213,6 +213,30 @@ impl EvolutionPriors {
     }
 }
 
+/// Compute a numeric disruption score from per-band prediction error.
+///
+/// Combines:
+/// - per-band sensitivity weighting (priors.disruption_band_sensitivity)
+/// - distress acoustic boost on band 2 (priors.distress_acoustic_sensitivity)
+/// - sum of weighted |err| across bands
+///
+/// Higher score = more "破坏/痛苦/割裂" signature in the input.
+/// Score is unbounded above (caller compares against thresholds).
+pub fn compute_disruption_score(err: &[f64; VIB_BANDS], priors: &EvolutionPriors) -> f64 {
+    let mut score = 0.0;
+    for axis in 0..VIB_BANDS {
+        let weighted = err[axis].abs() * priors.disruption_band_sensitivity[axis];
+        // Distress acoustic boost on band 2 (2000-5000Hz: cries/screams)
+        let with_distress_boost = if axis == 2 {
+            weighted * priors.distress_acoustic_sensitivity
+        } else {
+            weighted
+        };
+        score += with_distress_boost;
+    }
+    score
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +330,60 @@ mod tests {
 
         // Distress acoustic sensitivity > 1.0 (must amplify)
         assert!(priors.distress_acoustic_sensitivity > 1.0);
+    }
+
+    #[test]
+    fn test_disruption_score_quiet_input_low() {
+        let priors = EvolutionPriors::default();
+        // All bands have small err — no disruption
+        let err = [0.05, 0.05, 0.05, 0.05];
+        let score = compute_disruption_score(&err, &priors);
+        assert!(score < 0.5, "quiet err should yield low score, got {}", score);
+    }
+
+    #[test]
+    fn test_disruption_score_distress_band_dominant() {
+        let priors = EvolutionPriors::default();
+        // Large err in distress band (band 2: 2000-5000Hz)
+        let err = [0.05, 0.1, 0.8, 0.1];
+        let score = compute_disruption_score(&err, &priors);
+        assert!(score > 1.0, "distress band err should produce high score, got {}", score);
+    }
+
+    #[test]
+    fn test_disruption_score_broadband_burst_high() {
+        let priors = EvolutionPriors::default();
+        // Sudden broadband large err (e.g. shattering / explosion signature)
+        let err = [0.6, 0.7, 0.8, 0.5];
+        let score = compute_disruption_score(&err, &priors);
+        assert!(score > 1.5, "broadband burst should produce very high score, got {}", score);
+    }
+
+    #[test]
+    fn test_disruption_score_monotonic_in_err() {
+        let priors = EvolutionPriors::default();
+        let small = [0.1, 0.1, 0.1, 0.1];
+        let medium = [0.3, 0.3, 0.3, 0.3];
+        let large = [0.6, 0.6, 0.6, 0.6];
+        let s_small = compute_disruption_score(&small, &priors);
+        let s_medium = compute_disruption_score(&medium, &priors);
+        let s_large = compute_disruption_score(&large, &priors);
+        assert!(s_small < s_medium && s_medium < s_large,
+            "disruption score must be monotonic in err magnitude: {} {} {}",
+            s_small, s_medium, s_large);
+    }
+
+    #[test]
+    fn test_disruption_score_distress_sensitivity_amplifies_band_2() {
+        let mut priors = EvolutionPriors::default();
+        let err = [0.05, 0.05, 0.5, 0.05]; // only band 2 has signal
+
+        let baseline = compute_disruption_score(&err, &priors);
+        priors.distress_acoustic_sensitivity = 3.0; // crank it up
+        let amplified = compute_disruption_score(&err, &priors);
+
+        assert!(amplified > baseline,
+            "distress_acoustic_sensitivity bump must amplify band-2-dominant score: baseline {} vs amplified {}",
+            baseline, amplified);
     }
 }
