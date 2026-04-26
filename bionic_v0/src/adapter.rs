@@ -230,6 +230,18 @@ impl VibAdapter {
         &self.priors
     }
 
+    /// Test-only entry point for process_frame that bypasses the mic stream.
+    /// Exposes the same logic to integration tests.
+    #[cfg(any(test, debug_assertions))]
+    pub fn process_frame_for_test(
+        &mut self,
+        vp: &Arc<Viewport>,
+        t_us: u64,
+        bands: &[f64; VIB_BANDS],
+    ) {
+        self.process_frame(vp, t_us, bands);
+    }
+
     fn process_frame(&mut self, vp: &Arc<Viewport>, t_us: u64, bands: &[f64; VIB_BANDS]) {
         for axis in 0..VIB_BANDS {
             vp.push_observation(axis, t_us, bands[axis]);
@@ -237,12 +249,32 @@ impl VibAdapter {
         vp.sweep_slots(t_us);
 
         let inst_energy: f64 = bands.iter().map(|b| b * b).sum();
-        let mut inst_surprise = 0.0;
+
+        // v2.1 Layer 0: collect per-band err, apply disruption sensitivity
+        let mut per_band_err = [0.0f64; VIB_BANDS];
         for axis in 0..VIB_BANDS {
             if let Some(e) = vp.latest_err(axis) {
-                inst_surprise += e.abs();
+                per_band_err[axis] = e;
             }
         }
+
+        // Sensitivity-weighted base surprise (uses disruption_band_sensitivity
+        // as a multiplier — for v0 single tuning knob shared with disruption
+        // signature; revisit if a separate "always-on band weight" is needed)
+        let mut inst_surprise = 0.0;
+        for axis in 0..VIB_BANDS {
+            inst_surprise += per_band_err[axis].abs()
+                * self.priors.disruption_band_sensitivity[axis];
+        }
+
+        // Disruption signature check: if score crosses threshold, amplify
+        let disruption_score = crate::evolution_priors::compute_disruption_score(
+            &per_band_err, &self.priors,
+        );
+        if disruption_score > self.priors.disruption_err_threshold {
+            inst_surprise *= self.priors.disruption_surprise_multiplier;
+        }
+
         let alpha = 0.1;
         self.smoothed_energy = (1.0 - alpha) * self.smoothed_energy + alpha * inst_energy;
         self.smoothed_surprise = (1.0 - alpha) * self.smoothed_surprise + alpha * inst_surprise;
