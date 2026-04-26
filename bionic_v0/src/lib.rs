@@ -2,6 +2,7 @@ pub mod action_consequence;
 pub mod action_output;
 pub mod adapter;
 pub mod clock;
+pub mod evolution_priors;
 pub mod highlevel;
 pub mod language_binding;
 pub mod predictor;
