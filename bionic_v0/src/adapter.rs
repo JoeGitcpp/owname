@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use crate::action_consequence::tick_vib_ingress_consequence;
 use crate::clock::now_us;
+use crate::evolution_priors::EvolutionPriors;
 use crate::language_binding::{
     BindingEvent, BindingFeedback, BindingTargetRef, ExternalPatternKind,
 };
@@ -185,6 +186,7 @@ pub struct VibAdapter {
     smoothed_energy: f64,
     smoothed_surprise: f64,
     last_pattern_hash: Option<u64>,
+    priors: Arc<EvolutionPriors>,
 }
 
 impl VibAdapter {
@@ -192,6 +194,10 @@ impl VibAdapter {
     /// still returned (faulted); the viewport records the hearing fault so
     /// the registry needs no modality-specific error path.
     pub fn new(vp: &Arc<Viewport>) -> Self {
+        Self::with_priors(vp, Arc::new(EvolutionPriors::default()))
+    }
+
+    pub fn with_priors(vp: &Arc<Viewport>, priors: Arc<EvolutionPriors>) -> Self {
         let fault = Arc::new(AtomicBool::new(false));
         match crate::vib::VibSource::try_new_parts(fault.clone()) {
             Ok((rx, stream)) => Self {
@@ -201,6 +207,7 @@ impl VibAdapter {
                 smoothed_energy: 0.0,
                 smoothed_surprise: 0.0,
                 last_pattern_hash: None,
+                priors,
             },
             Err(_) => {
                 vp.set_hearing_fault(true);
@@ -211,9 +218,16 @@ impl VibAdapter {
                     smoothed_energy: 0.0,
                     smoothed_surprise: 0.0,
                     last_pattern_hash: None,
+                    priors,
                 }
             }
         }
+    }
+
+    /// Test-only accessor for the priors reference.
+    #[cfg(any(test, debug_assertions))]
+    pub fn priors(&self) -> &EvolutionPriors {
+        &self.priors
     }
 
     fn process_frame(&mut self, vp: &Arc<Viewport>, t_us: u64, bands: &[f64; VIB_BANDS]) {
