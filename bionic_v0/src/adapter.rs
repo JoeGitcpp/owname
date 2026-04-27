@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use crate::action_consequence::tick_vib_ingress_consequence;
 use crate::clock::now_us;
-use crate::evolution_priors::EvolutionPriors;
+use crate::evolution_priors::BiasPriors;
 use crate::language_binding::{
-    BindingEvent, BindingFeedback, BindingTargetRef, ExternalPatternKind,
+    BindingEvent, BindingFeedback, BindingTargetRef, PatternKind,
 };
 use crate::phot::SyntheticPhotSource;
 use crate::phot_camera::{CameraFault, CameraFrameProvider, MotionExtract, MotionExtractor};
@@ -186,7 +186,7 @@ pub struct VibAdapter {
     smoothed_energy: f64,
     smoothed_surprise: f64,
     last_pattern_hash: Option<u64>,
-    priors: Arc<EvolutionPriors>,
+    priors: Arc<BiasPriors>,
 }
 
 impl VibAdapter {
@@ -194,10 +194,10 @@ impl VibAdapter {
     /// still returned (faulted); the viewport records the hearing fault so
     /// the registry needs no modality-specific error path.
     pub fn new(vp: &Arc<Viewport>) -> Self {
-        Self::with_priors(vp, Arc::new(EvolutionPriors::default()))
+        Self::with_priors(vp, Arc::new(BiasPriors::default()))
     }
 
-    pub fn with_priors(vp: &Arc<Viewport>, priors: Arc<EvolutionPriors>) -> Self {
+    pub fn with_priors(vp: &Arc<Viewport>, priors: Arc<BiasPriors>) -> Self {
         let fault = Arc::new(AtomicBool::new(false));
         match crate::vib::VibSource::try_new_parts(fault.clone()) {
             Ok((rx, stream)) => Self {
@@ -226,7 +226,7 @@ impl VibAdapter {
 
     /// Test-only accessor for the priors reference.
     #[cfg(any(test, debug_assertions))]
-    pub fn priors(&self) -> &EvolutionPriors {
+    pub fn priors(&self) -> &BiasPriors {
         &self.priors
     }
 
@@ -258,13 +258,13 @@ impl VibAdapter {
             }
         }
 
-        // Sensitivity-weighted base surprise (uses disruption_band_sensitivity
+        // Sensitivity-weighted base surprise (uses disruption_band_coef
         // as a multiplier — for v0 single tuning knob shared with disruption
         // signature; revisit if a separate "always-on band weight" is needed)
         let mut inst_surprise = 0.0;
         for axis in 0..VIB_BANDS {
             inst_surprise += per_band_err[axis].abs()
-                * self.priors.disruption_band_sensitivity[axis];
+                * self.priors.disruption_band_coef[axis];
         }
 
         // Disruption signature check: if score crosses threshold, amplify
@@ -272,7 +272,7 @@ impl VibAdapter {
             &per_band_err, &self.priors,
         );
         if disruption_score > self.priors.disruption_err_threshold {
-            inst_surprise *= self.priors.disruption_surprise_multiplier;
+            inst_surprise *= self.priors.disruption_surprise_mul;
         }
 
         let alpha = 0.1;
@@ -336,12 +336,12 @@ impl VibAdapter {
         if self.last_pattern_hash != Some(pattern_hash) {
             if let Ok(slot_id_u8) = u8::try_from(slot_id) {
                 vp.apply_binding_event_from_adapter(BindingEvent {
-                    pattern_kind: ExternalPatternKind::AudiblePattern,
+                    pattern_kind: PatternKind::VibModality,
                     pattern_hash,
                     target: BindingTargetRef::ObjectSlot {
                         slot_id: slot_id_u8,
                     },
-                    feedback: BindingFeedback::Support,
+                    feedback: BindingFeedback::Align,
                     evidence_ref: t_us,
                     event_t_us: t_us,
                 });
@@ -732,12 +732,12 @@ impl ModalityAdapter for RealPhotAdapter {
             if self.last_pattern_hash_by_slot[slot_id] != Some(pattern_hash) {
                 if let Ok(slot_id_u8) = u8::try_from(slot_id) {
                     vp.apply_binding_event_from_adapter(BindingEvent {
-                        pattern_kind: ExternalPatternKind::VisualGlyph,
+                        pattern_kind: PatternKind::PhotModality,
                         pattern_hash,
                         target: BindingTargetRef::ObjectSlot {
                             slot_id: slot_id_u8,
                         },
-                        feedback: BindingFeedback::Support,
+                        feedback: BindingFeedback::Align,
                         evidence_ref: now_us,
                         event_t_us: now_us,
                     });
@@ -864,12 +864,12 @@ impl ModalityAdapter for SyntheticVibAdapter {
         if self.last_pattern_hash != Some(pattern_hash) {
             if let Ok(slot_id_u8) = u8::try_from(slot_id) {
                 vp.apply_binding_event_from_adapter(BindingEvent {
-                    pattern_kind: ExternalPatternKind::AudiblePattern,
+                    pattern_kind: PatternKind::VibModality,
                     pattern_hash,
                     target: BindingTargetRef::ObjectSlot {
                         slot_id: slot_id_u8,
                     },
-                    feedback: BindingFeedback::Support,
+                    feedback: BindingFeedback::Align,
                     evidence_ref: now_us,
                     event_t_us: now_us,
                 });

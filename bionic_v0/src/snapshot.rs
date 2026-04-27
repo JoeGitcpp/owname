@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::action_consequence::ActionConsequenceState;
 use crate::action_output::ActionOutputState;
 use crate::language_binding::{
-    BindingStatus, BindingTargetRef, BindingTrace, ExternalPatternKind, LanguageBindingState,
+    BindingStatus, BindingTargetRef, BindingTrace, PatternKind, LanguageBindingState,
 };
 use crate::object_high_layer::ObjectHighLayerState;
 use crate::probe_law::ProbeLawState;
@@ -1271,7 +1271,7 @@ fn read_global_reasoning_memory_summary(
 fn write_language_binding(buf: &mut Vec<u8>, st: &LanguageBindingState) {
     buf.extend_from_slice(&(st.traces.len() as u32).to_le_bytes());
     for trace in &st.traces {
-        buf.push(external_pattern_kind_code(trace.pattern_kind));
+        buf.push(pattern_kind_code(trace.pattern_kind));
         buf.extend_from_slice(&trace.pattern_hash.to_le_bytes());
         write_binding_target(buf, trace.target);
         buf.extend_from_slice(&trace.strength.value.to_le_bytes());
@@ -1308,7 +1308,7 @@ fn read_language_binding_snapshot(bytes: &[u8], cur: &mut usize) -> LanguageBind
     let n_traces = rd_u32(bytes, cur) as usize;
     let mut traces = Vec::with_capacity(n_traces);
     for _ in 0..n_traces {
-        let pattern_kind = external_pattern_kind_from_code(bytes[*cur]);
+        let pattern_kind = pattern_kind_from_code(bytes[*cur]);
         *cur += 1;
         let pattern_hash = rd_u64(bytes, cur);
         let target = read_binding_target(bytes, cur);
@@ -1341,12 +1341,12 @@ fn read_language_binding_snapshot(bytes: &[u8], cur: &mut usize) -> LanguageBind
     }
 }
 
-fn external_pattern_kind_code(kind: ExternalPatternKind) -> u8 {
+fn pattern_kind_code(kind: PatternKind) -> u8 {
     match kind {
-        ExternalPatternKind::VisualGlyph => 0,
-        ExternalPatternKind::AudiblePattern => 1,
-        ExternalPatternKind::GesturePattern => 2,
-        ExternalPatternKind::SymbolSequence => 3,
+        PatternKind::PhotModality => 0,
+        PatternKind::VibModality => 1,
+        PatternKind::MechModality => 2,
+        PatternKind::SymbolSeq => 3,
     }
 }
 
@@ -1601,12 +1601,12 @@ fn predictor_lifecycle_from_code(code: u8) -> PredictorLifecycleState {
     }
 }
 
-fn external_pattern_kind_from_code(code: u8) -> ExternalPatternKind {
+fn pattern_kind_from_code(code: u8) -> PatternKind {
     match code {
-        1 => ExternalPatternKind::AudiblePattern,
-        2 => ExternalPatternKind::GesturePattern,
-        3 => ExternalPatternKind::SymbolSequence,
-        _ => ExternalPatternKind::VisualGlyph,
+        1 => PatternKind::VibModality,
+        2 => PatternKind::MechModality,
+        3 => PatternKind::SymbolSeq,
+        _ => PatternKind::PhotModality,
     }
 }
 

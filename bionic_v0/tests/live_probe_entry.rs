@@ -1,4 +1,4 @@
-// Contract tests for the live body active-probe entry.
+// Contract tests for live body probe entry.
 //
 // Plan: docs/superpowers/plans/2026-04-22-live-body-active-probe-entry.md
 //
@@ -10,50 +10,50 @@
 use bionic_v0::action_consequence::{
     ActionConsequenceWindowEvent, ConsequenceModalityKind, ConsequencePairStatus,
 };
-use bionic_v0::probe_law::{ProbeLawState, ProbePhase};
+use bionic_v0::probe_law::{ProbePhase};
 use bionic_v0::viewport::Viewport;
 
 #[test]
 fn probe_generates_write_epoch_without_external_command() {
     let vp = Viewport::new();
-    // Force probe into Active phase by directly writing state
+    // Force probe into P2 phase by directly writing state
     {
         let mut st = vp.probe_law.write().unwrap();
         st.intensity = 0.7;
         st.suppression = 0.3;
-        st.phase = ProbePhase::Active;
+        st.phase = ProbePhase::P2;
     }
     vp.tick_probe_output_from_law(1_000_000);
     let ao = vp.read_action_output();
     assert!(
         ao.n_write_epochs > 0,
-        "probe in Active phase must produce write epoch"
+        "probe in P2 phase must produce write epoch"
     );
 }
 
 #[test]
-fn suppression_dominant_causes_decay_or_idle() {
+fn suppression_dominant_causes_p3_or_p0() {
     let vp = Viewport::new();
-    // First let probe become active
+    // First let probe enter P2
     {
         let mut st = vp.probe_law.write().unwrap();
         st.intensity = 0.7;
         st.suppression = 0.3;
-        st.phase = ProbePhase::Active;
+        st.phase = ProbePhase::P2;
     }
     vp.tick_probe_output_from_law(1_000_000);
-    // Now drive suppression >> intensity → probe transitions to Decaying via refresh
+    // Now drive suppression >> intensity → probe transitions to P3 via refresh
     {
         let mut st = vp.probe_law.write().unwrap();
         st.intensity = 0.1;
         st.suppression = 0.9;
-        // ratio = 0.1/0.9 < 1.0 → from Active → Decaying on next refresh
+        // ratio = 0.1/0.9 < 1.0 → from P2 → P3 on next refresh
     }
     vp.refresh_probe_law(2_000_000);
     let st = vp.probe_law.read().unwrap().clone();
     assert!(
-        st.phase == ProbePhase::Decaying || st.phase == ProbePhase::Idle,
-        "suppression dominant must cause Decaying or Idle phase, got {:?}",
+        st.phase == ProbePhase::P3 || st.phase == ProbePhase::P0,
+        "suppression dominant must cause P3 or P0 phase, got {:?}",
         st.phase
     );
 }
@@ -69,7 +69,7 @@ fn probe_write_can_close_into_consequence_pair() {
         let mut st = vp.probe_law.write().unwrap();
         st.intensity = 0.6;
         st.suppression = 0.2;
-        st.phase = ProbePhase::Active;
+        st.phase = ProbePhase::P2;
     }
     vp.tick_probe_output_from_law(1_000_000);
     let ao = vp.read_action_output();

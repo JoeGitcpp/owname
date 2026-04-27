@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
-use bionic_v0::language_binding::{BindingStatus, BindingTargetRef, ExternalPatternKind};
+use bionic_v0::language_binding::{BindingStatus, BindingTargetRef, PatternKind};
 use bionic_v0::snapshot::{read_snapshot, SnapshotData};
 use bionic_v0::vpc::{ObservationDomainKind, PredictorLifecycleState, PublicationStatus};
 use bionic_v0::{
@@ -86,12 +86,12 @@ fn label_health(h: u8) -> &'static str {
     }
 }
 
-fn binding_pattern_label(kind: ExternalPatternKind) -> &'static str {
+fn binding_pattern_label(kind: PatternKind) -> &'static str {
     match kind {
-        ExternalPatternKind::VisualGlyph => "vg",
-        ExternalPatternKind::AudiblePattern => "ap",
-        ExternalPatternKind::GesturePattern => "gp",
-        ExternalPatternKind::SymbolSequence => "ss",
+        PatternKind::PhotModality => "ph",
+        PatternKind::VibModality => "vb",
+        PatternKind::MechModality => "mc",
+        PatternKind::SymbolSeq => "ss",
     }
 }
 

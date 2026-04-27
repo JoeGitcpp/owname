@@ -37,12 +37,34 @@ back into rejected architecture.
    self-repair, early exploration, and imitation, and maps those laws
    onto the cleaned substrate without turning examples into modules.
 
-7. **Implementation plan (executed 2026-04-20)** —
+7. **Endogenous activity and probe laws spec (FROZEN)** —
+   [docs/superpowers/specs/2026-04-21-endogenous-activity-and-probe-laws-design.md](docs/superpowers/specs/2026-04-21-endogenous-activity-and-probe-laws-design.md):
+   defines under what abstract conditions a continuously running system
+   naturally transitions from endogenous activity into active probe
+   initiation, and what a probe channel must satisfy to be a legal
+   substrate for early active learning.
+
+8. **Action output substrate minimal contract spec (FROZEN)** —
+   [docs/superpowers/specs/2026-04-21-action-output-substrate-minimal-contract-design.md](docs/superpowers/specs/2026-04-21-action-output-substrate-minimal-contract-design.md):
+   defines the minimal abstract contract a body-side output channel must
+   satisfy to support early active probing; covers body laws, learning
+   loop prerequisites, and safety boundaries; stops at "legal write-out
+   exists" without entering consequence closure or imitation.
+
+9. **Action-consequence loop and imitation laws spec (FROZEN)** —
+   [docs/superpowers/specs/2026-04-21-action-consequence-loop-and-imitation-laws-design.md](docs/superpowers/specs/2026-04-21-action-consequence-loop-and-imitation-laws-design.md):
+   defines the abstract laws behind consequence return, action-consequence
+   time alignment, consequence boundary formation, external pattern
+   short-term retention, self-other comparison, and imitation as curve
+   approximation; all laws map onto existing cleaned substrate without
+   introducing independent modules.
+
+10. **Implementation plan (executed 2026-04-20)** —
    [docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md](docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md):
    the plan that removed the rejected layers from the live body /
    snapshot / observer / test path.
 
-8. **Older v0 spec (PARTIALLY DEPRECATED)** —
+11. **Older v0 spec (PARTIALLY DEPRECATED)** —
    [docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md](docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md):
    read its §0 deprecation banner before trusting any of its content.
 
@@ -62,6 +84,25 @@ returning. Do not re-add them under any name:
 Quarantined contract tests for the rejected architecture live in
 [bionic_v0/experimental/](bionic_v0/experimental/) for archaeological
 reference only — do not reactivate.
+
+## Learned Boundaries Only
+
+When discussing initiative, exploration, imitation, self-adjustment, or
+self-repair, agents must preserve this hard rule:
+
+- Only learning laws, body laws, update constraints, and safety bounds may
+  be predefined.
+- Object ranges, target ranges, result boundaries, importance maps, and
+  exploration scope must be treated as **learned and revisable**, not as
+  fixed programmer-written world content.
+- Do not introduce fixed fields or modules that pre-decide what the system
+  is “really learning” in the world.
+- If a design needs a boundary, it must explain how that boundary is formed,
+  updated, drifted, and dissolved through exploration rather than assumed.
+- Do not reduce curiosity, exploration timing, deferred exploration, or
+  background resurfacing into a few programmer-controlled numbers at the
+  theory layer. If implementation later uses numeric approximations, those
+  are shadows of the theory, not the theory itself.
 
 ## Substrate That Must Be Preserved
 
@@ -91,3 +132,7 @@ explain, in writing:
 
 If those four points cannot be answered cleanly, the design is not
 admissible.
+
+For the correct substrate-level replacements when a high-risk term appears
+in a theory-layer context, see the full terminology boundary checklist:
+[docs/superpowers/specs/2026-04-22-terminology-boundary-checklist.md](docs/superpowers/specs/2026-04-22-terminology-boundary-checklist.md)

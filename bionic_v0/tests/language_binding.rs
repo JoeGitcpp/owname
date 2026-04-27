@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bionic_v0::language_binding::{
     BindingEvent, BindingFeedback, BindingStatus, BindingStrength, BindingTargetRef, BindingTrace,
-    ExternalPatternKind, LanguageBindingState,
+    PatternKind, LanguageBindingState,
 };
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
@@ -15,9 +15,9 @@ fn language_binding_state_tracks_traces_not_concept_ids() {
 }
 
 #[test]
-fn language_binding_trace_uses_external_patterns_and_reversible_evidence() {
+fn language_binding_trace_uses_numeric_patterns_and_reversible_evidence() {
     let trace = BindingTrace {
-        pattern_kind: ExternalPatternKind::VisualGlyph,
+        pattern_kind: PatternKind::PhotModality,
         pattern_hash: 17,
         target: BindingTargetRef::ObjectSlot { slot_id: 2 },
         strength: BindingStrength::new(0.25),
@@ -28,14 +28,8 @@ fn language_binding_trace_uses_external_patterns_and_reversible_evidence() {
         last_update_t_us: 99,
     };
 
-    assert!(matches!(
-        trace.pattern_kind,
-        ExternalPatternKind::VisualGlyph
-    ));
-    assert!(matches!(
-        trace.target,
-        BindingTargetRef::ObjectSlot { slot_id: 2 }
-    ));
+    assert!(matches!(trace.pattern_kind, PatternKind::PhotModality));
+    assert!(matches!(trace.target, BindingTargetRef::ObjectSlot { slot_id: 2 }));
     assert_eq!(trace.status, BindingStatus::Candidate);
     assert_eq!(trace.evidence_refs, vec![11, 13]);
 }
@@ -48,13 +42,9 @@ fn language_binding_viewport_exposes_binding_state_without_readiness_gates() {
     assert!(st.traces.is_empty());
 }
 
-fn sample_binding_event(
-    feedback: BindingFeedback,
-    evidence_ref: u64,
-    event_t_us: u64,
-) -> BindingEvent {
+fn sample_binding_event(feedback: BindingFeedback, evidence_ref: u64, event_t_us: u64) -> BindingEvent {
     BindingEvent {
-        pattern_kind: ExternalPatternKind::VisualGlyph,
+        pattern_kind: PatternKind::PhotModality,
         pattern_hash: 17,
         target: BindingTargetRef::ObjectSlot { slot_id: 2 },
         feedback,
@@ -67,18 +57,18 @@ fn sample_binding_event(
 fn language_binding_event_learning_is_reversible() {
     let mut st = LanguageBindingState::default();
 
-    st.apply_binding_event(sample_binding_event(BindingFeedback::Support, 11, 100));
+    st.apply_binding_event(sample_binding_event(BindingFeedback::Align, 11, 100));
     assert_eq!(st.n_bindings, 1);
     assert_eq!(st.traces[0].status, BindingStatus::Candidate);
     assert_eq!(st.traces[0].evidence_refs, vec![11]);
 
-    st.apply_binding_event(sample_binding_event(BindingFeedback::Support, 13, 200));
+    st.apply_binding_event(sample_binding_event(BindingFeedback::Align, 13, 200));
     let reinforced_strength = st.traces[0].strength.value;
     assert_eq!(st.traces[0].status, BindingStatus::Reinforced);
     assert!(reinforced_strength > 0.25);
     assert_eq!(st.traces[0].evidence_refs, vec![11, 13]);
 
-    st.apply_binding_event(sample_binding_event(BindingFeedback::Contradict, 17, 300));
+    st.apply_binding_event(sample_binding_event(BindingFeedback::Deviate, 17, 300));
     assert_eq!(st.traces[0].status, BindingStatus::Weakened);
     assert!(st.traces[0].strength.value < reinforced_strength);
     assert_eq!(st.traces[0].evidence_refs, vec![11, 13, 17]);
@@ -87,7 +77,7 @@ fn language_binding_event_learning_is_reversible() {
 #[test]
 fn language_binding_viewport_applies_events_without_mutating_slots() {
     let vp = Viewport::new();
-    vp.apply_language_binding_event(sample_binding_event(BindingFeedback::Support, 23, 400));
+    vp.apply_language_binding_event(sample_binding_event(BindingFeedback::Align, 23, 400));
 
     let st = vp.read_language_binding();
     assert_eq!(st.n_bindings, 1);
@@ -121,7 +111,7 @@ fn language_binding_layer_contains_no_rejected_architecture_terms() {
 #[test]
 fn language_binding_snapshot_carries_binding_traces_not_concepts() {
     let vp = Arc::new(Viewport::new());
-    vp.apply_language_binding_event(sample_binding_event(BindingFeedback::Support, 29, 500));
+    vp.apply_language_binding_event(sample_binding_event(BindingFeedback::Align, 29, 500));
 
     let dir = std::env::temp_dir().join("bionic_v0_language_binding_snap");
     std::fs::create_dir_all(&dir).ok();
@@ -134,10 +124,7 @@ fn language_binding_snapshot_carries_binding_traces_not_concepts() {
         snap.language_binding.traces[0].target,
         BindingTargetRef::ObjectSlot { slot_id: 2 }
     );
-    assert_eq!(
-        snap.language_binding.traces[0].status,
-        BindingStatus::Candidate
-    );
+    assert_eq!(snap.language_binding.traces[0].status, BindingStatus::Candidate);
     assert!(snap.language_binding.traces[0].strength.value > 0.0);
 
     let observer_src =

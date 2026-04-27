@@ -1,9 +1,8 @@
 // Probe-law substrate (minimal active-probe entry).
 //
-// Numeric/time-only. Forbidden: named object-target fields, outcome-label
-// fields, semantic-gate fields, concept identifiers, or naming qualifiers.
-// No high-layer semantics. No fixed curiosity/timing
-// gates — phase transitions driven by intensity-vs-suppression ratios.
+// Numeric/time-only. No semantic labels, no concept identifiers,
+// no naming qualifiers. Phase transitions driven by
+// intensity-vs-suppression ratios.
 
 use crate::action_output::{
     ActionOutputEvent, ActionOutputFeedback, ActionOutputPhase, OutputChannelKind,
@@ -14,16 +13,16 @@ use crate::{
     RELATION_INSTABILITY_TRIGGER_THRESHOLD, SURPRISE_TRIGGER_THRESHOLD,
 };
 
-/// Probe lifecycle phase. Numeric code; no semantic label.
-/// 0=Idle, 1=Rising, 2=Active, 3=Decaying.
+/// Probe lifecycle phase. Numeric code.
+/// P0=Idle, P1=Rising, P2=Active, P3=Decaying.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
 pub enum ProbePhase {
     #[default]
-    Idle = 0,
-    Rising = 1,
-    Active = 2,
-    Decaying = 3,
+    P0 = 0,
+    P1 = 1,
+    P2 = 2,
+    P3 = 3,
 }
 
 impl ProbePhase {
@@ -32,18 +31,17 @@ impl ProbePhase {
     }
     pub fn from_u8(v: u8) -> Self {
         match v {
-            1 => ProbePhase::Rising,
-            2 => ProbePhase::Active,
-            3 => ProbePhase::Decaying,
-            _ => ProbePhase::Idle,
+            1 => ProbePhase::P1,
+            2 => ProbePhase::P2,
+            3 => ProbePhase::P3,
+            _ => ProbePhase::P0,
         }
     }
 }
 
 /// Internal state of the probe-law substrate.
 ///
-/// All fields are numeric or temporal. No target, result, semantic, concept,
-/// or naming-qualifier fields are permitted in this struct.
+/// All fields are numeric or temporal.
 #[derive(Clone, Debug)]
 pub struct ProbeLawState {
     /// EMA-smoothed probe intensity. Driven by global reasoning novelty. [0,1].
@@ -52,7 +50,7 @@ pub struct ProbeLawState {
     pub suppression: f64,
     /// Current lifecycle phase code.
     pub phase: ProbePhase,
-    /// Substrate time of last refresh (µs).
+    /// Substrate time of last refresh (us).
     pub last_update_t_us: u64,
     /// Output intensity produced by tick_probe_output_from_law. [0,1].
     pub output_intensity: f64,
@@ -61,8 +59,8 @@ pub struct ProbeLawState {
     pub history_head: usize,
     pub history_len: usize,
     /// Last observed top routing slot id; used by tick_attention_trigger to
-    /// detect top-slot switches. -1 = uninitialized (no prior observation).
-    /// Ephemeral: not persisted in snapshots (cold-start resets to -1).
+    /// detect top-slot switches. -1 = uninitialized.
+    /// Ephemeral: not persisted in snapshots.
     pub last_top_slot_id: i8,
 }
 
@@ -71,7 +69,7 @@ impl Default for ProbeLawState {
         Self {
             intensity: 0.0,
             suppression: 0.0,
-            phase: ProbePhase::Idle,
+            phase: ProbePhase::P0,
             last_update_t_us: 0,
             output_intensity: 0.0,
             history: [0.0; PROBE_HISTORY_CAP],
@@ -85,63 +83,76 @@ impl Default for ProbeLawState {
 impl Viewport {
     /// Drive probe-law state from current global reasoning novelty (EMA-based).
     ///
-    /// Phase transitions are ratio-based: no fixed absolute gates on curiosity,
-    /// timing, or delay. Engineering alphas live in lib.rs constants.
+    /// Phase transitions are ratio-based.
     pub fn refresh_probe_law(&self, now_us: u64) {
         let novelty = self.read_global_reasoning_memory_summary().novelty_score;
 
         let mut st = self.probe_law.write().unwrap();
 
-        // EMA update: intensity tracks novelty; suppression tracks intensity (slower).
         st.intensity =
             (1.0 - PROBE_INTENSITY_ALPHA) * st.intensity + PROBE_INTENSITY_ALPHA * novelty;
         st.suppression = (1.0 - PROBE_SUPPRESSION_ALPHA) * st.suppression
             + PROBE_SUPPRESSION_ALPHA * st.intensity;
 
-        // Phase transitions driven by intensity/suppression ratio — no fixed gates.
-        let ratio = if st.suppression > 1e-9 {
-            st.intensity / st.suppression
-        } else if st.intensity > 1e-9 {
-            2.0
-        } else {
-            1.0
-        };
         st.phase = match st.phase {
-            ProbePhase::Idle => {
-                if ratio > 1.0 {
-                    ProbePhase::Rising
+            ProbePhase::P0 => {
+                if st.suppression > 1e-9 {
+                    let ratio = st.intensity / st.suppression;
+                    if ratio > 1.0 {
+                        ProbePhase::P1
+                    } else {
+                        ProbePhase::P0
+                    }
+                } else if st.intensity > 1e-9 {
+                    ProbePhase::P1
                 } else {
-                    ProbePhase::Idle
+                    ProbePhase::P0
                 }
             }
-            ProbePhase::Rising => {
+            ProbePhase::P1 => {
+                let ratio = if st.suppression > 1e-9 {
+                    st.intensity / st.suppression
+                } else {
+                    2.0
+                };
                 if ratio > 1.05 {
-                    ProbePhase::Active
+                    ProbePhase::P2
                 } else if ratio < 1.0 {
-                    ProbePhase::Decaying
+                    ProbePhase::P3
                 } else {
-                    ProbePhase::Rising
+                    ProbePhase::P1
                 }
             }
-            ProbePhase::Active => {
+            ProbePhase::P2 => {
+                let ratio = if st.suppression > 1e-9 {
+                    st.intensity / st.suppression
+                } else {
+                    2.0
+                };
                 if ratio < 1.0 {
-                    ProbePhase::Decaying
+                    ProbePhase::P3
                 } else {
-                    ProbePhase::Active
+                    ProbePhase::P2
                 }
             }
-            ProbePhase::Decaying => {
-                if ratio > 1.0 {
-                    ProbePhase::Rising
-                } else if st.intensity < st.suppression * 0.1 {
-                    ProbePhase::Idle
+            ProbePhase::P3 => {
+                if st.suppression > 1e-9 {
+                    let ratio = st.intensity / st.suppression;
+                    if ratio > 1.0 {
+                        ProbePhase::P1
+                    } else if st.intensity < st.suppression * 0.1 {
+                        ProbePhase::P0
+                    } else {
+                        ProbePhase::P3
+                    }
+                } else if st.intensity < 1e-10 {
+                    ProbePhase::P0
                 } else {
-                    ProbePhase::Decaying
+                    ProbePhase::P3
                 }
             }
         };
 
-        // Append to short history ring.
         let head = st.history_head;
         st.history[head] = st.intensity;
         st.history_head = (head + 1) % PROBE_HISTORY_CAP;
@@ -154,27 +165,20 @@ impl Viewport {
 
     /// Produce tick output from current probe-law state and drive action_output events.
     ///
-    /// Mapping (idempotent — channel phase + probe phase → event):
-    ///   Channel Idle (or no channel) + probe Rising/Active → Begin
-    ///   Channel Active + probe Rising/Active → Adjust
-    ///   Channel Decaying + probe Rising/Active → Begin (new epoch overrides decay)
-    ///   Channel Active + probe Decaying → Decay
-    ///   Channel Decaying + probe Decaying → Decay
-    ///   Channel Active/Decaying + probe Idle → Stop
-    ///   Channel Idle + probe Idle → None
-    ///   Channel Idle + probe Decaying → None (no active channel to decay)
-    ///
-    /// Lock ordering: read probe_law (drop), read action_output channel (drop),
-    /// fire event (write lock inside apply_action_output_event), then update
-    /// output_intensity in probe_law write lock.
+    /// Mapping (channel phase + probe phase -> event):
+    ///   Channel Idle + probe P1/P2 -> Begin
+    ///   Channel Active + probe P1/P2 -> Adjust
+    ///   Channel Decaying + probe P1/P2 -> Begin
+    ///   Channel Active/P2 + probe P3 -> Decay
+    ///   Channel Active/Decaying + probe P0 -> Stop
+    ///   Channel Idle + probe P0 -> None
+    ///   Channel Idle + probe P3 -> None
     pub fn tick_probe_output_from_law(&self, now_us: u64) {
-        // Step 1: read probe_law state (drop read lock).
         let (probe_phase, intensity, current_output_intensity) = {
             let st = self.probe_law.read().unwrap();
             (st.phase, st.intensity, st.output_intensity)
         };
 
-        // Step 2: read action_output channel phase (drop read lock).
         let channel_phase = {
             let ao = self.action_output.read().unwrap();
             ao.channels
@@ -183,7 +187,6 @@ impl Viewport {
                 .map(|c| c.phase)
         };
 
-        // Step 3: compute typical consequence delay for timing resonance.
         let typical_delay = self.compute_typical_consequence_delay();
         let delay_factor = if typical_delay > 0 {
             (typical_delay as f64 / 1_000_000.0).clamp(0.1, 5.0)
@@ -191,15 +194,13 @@ impl Viewport {
             1.0
         };
 
-        // Step 4: compute event to fire based on channel phase + probe phase.
         let decay_magnitude =
             ((current_output_intensity * PROBE_SUPPRESSION_ALPHA) / delay_factor).max(1e-9);
         let mag = (intensity / delay_factor).clamp(0.0, 1.0);
 
         let maybe_event: Option<ActionOutputEvent> = match (channel_phase, probe_phase) {
-            // No channel or Idle channel + Rising/Active → Begin
-            (None, ProbePhase::Rising | ProbePhase::Active)
-            | (Some(ActionOutputPhase::Idle), ProbePhase::Rising | ProbePhase::Active) => {
+            (None, ProbePhase::P1 | ProbePhase::P2)
+            | (Some(ActionOutputPhase::Idle), ProbePhase::P1 | ProbePhase::P2) => {
                 Some(ActionOutputEvent {
                     channel_kind: OutputChannelKind::GenericWrite,
                     feedback: ActionOutputFeedback::Begin,
@@ -207,8 +208,7 @@ impl Viewport {
                     event_t_us: now_us,
                 })
             }
-            // Active channel + Rising/Active → Adjust
-            (Some(ActionOutputPhase::Active), ProbePhase::Rising | ProbePhase::Active) => {
+            (Some(ActionOutputPhase::Active), ProbePhase::P1 | ProbePhase::P2) => {
                 Some(ActionOutputEvent {
                     channel_kind: OutputChannelKind::GenericWrite,
                     feedback: ActionOutputFeedback::Adjust,
@@ -216,8 +216,7 @@ impl Viewport {
                     event_t_us: now_us,
                 })
             }
-            // Decaying channel + Rising/Active → Begin (rising overrides decaying)
-            (Some(ActionOutputPhase::Decaying), ProbePhase::Rising | ProbePhase::Active) => {
+            (Some(ActionOutputPhase::Decaying), ProbePhase::P1 | ProbePhase::P2) => {
                 Some(ActionOutputEvent {
                     channel_kind: OutputChannelKind::GenericWrite,
                     feedback: ActionOutputFeedback::Begin,
@@ -225,18 +224,16 @@ impl Viewport {
                     event_t_us: now_us,
                 })
             }
-            // Active or Decaying channel + probe Decaying → Decay
             (
                 Some(ActionOutputPhase::Active | ActionOutputPhase::Decaying),
-                ProbePhase::Decaying,
+                ProbePhase::P3,
             ) => Some(ActionOutputEvent {
                 channel_kind: OutputChannelKind::GenericWrite,
                 feedback: ActionOutputFeedback::Decay,
                 magnitude: decay_magnitude,
                 event_t_us: now_us,
             }),
-            // Active or Decaying channel + probe Idle → Stop
-            (Some(ActionOutputPhase::Active | ActionOutputPhase::Decaying), ProbePhase::Idle) => {
+            (Some(ActionOutputPhase::Active | ActionOutputPhase::Decaying), ProbePhase::P0) => {
                 Some(ActionOutputEvent {
                     channel_kind: OutputChannelKind::GenericWrite,
                     feedback: ActionOutputFeedback::Stop,
@@ -244,21 +241,17 @@ impl Viewport {
                     event_t_us: now_us,
                 })
             }
-            // Idle channel + Idle probe → None
-            // Idle channel + Decaying probe → None (no active channel to decay)
             _ => None,
         };
 
-        // Step 5: fire event if applicable.
         if let Some(event) = maybe_event {
             self.apply_action_output_event(event);
         }
 
-        // Step 6: update output_intensity in probe_law write lock.
         let mut st = self.probe_law.write().unwrap();
         st.output_intensity = match probe_phase {
-            ProbePhase::Active | ProbePhase::Rising => intensity,
-            ProbePhase::Decaying | ProbePhase::Idle => {
+            ProbePhase::P2 | ProbePhase::P1 => intensity,
+            ProbePhase::P3 | ProbePhase::P0 => {
                 (st.output_intensity * (1.0 - PROBE_SUPPRESSION_ALPHA)).max(0.0)
             }
         };
@@ -269,15 +262,10 @@ impl Viewport {
         self.probe_law.read().unwrap().clone()
     }
 
-    /// Surprise-driven trigger (Task 5).
+    /// Surprise-driven trigger.
     ///
     /// Fires a Begin event when global_surprise_load strictly exceeds
-    /// SURPRISE_TRIGGER_THRESHOLD, regardless of current channel phase.
-    /// Begin always opens a new write epoch; channel state is replaced.
-    ///
-    /// Engineering approximation — threshold in lib.rs.
-    /// Lock ordering: read global_reasoning (drop), fire event (write lock
-    /// inside apply_action_output_event).
+    /// SURPRISE_TRIGGER_THRESHOLD.
     pub fn tick_surprise_trigger(&self, now_us: u64) {
         let surprise_load = { self.global_reasoning.read().unwrap().global_surprise_load };
         if surprise_load <= SURPRISE_TRIGGER_THRESHOLD {
@@ -291,15 +279,9 @@ impl Viewport {
         });
     }
 
-    /// Attention-rebalance trigger (Task 6).
+    /// Attention-rebalance trigger.
     ///
-    /// Fires an Adjust event when the top routing-focus slot id changes
-    /// since the last call. Adjust is a no-op if no channel is active.
-    ///
-    /// Engineering approximation — top-slot switch detection via stored
-    /// last_top_slot_id in ProbeLawState.
-    /// Lock ordering: read global_reasoning (drop), read+write probe_law
-    /// (drop), fire event (write lock inside apply_action_output_event).
+    /// Fires an Adjust event when the top routing-focus slot id changes.
     pub fn tick_attention_trigger(&self, now_us: u64) {
         let current_top = { self.global_reasoning.read().unwrap().routing_focus_slot_ids[0] };
 
@@ -312,7 +294,6 @@ impl Viewport {
             return;
         }
 
-        // Persist the new top slot before firing so re-entrant calls are safe.
         {
             self.probe_law.write().unwrap().last_top_slot_id = current_top;
         }
@@ -320,21 +301,15 @@ impl Viewport {
         self.apply_action_output_event(ActionOutputEvent {
             channel_kind: OutputChannelKind::GenericWrite,
             feedback: ActionOutputFeedback::Adjust,
-            magnitude: 1.0, // nominal full magnitude for an attention switch
+            magnitude: 1.0,
             event_t_us: now_us,
         });
     }
 
-    /// Relation-instability trigger (Task 7).
+    /// Relation-instability trigger.
     ///
-    /// Fires a Begin event when the maximum relation_surprise (EMA of
-    /// relation_err²) across all active edges strictly exceeds
-    /// RELATION_INSTABILITY_TRIGGER_THRESHOLD.
-    /// Begin always opens a new write epoch.
-    ///
-    /// Engineering approximation — threshold in lib.rs.
-    /// Lock ordering: read global_relations (drop), fire event (write lock
-    /// inside apply_action_output_event).
+    /// Fires a Begin event when the maximum relation_surprise across all
+    /// active edges strictly exceeds RELATION_INSTABILITY_TRIGGER_THRESHOLD.
     pub fn tick_relation_instability_trigger(&self, now_us: u64) {
         let max_surprise = {
             let gr = self.global_relations.read().unwrap();

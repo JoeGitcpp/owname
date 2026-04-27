@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bionic_v0::adapter::{ModalityAdapter, RealPhotAdapter, SyntheticVibAdapter};
 use bionic_v0::language_binding::{
-    BindingEvent, BindingFeedback, BindingStatus, BindingTargetRef, ExternalPatternKind,
+    BindingEvent, BindingFeedback, BindingStatus, BindingTargetRef, PatternKind,
 };
 use bionic_v0::phot_camera::{SynthCamStep, SyntheticCameraFrameProvider};
 use bionic_v0::synthetic_vib::SyntheticVibSource;
@@ -13,10 +13,10 @@ use bionic_v0::N_OBJECT_SLOTS;
 fn viewport_adapter_binding_api_records_trace() {
     let vp = Arc::new(Viewport::new());
     vp.apply_binding_event_from_adapter(BindingEvent {
-        pattern_kind: ExternalPatternKind::AudiblePattern,
+        pattern_kind: PatternKind::VibModality,
         pattern_hash: 0xDEAD_BEEF,
         target: BindingTargetRef::ObjectSlot { slot_id: 0 },
-        feedback: BindingFeedback::Support,
+        feedback: BindingFeedback::Align,
         evidence_ref: 1,
         event_t_us: 1_000,
     });
@@ -28,7 +28,7 @@ fn viewport_adapter_binding_api_records_trace() {
 }
 
 #[test]
-fn synthetic_vib_adapter_emits_audible_pattern_binding_events() {
+fn synthetic_vib_adapter_emits_vib_modality_binding_events() {
     let vp = Arc::new(Viewport::new());
     let src = SyntheticVibSource::new(1_000_000, 80_000, 30_000);
     let mut adapter = SyntheticVibAdapter::new(src);
@@ -38,16 +38,16 @@ fn synthetic_vib_adapter_emits_audible_pattern_binding_events() {
     }
 
     let st = vp.read_language_binding();
-    let audible: Vec<_> = st
+    let vib: Vec<_> = st
         .traces
         .iter()
-        .filter(|trace| trace.pattern_kind == ExternalPatternKind::AudiblePattern)
+        .filter(|trace| trace.pattern_kind == PatternKind::VibModality)
         .collect();
     assert!(
-        !audible.is_empty(),
-        "synthetic VIB path must produce at least one AudiblePattern binding trace"
+        !vib.is_empty(),
+        "synthetic VIB path must produce at least one VibModality binding trace"
     );
-    for trace in audible {
+    for trace in vib {
         match trace.target {
             BindingTargetRef::ObjectSlot { slot_id } => {
                 assert!(
@@ -61,7 +61,7 @@ fn synthetic_vib_adapter_emits_audible_pattern_binding_events() {
 }
 
 #[test]
-fn real_phot_adapter_emits_visual_pattern_binding_events() {
+fn real_phot_adapter_emits_phot_modality_binding_events() {
     let vp = Arc::new(Viewport::new());
     let script = vec![
         SynthCamStep::Idle,
@@ -86,14 +86,14 @@ fn real_phot_adapter_emits_visual_pattern_binding_events() {
     adapter.tick(&vp, 1_066_666);
 
     let st = vp.read_language_binding();
-    let visual: Vec<_> = st
+    let phot: Vec<_> = st
         .traces
         .iter()
-        .filter(|trace| trace.pattern_kind == ExternalPatternKind::VisualGlyph)
+        .filter(|trace| trace.pattern_kind == PatternKind::PhotModality)
         .collect();
     assert!(
-        !visual.is_empty(),
-        "real PHOT path must produce at least one VisualGlyph binding trace"
+        !phot.is_empty(),
+        "real PHOT path must produce at least one PhotModality binding trace"
     );
 }
 
@@ -101,10 +101,10 @@ fn real_phot_adapter_emits_visual_pattern_binding_events() {
 fn binding_maintenance_ticker_decays_stale_strength() {
     let vp = Arc::new(Viewport::new());
     let make_event = |t: u64| BindingEvent {
-        pattern_kind: ExternalPatternKind::AudiblePattern,
+        pattern_kind: PatternKind::VibModality,
         pattern_hash: 0xABCD,
         target: BindingTargetRef::ObjectSlot { slot_id: 1 },
-        feedback: BindingFeedback::Support,
+        feedback: BindingFeedback::Align,
         evidence_ref: t,
         event_t_us: t,
     };

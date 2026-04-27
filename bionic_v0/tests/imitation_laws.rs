@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use bionic_v0::action_output::{ActionOutputEvent, ActionOutputFeedback, OutputChannelKind};
-use bionic_v0::language_binding::{BindingEvent, BindingFeedback, BindingTargetRef, ExternalPatternKind};
+use bionic_v0::language_binding::{BindingEvent, BindingFeedback, BindingTargetRef, PatternKind};
 use bionic_v0::viewport::Viewport;
 
 // ─── 1. Similar write and consequence curves yield high similarity ─────────────
@@ -72,10 +72,10 @@ fn strong_binding_injects_attention_bias() {
     // Create a strong binding to slot 0
     for i in 0..5 {
         vp.apply_binding_event_from_adapter(BindingEvent {
-            pattern_kind: ExternalPatternKind::AudiblePattern,
+            pattern_kind: PatternKind::VibModality,
             pattern_hash: 0xBEEF,
             target: BindingTargetRef::ObjectSlot { slot_id: 0 },
-            feedback: BindingFeedback::Support,
+            feedback: BindingFeedback::Align,
             evidence_ref: i as u64,
             event_t_us: 1_000 + i as u64 * 1_000,
         });

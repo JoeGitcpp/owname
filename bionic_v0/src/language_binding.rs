@@ -1,11 +1,18 @@
+// Language binding layer — binds external patterns to internal substrate.
+// Numeric-only. No naming gate, no semantic labels.
+// Binding events are the learning unit.
+
+/// External pattern kind codes. Numeric indices, not semantic labels.
+/// 0=VibModality, 1=PhotModality, 2=MechModality, 3=SymbolSeq.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExternalPatternKind {
-    VisualGlyph,
-    AudiblePattern,
-    GesturePattern,
-    SymbolSequence,
+pub enum PatternKind {
+    VibModality = 0,
+    PhotModality = 1,
+    MechModality = 2,
+    SymbolSeq = 3,
 }
 
+/// Binding target reference. Numeric index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingTargetRef {
     ObjectSlot { slot_id: u8 },
@@ -13,6 +20,7 @@ pub enum BindingTargetRef {
     TimeWindow { start_t_us: u64, end_t_us: u64 },
 }
 
+/// Binding strength [0, 1].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BindingStrength {
     pub value: f64,
@@ -32,22 +40,27 @@ impl Default for BindingStrength {
     }
 }
 
+/// Binding status codes. Numeric.
+/// 0=Candidate, 1=Reinforced, 2=Weakened.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingStatus {
-    Candidate,
-    Reinforced,
-    Weakened,
+    Candidate = 0,
+    Reinforced = 1,
+    Weakened = 2,
 }
 
+/// Binding feedback codes. Numeric.
+/// 0=Align, 1=Deviate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingFeedback {
-    Support,
-    Contradict,
+    Align = 0,
+    Deviate = 1,
 }
 
+/// Binding event — the learning unit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BindingEvent {
-    pub pattern_kind: ExternalPatternKind,
+    pub pattern_kind: PatternKind,
     pub pattern_hash: u64,
     pub target: BindingTargetRef,
     pub feedback: BindingFeedback,
@@ -55,9 +68,10 @@ pub struct BindingEvent {
     pub event_t_us: u64,
 }
 
+/// Binding trace — accumulated evidence for one binding.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BindingTrace {
-    pub pattern_kind: ExternalPatternKind,
+    pub pattern_kind: PatternKind,
     pub pattern_hash: u64,
     pub target: BindingTargetRef,
     pub strength: BindingStrength,
@@ -68,6 +82,7 @@ pub struct BindingTrace {
     pub last_update_t_us: u64,
 }
 
+/// Language binding state — collection of traces.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LanguageBindingState {
     pub traces: Vec<BindingTrace>,
@@ -91,12 +106,12 @@ impl LanguageBindingState {
             }
             trace.last_update_t_us = event.event_t_us;
             match event.feedback {
-                BindingFeedback::Support => {
+                BindingFeedback::Align => {
                     trace.reinforce_count += 1;
                     trace.strength = BindingStrength::new(trace.strength.value + 0.25);
                     trace.status = BindingStatus::Reinforced;
                 }
-                BindingFeedback::Contradict => {
+                BindingFeedback::Deviate => {
                     trace.weaken_count += 1;
                     trace.strength = BindingStrength::new(trace.strength.value - 0.3);
                     trace.status = BindingStatus::Weakened;
@@ -106,7 +121,7 @@ impl LanguageBindingState {
             return;
         }
 
-        if event.feedback == BindingFeedback::Support {
+        if event.feedback == BindingFeedback::Align {
             self.push_trace(BindingTrace {
                 pattern_kind: event.pattern_kind,
                 pattern_hash: event.pattern_hash,
