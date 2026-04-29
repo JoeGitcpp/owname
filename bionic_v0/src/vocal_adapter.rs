@@ -1,4 +1,6 @@
 use crate::viewport::Viewport;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{SampleFormat, StreamConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -32,9 +34,147 @@ pub fn sample_vocal_waveform(vp: &Arc<Viewport>, n_samples: usize) -> Vec<f64> {
 
 pub fn spawn_vocal_output(vp: Arc<Viewport>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::spawn(move || {
+        let host = cpal::default_host();
+        let Some(device) = host.default_output_device() else {
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(250));
+            }
+            return;
+        };
+        let Ok(output_config) = device.default_output_config() else {
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(250));
+            }
+            return;
+        };
+        let stream_config: StreamConfig = output_config.config();
+        let channels = usize::from(stream_config.channels.max(1));
+        let sample_rate_hz = stream_config.sample_rate.0 as f64;
+
+        let err_fn = |_err: cpal::StreamError| {};
+
+        let stream_result = match output_config.sample_format() {
+            SampleFormat::F32 => {
+                let vp_f32 = vp.clone();
+                let mut phase = 0.0_f64;
+                device.build_output_stream(
+                    &stream_config,
+                    move |data: &mut [f32], _| {
+                        fill_output_buffer_f32(data, channels, sample_rate_hz, &vp_f32, &mut phase);
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            SampleFormat::I16 => {
+                let vp_i16 = vp.clone();
+                let mut phase = 0.0_f64;
+                device.build_output_stream(
+                    &stream_config,
+                    move |data: &mut [i16], _| {
+                        fill_output_buffer_i16(data, channels, sample_rate_hz, &vp_i16, &mut phase);
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            SampleFormat::U16 => {
+                let vp_u16 = vp.clone();
+                let mut phase = 0.0_f64;
+                device.build_output_stream(
+                    &stream_config,
+                    move |data: &mut [u16], _| {
+                        fill_output_buffer_u16(data, channels, sample_rate_hz, &vp_u16, &mut phase);
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            _ => return,
+        };
+
+        let Ok(stream) = stream_result else {
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(250));
+            }
+            return;
+        };
+        if stream.play().is_err() {
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(250));
+            }
+            return;
+        }
+
         while !stop.load(Ordering::Relaxed) {
-            let _samples = sample_vocal_waveform(&vp, 128);
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(50));
         }
     })
+}
+
+fn next_wave_sample(vp: &Arc<Viewport>, phase: &mut f64, sample_rate_hz: f64) -> f32 {
+    let organ = vp.read_vocal_organ();
+    if organ.breath_drive < 0.01 {
+        return 0.0;
+    }
+
+    let pitch = 100.0 + organ.pitch_tension * 400.0;
+    let resonance = organ.resonance_position * 3.0;
+    let phase_step = pitch / sample_rate_hz;
+    *phase = (*phase + phase_step).fract();
+
+    let theta = *phase * 2.0 * std::f64::consts::PI;
+    let fundamental = theta.sin();
+    let harmonic1 = (theta * 2.0).sin() * 0.3;
+    let harmonic2 = (theta * 3.0).sin() * 0.1 * resonance;
+    let sample = organ.breath_drive * (fundamental + harmonic1 + harmonic2);
+    sample.clamp(-1.0, 1.0) as f32
+}
+
+fn fill_output_buffer_f32(
+    data: &mut [f32],
+    channels: usize,
+    sample_rate_hz: f64,
+    vp: &Arc<Viewport>,
+    phase: &mut f64,
+) {
+    for frame in data.chunks_mut(channels) {
+        let s = next_wave_sample(vp, phase, sample_rate_hz);
+        for out in frame.iter_mut() {
+            *out = s;
+        }
+    }
+}
+
+fn fill_output_buffer_i16(
+    data: &mut [i16],
+    channels: usize,
+    sample_rate_hz: f64,
+    vp: &Arc<Viewport>,
+    phase: &mut f64,
+) {
+    for frame in data.chunks_mut(channels) {
+        let s = next_wave_sample(vp, phase, sample_rate_hz);
+        let v = (s * i16::MAX as f32) as i16;
+        for out in frame.iter_mut() {
+            *out = v;
+        }
+    }
+}
+
+fn fill_output_buffer_u16(
+    data: &mut [u16],
+    channels: usize,
+    sample_rate_hz: f64,
+    vp: &Arc<Viewport>,
+    phase: &mut f64,
+) {
+    for frame in data.chunks_mut(channels) {
+        let s = next_wave_sample(vp, phase, sample_rate_hz);
+        let normalized = ((s * 0.5) + 0.5).clamp(0.0, 1.0);
+        let v = (normalized * u16::MAX as f32) as u16;
+        for out in frame.iter_mut() {
+            *out = v;
+        }
+    }
 }

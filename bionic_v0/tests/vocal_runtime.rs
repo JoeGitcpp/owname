@@ -48,3 +48,22 @@ fn observer_visible_snapshot_contains_vocal_activity_fields() {
     let snap = read_snapshot(&paths.final_path).unwrap();
     assert!(snap.vocal_imitation.imitation_pressure >= 0.0);
 }
+
+#[test]
+fn vocal_output_path_uses_cpal_stream_and_avoids_text_or_stdout_diagnostics() {
+    let src = include_str!("../src/vocal_adapter.rs");
+    assert!(src.contains("cpal::default_host"));
+    assert!(src.contains("default_output_device"));
+    assert!(src.contains("default_output_config"));
+    assert!(src.contains("build_output_stream"));
+    assert!(src.contains("SampleFormat::F32"));
+    assert!(src.contains("SampleFormat::I16"));
+    assert!(src.contains("SampleFormat::U16"));
+    assert!(src.contains(".play()"));
+
+    let lowered = src.to_ascii_lowercase();
+    assert!(!lowered.contains("text-to-speech"));
+    assert!(!lowered.contains("tts"));
+    assert!(!src.contains("println!"));
+    assert!(!src.contains("eprintln!"));
+}

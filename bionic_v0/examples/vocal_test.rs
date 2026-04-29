@@ -1,9 +1,10 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use bionic_v0::viewport::Viewport;
-use bionic_v0::vocal_adapter::sample_vocal_waveform;
+use bionic_v0::vocal_adapter::{sample_vocal_waveform, spawn_vocal_output};
 
 fn analyze_samples(samples: &[f64]) -> (f64, f64, f64) {
     let energy: f64 = samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64;
@@ -69,6 +70,8 @@ fn main() {
     println!("Testing if the system can learn and produce various sounds through its own drive.\n");
 
     let vp = Arc::new(Viewport::new());
+    let stop = Arc::new(AtomicBool::new(false));
+    let output = spawn_vocal_output(vp.clone(), stop.clone());
 
     let sound_types = vec![
         ("Deep bass voice", 0.8, 0.08, 0.2, 0.3),
@@ -82,6 +85,9 @@ fn main() {
     for (name, energy, pitch, resonance, envelope) in sound_types {
         run_self_driven_test(&vp, name, energy, pitch, resonance, envelope);
     }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = output.join();
 
     println!("=== Test Complete ===");
     println!("If you saw different phase transitions, the system is working!");
