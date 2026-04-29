@@ -7,10 +7,8 @@
 // probe, and that probe writes can close into consequence pairs.
 // No semantic/target/result fields are introduced by any test.
 
-use bionic_v0::action_consequence::{
-    ActionConsequenceWindowEvent, ConsequenceModalityKind, ConsequencePairStatus,
-};
-use bionic_v0::probe_law::{ProbePhase};
+use bionic_v0::action_consequence::{ActionConsequenceWindowEvent, ConsequenceModalityKind};
+use bionic_v0::probe_law::ProbePhase;
 use bionic_v0::viewport::Viewport;
 
 #[test]
@@ -61,7 +59,6 @@ fn suppression_dominant_causes_p3_or_p0() {
 #[test]
 fn probe_write_can_close_into_consequence_pair() {
     use bionic_v0::action_consequence::ConsequencePairStatus;
-    use bionic_v0::action_output::{ActionOutputEvent, ActionOutputFeedback, OutputChannelKind};
 
     let vp = Viewport::new();
     // Generate a write epoch via probe

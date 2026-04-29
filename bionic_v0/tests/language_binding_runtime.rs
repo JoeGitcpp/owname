@@ -7,7 +7,6 @@ use bionic_v0::language_binding::{
 use bionic_v0::phot_camera::{SynthCamStep, SyntheticCameraFrameProvider};
 use bionic_v0::synthetic_vib::SyntheticVibSource;
 use bionic_v0::viewport::Viewport;
-use bionic_v0::N_OBJECT_SLOTS;
 
 #[test]
 fn viewport_adapter_binding_api_records_trace() {
@@ -28,7 +27,7 @@ fn viewport_adapter_binding_api_records_trace() {
 }
 
 #[test]
-fn synthetic_vib_adapter_emits_vib_modality_binding_events() {
+fn synthetic_vib_adapter_does_not_fabricate_binding_feedback() {
     let vp = Arc::new(Viewport::new());
     let src = SyntheticVibSource::new(1_000_000, 80_000, 30_000);
     let mut adapter = SyntheticVibAdapter::new(src);
@@ -37,31 +36,15 @@ fn synthetic_vib_adapter_emits_vib_modality_binding_events() {
         adapter.tick(&vp, 1_000_000 + step * 5_000);
     }
 
-    let st = vp.read_language_binding();
-    let vib: Vec<_> = st
-        .traces
-        .iter()
-        .filter(|trace| trace.pattern_kind == PatternKind::VibModality)
-        .collect();
-    assert!(
-        !vib.is_empty(),
-        "synthetic VIB path must produce at least one VibModality binding trace"
+    assert_eq!(
+        vp.read_language_binding().n_bindings,
+        0,
+        "sensory adapters may submit substrate evidence, but must not invent binding feedback"
     );
-    for trace in vib {
-        match trace.target {
-            BindingTargetRef::ObjectSlot { slot_id } => {
-                assert!(
-                    (slot_id as usize) < N_OBJECT_SLOTS,
-                    "binding target must stay in viewport slots"
-                );
-            }
-            _ => panic!("adapter path must bind to slot targets in runtime path"),
-        }
-    }
 }
 
 #[test]
-fn real_phot_adapter_emits_phot_modality_binding_events() {
+fn real_phot_adapter_does_not_fabricate_binding_feedback() {
     let vp = Arc::new(Viewport::new());
     let script = vec![
         SynthCamStep::Idle,
@@ -85,15 +68,10 @@ fn real_phot_adapter_emits_phot_modality_binding_events() {
     adapter.tick(&vp, 1_033_333);
     adapter.tick(&vp, 1_066_666);
 
-    let st = vp.read_language_binding();
-    let phot: Vec<_> = st
-        .traces
-        .iter()
-        .filter(|trace| trace.pattern_kind == PatternKind::PhotModality)
-        .collect();
-    assert!(
-        !phot.is_empty(),
-        "real PHOT path must produce at least one PhotModality binding trace"
+    assert_eq!(
+        vp.read_language_binding().n_bindings,
+        0,
+        "sensory adapters may submit substrate evidence, but must not invent binding feedback"
     );
 }
 

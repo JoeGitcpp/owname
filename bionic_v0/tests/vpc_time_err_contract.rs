@@ -34,7 +34,10 @@ fn ar2_predictor_only_emits_err_after_later_observation_arrives() {
     assert_eq!(open.publications.len(), 1);
     assert_eq!(open.open_predictions.len(), 1);
     assert_eq!(open.publications[0].status, PublicationStatus::Open);
-    assert_eq!(open.publications[0].domain.kind, ObservationDomainKind::Axis);
+    assert_eq!(
+        open.publications[0].domain.kind,
+        ObservationDomainKind::Axis
+    );
     assert_eq!(open.publications[0].domain.primary, 0);
     assert!(vp.latest_err(0).is_none());
 
@@ -68,12 +71,14 @@ fn ar2_predictor_contract_state_stays_axis_local() {
     assert!(
         st.publications
             .iter()
-            .all(|trace| trace.domain.kind == ObservationDomainKind::Axis && trace.domain.primary == 0)
+            .all(|trace| trace.domain.kind == ObservationDomainKind::Axis
+                && trace.domain.primary == 0)
     );
     assert!(
         st.open_predictions
             .iter()
-            .all(|trace| trace.domain.kind == ObservationDomainKind::Axis && trace.domain.primary == 0)
+            .all(|trace| trace.domain.kind == ObservationDomainKind::Axis
+                && trace.domain.primary == 0)
     );
 }
 

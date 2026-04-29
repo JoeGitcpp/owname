@@ -337,7 +337,11 @@ mod tests {
         let priors = BiasPriors::default();
         let err = [0.05, 0.05, 0.05, 0.05];
         let score = compute_disruption_score(&err, &priors);
-        assert!(score < 0.5, "quiet err should yield low score, got {}", score);
+        assert!(
+            score < 0.5,
+            "quiet err should yield low score, got {}",
+            score
+        );
     }
 
     #[test]

@@ -104,7 +104,9 @@ fn history_drops_stale_slots_after_consecutive_missing_frames() {
     hist.update(&frame_at(0.2, 0.3, 5));
 
     for _ in 0..4 {
-        hist.update(&SurfaceFrame { objects: Vec::new() });
+        hist.update(&SurfaceFrame {
+            objects: Vec::new(),
+        });
     }
 
     let trails = hist.render_trails();

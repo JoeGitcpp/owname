@@ -93,8 +93,8 @@ impl PhotSlotPredictor {
         // Surprise tracks prediction error: rises with err², falls when err is small.
         for i in 0..n {
             let e2 = err[i] * err[i];
-            self.surprise[i] = PHOT_PRED_SURPRISE_ALPHA * e2
-                + (1.0 - PHOT_PRED_SURPRISE_ALPHA) * self.surprise[i];
+            self.surprise[i] =
+                PHOT_PRED_SURPRISE_ALPHA * e2 + (1.0 - PHOT_PRED_SURPRISE_ALPHA) * self.surprise[i];
             self.surprise[i] =
                 self.surprise[i].clamp(PHOT_PRED_SURPRISE_MIN, PHOT_PRED_SURPRISE_MAX);
         }

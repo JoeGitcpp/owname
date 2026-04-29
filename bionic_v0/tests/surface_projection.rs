@@ -1,12 +1,12 @@
-use bionic_v0::surface_projection::project_surface_frame;
+use bionic_v0::language_binding::LanguageBindingState;
 use bionic_v0::snapshot::{
     SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub, SnapshotData,
     SnapshotLastClaim, SnapshotProbeLaw, SnapshotSlot, SnapshotSpatial, SnapshotVocalMemory,
 };
+use bionic_v0::surface_projection::project_surface_frame;
 use bionic_v0::viewport::{
     GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,
 };
-use bionic_v0::language_binding::LanguageBindingState;
 use bionic_v0::vocal_imitation::VocalImitationState;
 use bionic_v0::vocal_organ::VocalOrganState;
 use bionic_v0::vocal_target::VocalTargetState;

@@ -116,6 +116,7 @@ fn typical_delay_from_pairs_adjusts_probe_timing() {
     // Should converge around 500ms
     assert!(
         typical > 400_000 && typical < 600_000,
-        "Typical delay should be around 500ms, got {}", typical
+        "Typical delay should be around 500ms, got {}",
+        typical
     );
 }

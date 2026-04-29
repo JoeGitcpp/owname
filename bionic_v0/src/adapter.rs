@@ -20,45 +20,11 @@ use std::time::Duration;
 use crate::action_consequence::tick_vib_ingress_consequence;
 use crate::clock::now_us;
 use crate::evolution_priors::BiasPriors;
-use crate::language_binding::{
-    BindingEvent, BindingFeedback, BindingTargetRef, PatternKind,
-};
 use crate::phot::SyntheticPhotSource;
-use crate::phot_camera::{CameraFault, CameraFrameProvider, MotionExtract, MotionExtractor};
+use crate::phot_camera::{CameraFault, CameraFrameProvider, MotionExtractor};
 use crate::synthetic_vib::SyntheticVibSource;
 use crate::viewport::{EventEvidence, HealthState, SlotClaim, SpatialEvidence, Viewport};
-use crate::{
-    EVENT_NOMINATION_THRESHOLD, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, PHOT_STALE_WINDOW_US, VIB_BANDS,
-};
-
-fn compute_vib_pattern_hash(bands: &[f64; VIB_BANDS]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for (axis, band) in bands.iter().enumerate() {
-        let q = (band.clamp(0.0, 1.0) * 4095.0).round() as u64;
-        hash ^= ((axis as u64) << 12) ^ q;
-        hash = hash.wrapping_mul(0x0000_0001_0000_01b3);
-    }
-    hash
-}
-
-fn compute_phot_pattern_hash(region: &MotionExtract) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for (axis, band) in region.phot_bands.iter().enumerate() {
-        let q = (band.clamp(0.0, 1.0) * 4095.0).round() as u64;
-        hash ^= ((axis as u64) << 12) ^ q;
-        hash = hash.wrapping_mul(0x0000_0001_0000_01b3);
-    }
-    for q in [
-        (region.pos_x.clamp(0.0, 1.0) * 1023.0).round() as u64,
-        (region.pos_y.clamp(0.0, 1.0) * 1023.0).round() as u64,
-        (region.span_x.clamp(0.0, 1.0) * 1023.0).round() as u64,
-        (region.span_y.clamp(0.0, 1.0) * 1023.0).round() as u64,
-    ] {
-        hash ^= q;
-        hash = hash.wrapping_mul(0x0000_0001_0000_01b3);
-    }
-    hash
-}
+use crate::{EVENT_NOMINATION_THRESHOLD, MOD_PHOT, MOD_VIB, PHOT_STALE_WINDOW_US, VIB_BANDS};
 
 /// The sole write-path for one modality into the viewport. Each adapter owns
 /// its own input source (mic, camera, ...) and exposes which viewport regions
@@ -185,7 +151,6 @@ pub struct VibAdapter {
     fault: Arc<AtomicBool>,
     smoothed_energy: f64,
     smoothed_surprise: f64,
-    last_pattern_hash: Option<u64>,
     priors: Arc<BiasPriors>,
 }
 
@@ -206,7 +171,6 @@ impl VibAdapter {
                 fault,
                 smoothed_energy: 0.0,
                 smoothed_surprise: 0.0,
-                last_pattern_hash: None,
                 priors,
             },
             Err(_) => {
@@ -217,7 +181,6 @@ impl VibAdapter {
                     fault,
                     smoothed_energy: 0.0,
                     smoothed_surprise: 0.0,
-                    last_pattern_hash: None,
                     priors,
                 }
             }
@@ -263,14 +226,12 @@ impl VibAdapter {
         // signature; revisit if a separate "always-on band weight" is needed)
         let mut inst_surprise = 0.0;
         for axis in 0..VIB_BANDS {
-            inst_surprise += per_band_err[axis].abs()
-                * self.priors.disruption_band_coef[axis];
+            inst_surprise += per_band_err[axis].abs() * self.priors.disruption_band_coef[axis];
         }
 
         // Disruption signature check: if score crosses threshold, amplify
-        let disruption_score = crate::evolution_priors::compute_disruption_score(
-            &per_band_err, &self.priors,
-        );
+        let disruption_score =
+            crate::evolution_priors::compute_disruption_score(&per_band_err, &self.priors);
         if disruption_score > self.priors.disruption_err_threshold {
             inst_surprise *= self.priors.disruption_surprise_mul;
         }
@@ -331,23 +292,6 @@ impl VibAdapter {
         vp.write_slot_vib(slot_id, t_us, bands, &predicted, &err, &surprise);
         vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
         vp.refresh_slot_high_layer(slot_id, t_us);
-
-        let pattern_hash = compute_vib_pattern_hash(bands);
-        if self.last_pattern_hash != Some(pattern_hash) {
-            if let Ok(slot_id_u8) = u8::try_from(slot_id) {
-                vp.apply_binding_event_from_adapter(BindingEvent {
-                    pattern_kind: PatternKind::VibModality,
-                    pattern_hash,
-                    target: BindingTargetRef::ObjectSlot {
-                        slot_id: slot_id_u8,
-                    },
-                    feedback: BindingFeedback::Align,
-                    evidence_ref: t_us,
-                    event_t_us: t_us,
-                });
-            }
-            self.last_pattern_hash = Some(pattern_hash);
-        }
     }
 }
 
@@ -521,9 +465,6 @@ pub struct RealPhotAdapter {
     /// Stable ID of the active consequence window (0 = none).
     /// Used to explicitly close the window when motion quiesces.
     consequence_window_id: u64,
-    /// Per-slot pattern history to avoid emitting duplicate binding events on
-    /// static regions.
-    last_pattern_hash_by_slot: [Option<u64>; N_OBJECT_SLOTS],
 }
 
 impl RealPhotAdapter {
@@ -540,14 +481,12 @@ impl RealPhotAdapter {
             last_frame_t_us: 0,
             _tick_hz: 30,
             consequence_window_id: 0,
-            last_pattern_hash_by_slot: [None; N_OBJECT_SLOTS],
         }
     }
 
     fn set_fault(&mut self, vp: &Arc<Viewport>) {
         self.faulted = true;
         self.extractor.reset();
-        self.last_pattern_hash_by_slot = [None; N_OBJECT_SLOTS];
         vp.set_phot_health(HealthState::Fault);
     }
 }
@@ -727,23 +666,6 @@ impl ModalityAdapter for RealPhotAdapter {
             vp.update_slot_phot_with_predictor(slot_id, now_us, &observed);
             vp.refresh_slot_fusion(slot_id, MOD_PHOT, now_us);
             vp.refresh_slot_high_layer(slot_id, now_us);
-
-            let pattern_hash = compute_phot_pattern_hash(region);
-            if self.last_pattern_hash_by_slot[slot_id] != Some(pattern_hash) {
-                if let Ok(slot_id_u8) = u8::try_from(slot_id) {
-                    vp.apply_binding_event_from_adapter(BindingEvent {
-                        pattern_kind: PatternKind::PhotModality,
-                        pattern_hash,
-                        target: BindingTargetRef::ObjectSlot {
-                            slot_id: slot_id_u8,
-                        },
-                        feedback: BindingFeedback::Align,
-                        evidence_ref: now_us,
-                        event_t_us: now_us,
-                    });
-                }
-                self.last_pattern_hash_by_slot[slot_id] = Some(pattern_hash);
-            }
         }
 
         // Wiring: record the PHOT ingress change as a consequence observation.
@@ -775,7 +697,6 @@ pub struct SyntheticVibAdapter {
     source: SyntheticVibSource,
     smoothed_energy: f64,
     smoothed_surprise: f64,
-    last_pattern_hash: Option<u64>,
 }
 
 impl SyntheticVibAdapter {
@@ -784,7 +705,6 @@ impl SyntheticVibAdapter {
             source,
             smoothed_energy: 0.0,
             smoothed_surprise: 0.0,
-            last_pattern_hash: None,
         }
     }
 }
@@ -859,22 +779,5 @@ impl ModalityAdapter for SyntheticVibAdapter {
         vp.write_slot_vib(slot_id, now_us, &frame.bands, &predicted, &err, &surprise);
         vp.refresh_slot_fusion(slot_id, MOD_VIB, now_us);
         vp.refresh_slot_high_layer(slot_id, now_us);
-
-        let pattern_hash = compute_vib_pattern_hash(&frame.bands);
-        if self.last_pattern_hash != Some(pattern_hash) {
-            if let Ok(slot_id_u8) = u8::try_from(slot_id) {
-                vp.apply_binding_event_from_adapter(BindingEvent {
-                    pattern_kind: PatternKind::VibModality,
-                    pattern_hash,
-                    target: BindingTargetRef::ObjectSlot {
-                        slot_id: slot_id_u8,
-                    },
-                    feedback: BindingFeedback::Align,
-                    evidence_ref: now_us,
-                    event_t_us: now_us,
-                });
-            }
-            self.last_pattern_hash = Some(pattern_hash);
-        }
     }
 }

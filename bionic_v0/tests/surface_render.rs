@@ -1,6 +1,6 @@
-use bionic_v0::surface_render::{render_surface_frame, RenderConfig};
-use bionic_v0::surface_projection::{SurfaceFrame, SurfaceObjectGlyph};
 use bionic_v0::surface_history::{SlotTrail, TrailPoint};
+use bionic_v0::surface_projection::{SurfaceFrame, SurfaceObjectGlyph};
+use bionic_v0::surface_render::{render_surface_frame, RenderConfig};
 
 fn single_object_frame(cx: f64, cy: f64, rx: f64, ry: f64) -> SurfaceFrame {
     SurfaceFrame {
@@ -40,7 +40,9 @@ fn one_trail(points: Vec<(f64, f64)>) -> Vec<SlotTrail> {
 }
 
 fn count_lit_pixels(img: &[[u8; 4]]) -> usize {
-    img.iter().filter(|px| px[0] > 0 || px[1] > 0 || px[2] > 0).count()
+    img.iter()
+        .filter(|px| px[0] > 0 || px[1] > 0 || px[2] > 0)
+        .count()
 }
 
 #[test]

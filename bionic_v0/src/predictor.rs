@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::vpc::PredictorLifecycleState;
 use crate::viewport::{Sample, Viewport};
+use crate::vpc::PredictorLifecycleState;
 
 pub struct Ar2Predictor {
     pub axis: usize,

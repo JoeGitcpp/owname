@@ -39,7 +39,8 @@ fn test_broadband_err_amplifies_surprise_vs_baseline() {
     assert!(
         broadband > baseline * 1.5,
         "broadband err should amplify surprise >1.5x: baseline={}, broadband={}",
-        baseline, broadband
+        baseline,
+        broadband
     );
 }
 
@@ -60,6 +61,7 @@ fn test_low_multiplier_means_smaller_amplification() {
     assert!(
         surprise_high > surprise_low,
         "higher disruption_surprise_mul should produce higher surprise: low={}, high={}",
-        surprise_low, surprise_high
+        surprise_low,
+        surprise_high
     );
 }

@@ -7,10 +7,15 @@ use std::sync::Arc;
 use crate::action_consequence::ActionConsequenceState;
 use crate::action_output::ActionOutputState;
 use crate::language_binding::{
-    BindingStatus, BindingTargetRef, BindingTrace, PatternKind, LanguageBindingState,
+    BindingStatus, BindingTargetRef, BindingTrace, LanguageBindingState, PatternKind,
 };
 use crate::object_high_layer::ObjectHighLayerState;
 use crate::probe_law::ProbeLawState;
+use crate::viewport::{
+    AmbientModalitySnapshot, AxisRing, BandFamilyState, CrossModalFusionState,
+    GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,
+    RelationEdgeState, SpatialState, Viewport,
+};
 use crate::vocal_imitation::VocalImitationState;
 use crate::vocal_memory::VocalMemoryState;
 use crate::vocal_organ::VocalOrganState;
@@ -18,11 +23,6 @@ use crate::vocal_target::VocalTargetState;
 use crate::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
     PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
-};
-use crate::viewport::{
-    AmbientModalitySnapshot, AxisRing, BandFamilyState, CrossModalFusionState,
-    GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,
-    RelationEdgeState, SpatialState, Viewport,
 };
 use crate::{
     AXIS_COUNT, HISTORY_CAP, N_OBJECT_SLOTS, PROBE_HISTORY_CAP, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
@@ -1801,7 +1801,11 @@ fn write_action_consequence(buf: &mut Vec<u8>, s: &ActionConsequenceState) {
     }
 }
 
-fn read_action_consequence_snapshot(bytes: &[u8], cur: &mut usize, version: u64) -> SnapshotActionConsequence {
+fn read_action_consequence_snapshot(
+    bytes: &[u8],
+    cur: &mut usize,
+    version: u64,
+) -> SnapshotActionConsequence {
     fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
         let mut a = [0u8; 8];
         a.copy_from_slice(&b[*c..*c + 8]);
@@ -1981,7 +1985,11 @@ fn read_vocal_organ_snapshot(bytes: &[u8], cur: &mut usize) -> VocalOrganState {
     let noise_mix = rd_f64(bytes, cur);
     let phase_byte = bytes[*cur];
     *cur += 8;
-    let phase = if phase_byte == 1 { VocalOrganPhase::Active } else { VocalOrganPhase::Idle };
+    let phase = if phase_byte == 1 {
+        VocalOrganPhase::Active
+    } else {
+        VocalOrganPhase::Idle
+    };
     let last_update_t_us = rd_u64(bytes, cur);
     VocalOrganState {
         breath_drive,

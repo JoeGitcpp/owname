@@ -211,7 +211,10 @@ fn predictor_contract_snapshot_roundtrips_family_traces_without_semantics() {
 
     let snap = read_snapshot(&paths.final_path).expect("read ok");
     assert_eq!(snap.vpc_contract.predictor_traces.len(), 1);
-    assert_eq!(snap.vpc_contract.predictor_traces[0].predictor_family, VPC_FAMILY_AR2);
+    assert_eq!(
+        snap.vpc_contract.predictor_traces[0].predictor_family,
+        VPC_FAMILY_AR2
+    );
     assert_eq!(
         snap.vpc_contract.predictor_traces[0].lifecycle,
         PredictorLifecycleState::InsufficientContext
@@ -255,7 +258,11 @@ fn predictor_contract_hygiene_warmup_stays_open_and_non_confident() {
     vp.update_slot_phot_with_predictor(phot_slot, 10_000, &[0.3, 0.5, 0.1, 0.2]);
     run_relation_cycle(&vp, relation_a, relation_b, 10_000, 10_000);
 
-    let phot = vp.read_slot(phot_slot).expect("phot slot").phot.expect("phot");
+    let phot = vp
+        .read_slot(phot_slot)
+        .expect("phot slot")
+        .phot
+        .expect("phot");
     assert!(phot.err.iter().all(|v| v.abs() < 1e-12));
     assert!(phot.surprise.iter().all(|v| v.abs() < 1e-12));
 

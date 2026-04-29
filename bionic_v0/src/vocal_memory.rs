@@ -41,7 +41,8 @@ impl VocalMemoryState {
         }
 
         if self.prototypes.len() > 8 {
-            self.prototypes.sort_by(|a, b| b.stability.partial_cmp(&a.stability).unwrap());
+            self.prototypes
+                .sort_by(|a, b| b.stability.partial_cmp(&a.stability).unwrap());
             self.prototypes.truncate(8);
         }
     }

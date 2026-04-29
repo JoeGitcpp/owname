@@ -1,5 +1,5 @@
 // Language binding layer — binds external patterns to internal substrate.
-// Numeric-only. No naming gate, no semantic labels.
+// Numeric-only binding traces; no substrate promotion threshold.
 // Binding events are the learning unit.
 
 /// External pattern kind codes. Numeric indices, not semantic labels.

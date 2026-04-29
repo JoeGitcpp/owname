@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::vocal_adapter::sample_vocal_waveform;
+use std::sync::Arc;
 
 #[test]
 fn snapshot_roundtrip_preserves_vocal_substrate_state() {

@@ -1,4 +1,4 @@
-use crate::snapshot::{SnapshotData, SnapshotSpatial, SnapshotSlot};
+use crate::snapshot::{SnapshotData, SnapshotSlot, SnapshotSpatial};
 
 /// A single projected object glyph for the visual surface.
 ///

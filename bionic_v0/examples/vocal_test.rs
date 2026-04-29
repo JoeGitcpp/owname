@@ -2,22 +2,35 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use bionic_v0::vocal_adapter::sample_vocal_waveform;
 use bionic_v0::viewport::Viewport;
+use bionic_v0::vocal_adapter::sample_vocal_waveform;
 
 fn analyze_samples(samples: &[f64]) -> (f64, f64, f64) {
     let energy: f64 = samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64;
     let energy = energy.sqrt();
 
-    let zero_crossings = samples.windows(2).filter(|w| w[0].signum() != w[1].signum()).count();
+    let zero_crossings = samples
+        .windows(2)
+        .filter(|w| w[0].signum() != w[1].signum())
+        .count();
     let avg_freq = zero_crossings as f64 / 2.0 / (samples.len() as f64 / 48000.0);
 
     (energy, avg_freq, zero_crossings as f64)
 }
 
-fn run_self_driven_test(vp: &Arc<Viewport>, name: &str, energy: f64, pitch: f64, resonance: f64, envelope: f64) {
+fn run_self_driven_test(
+    vp: &Arc<Viewport>,
+    name: &str,
+    energy: f64,
+    pitch: f64,
+    resonance: f64,
+    envelope: f64,
+) {
     println!("=== Self-driven test: {} ===", name);
-    println!("Target: energy={}, pitch={}, resonance={}\n", energy, pitch, resonance);
+    println!(
+        "Target: energy={}, pitch={}, resonance={}\n",
+        energy, pitch, resonance
+    );
 
     for tick in 1..=20 {
         vp.observe_vocal_target(tick * 100_000, energy, pitch, resonance, envelope);
@@ -31,7 +44,11 @@ fn run_self_driven_test(vp: &Arc<Viewport>, name: &str, energy: f64, pitch: f64,
         if tick <= 5 || tick % 5 == 0 || organ.phase.as_u8() == 1 {
             println!(
                 "  tick {:2}: phase={:?}, breath={:.3}, pitch={:.3}, pressure={:.3}",
-                tick, organ.phase, organ.breath_drive, organ.pitch_tension, imitation.imitation_pressure
+                tick,
+                organ.phase,
+                organ.breath_drive,
+                organ.pitch_tension,
+                imitation.imitation_pressure
             );
         }
 

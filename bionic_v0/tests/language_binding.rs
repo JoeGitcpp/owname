@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bionic_v0::language_binding::{
     BindingEvent, BindingFeedback, BindingStatus, BindingStrength, BindingTargetRef, BindingTrace,
-    PatternKind, LanguageBindingState,
+    LanguageBindingState, PatternKind,
 };
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
@@ -29,7 +29,10 @@ fn language_binding_trace_uses_numeric_patterns_and_reversible_evidence() {
     };
 
     assert!(matches!(trace.pattern_kind, PatternKind::PhotModality));
-    assert!(matches!(trace.target, BindingTargetRef::ObjectSlot { slot_id: 2 }));
+    assert!(matches!(
+        trace.target,
+        BindingTargetRef::ObjectSlot { slot_id: 2 }
+    ));
     assert_eq!(trace.status, BindingStatus::Candidate);
     assert_eq!(trace.evidence_refs, vec![11, 13]);
 }
@@ -42,7 +45,11 @@ fn language_binding_viewport_exposes_binding_state_without_readiness_gates() {
     assert!(st.traces.is_empty());
 }
 
-fn sample_binding_event(feedback: BindingFeedback, evidence_ref: u64, event_t_us: u64) -> BindingEvent {
+fn sample_binding_event(
+    feedback: BindingFeedback,
+    evidence_ref: u64,
+    event_t_us: u64,
+) -> BindingEvent {
     BindingEvent {
         pattern_kind: PatternKind::PhotModality,
         pattern_hash: 17,
@@ -124,7 +131,10 @@ fn language_binding_snapshot_carries_binding_traces_not_concepts() {
         snap.language_binding.traces[0].target,
         BindingTargetRef::ObjectSlot { slot_id: 2 }
     );
-    assert_eq!(snap.language_binding.traces[0].status, BindingStatus::Candidate);
+    assert_eq!(
+        snap.language_binding.traces[0].status,
+        BindingStatus::Candidate
+    );
     assert!(snap.language_binding.traces[0].strength.value > 0.0);
 
     let observer_src =

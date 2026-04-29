@@ -16,7 +16,7 @@ use crate::vpc::{
     PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
 };
 use crate::{
-    AXIS_COUNT, ATTN_ERR_REBALANCE_ALPHA, ATTN_PRECISION_BIAS_MAX, BINDING_ATTN_ALPHA,
+    ATTN_ERR_REBALANCE_ALPHA, ATTN_PRECISION_BIAS_MAX, AXIS_COUNT, BINDING_ATTN_ALPHA,
     BINDING_MAINTENANCE_DECAY_STEP, BINDING_MAINTENANCE_IDLE_US, BINDING_RESONANCE_THRESHOLD,
     CLAIM_CROSS_MODALITY_BASE, CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED,
     CLAIM_LOG_ENERGY_BAND, CLAIM_REUSE_MIN_SCORE, CLAIM_SAME_MODALITY_BONUS, CLAIM_SURPRISE_BAND,
@@ -25,8 +25,8 @@ use crate::{
     HEALTH_STALE, HISTORY_CAP, MOD_MECH, MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, N_REL_EDGES,
     N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS, PERSISTENCE_MAX_CYCLES, PERSISTENCE_MIN_CYCLES,
     PHOT_PRED_WARMUP_MIN, QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REASONING_HISTORY_ALPHA,
-    REASONING_HISTORY_RING_CAP, REASONING_INTENSITY_THRESHOLD, REPLAY_ALPHA, REL_ALPHA,
-    REL_PRED_ALPHA, REL_PRED_SURPRISE_MAX, REL_PRED_SURPRISE_ALPHA, REL_PRED_WARMUP_MIN,
+    REASONING_HISTORY_RING_CAP, REASONING_INTENSITY_THRESHOLD, REL_ALPHA, REL_PRED_ALPHA,
+    REL_PRED_SURPRISE_ALPHA, REL_PRED_SURPRISE_MAX, REL_PRED_WARMUP_MIN, REPLAY_ALPHA,
     SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS,
 };
 
@@ -686,8 +686,6 @@ fn mean_band_surprise(fam: Option<&BandFamilyState>) -> f64 {
         Some(f) => f.surprise.iter().sum::<f64>() / f.surprise.len() as f64,
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Phase 3C: EventEvidence contract + SlotClaim decision.
@@ -1662,8 +1660,8 @@ impl Viewport {
                 let mut attn = self.global_attention.write().unwrap();
                 if slot_id < attn.slot_biases.len() {
                     let bias = trace.strength.value * BINDING_ATTN_ALPHA;
-                    attn.slot_biases[slot_id] = (attn.slot_biases[slot_id] + bias)
-                        .min(ATTN_PRECISION_BIAS_MAX);
+                    attn.slot_biases[slot_id] =
+                        (attn.slot_biases[slot_id] + bias).min(ATTN_PRECISION_BIAS_MAX);
                 }
             }
         }
@@ -2079,8 +2077,8 @@ impl Viewport {
                 .sqrt();
 
             // Update EMA of squared error (feeds relation_surprise).
-            ps.ema_mse =
-                (1.0 - REL_PRED_SURPRISE_ALPHA) * ps.ema_mse + REL_PRED_SURPRISE_ALPHA * rms_err * rms_err;
+            ps.ema_mse = (1.0 - REL_PRED_SURPRISE_ALPHA) * ps.ema_mse
+                + REL_PRED_SURPRISE_ALPHA * rms_err * rms_err;
 
             ps.warmup = ps.warmup.saturating_add(1);
 
@@ -2809,9 +2807,9 @@ impl Viewport {
         let mut attn = self.global_attention.write().unwrap();
         for (slot_id, err) in errs.iter() {
             let target_share = err / total_err;
-            attn.attention_shares[*slot_id] =
-                (1.0 - ATTN_ERR_REBALANCE_ALPHA) * attn.attention_shares[*slot_id]
-                    + ATTN_ERR_REBALANCE_ALPHA * target_share;
+            attn.attention_shares[*slot_id] = (1.0 - ATTN_ERR_REBALANCE_ALPHA)
+                * attn.attention_shares[*slot_id]
+                + ATTN_ERR_REBALANCE_ALPHA * target_share;
         }
     }
 
@@ -2845,8 +2843,8 @@ impl Viewport {
         // Inject replay signal as a small attention perturbation.
         let replay_novelty = entry.surprise_load.clamp(0.0, 1.0);
         let mut attn = self.global_attention.write().unwrap();
-        attn.replay_intensity = (1.0 - REPLAY_ALPHA) * attn.replay_intensity
-            + REPLAY_ALPHA * replay_novelty;
+        attn.replay_intensity =
+            (1.0 - REPLAY_ALPHA) * attn.replay_intensity + REPLAY_ALPHA * replay_novelty;
 
         // Perturb the top slot's share by a tiny amount proportional to
         // replay intensity. This keeps the attention distribution flowing
@@ -2903,42 +2901,57 @@ impl Viewport {
 
     pub fn tick_vocal_imitation_loop(&self, now_us: u64) {
         let target = self.read_vocal_target();
-        
+
         if target.active_energy < 0.01 {
             let mut organ = self.vocal_organ.write().unwrap();
             organ.tick_decay(now_us);
             return;
         }
-        
+
         let organ = self.read_vocal_organ();
-        
+
         let pitch_gap = (target.pitch_hint - organ.pitch_tension).abs();
         let resonance_gap = (target.resonance_hint - organ.resonance_position).abs();
         let total_gap = (pitch_gap + resonance_gap) / 2.0;
-        
+
         {
             let mut imit = self.vocal_imitation.write().unwrap();
             imit.observe_gap(now_us, total_gap, organ.breath_drive);
         }
-        
+
         {
             let mut organ = self.vocal_organ.write().unwrap();
             if organ.phase == crate::vocal_organ::VocalOrganPhase::Idle {
-                organ.begin_voicing(now_us, target.active_energy * 0.5, target.pitch_hint, target.resonance_hint);
+                organ.begin_voicing(
+                    now_us,
+                    target.active_energy * 0.5,
+                    target.pitch_hint,
+                    target.resonance_hint,
+                );
             } else {
-                organ.adjust_toward(now_us, target.active_energy * 0.5, target.pitch_hint, target.resonance_hint);
+                organ.adjust_toward(
+                    now_us,
+                    target.active_energy * 0.5,
+                    target.pitch_hint,
+                    target.resonance_hint,
+                );
             }
         }
-        
+
         let imit = self.read_vocal_imitation();
         if imit.last_gap < 0.2 && imit.converge_count >= 3 {
             let organ = self.read_vocal_organ();
             {
                 let mut mem = self.vocal_memory.write().unwrap();
-                mem.record_success(now_us, organ.breath_drive, organ.pitch_tension, organ.resonance_position);
+                mem.record_success(
+                    now_us,
+                    organ.breath_drive,
+                    organ.pitch_tension,
+                    organ.resonance_position,
+                );
             }
         }
-        
+
         {
             let mut vt = self.vocal_target.write().unwrap();
             vt.tick_decay(now_us);

@@ -54,8 +54,7 @@ fn main() {
     let event_loop = EventLoop::new();
     let display = display_config();
 
-    let window_size =
-        winit::dpi::PhysicalSize::new(display.window_width, display.window_height);
+    let window_size = winit::dpi::PhysicalSize::new(display.window_width, display.window_height);
     let window = WindowBuilder::new()
         .with_title("Predictive Visual Surface")
         .with_resizable(false)
@@ -63,13 +62,14 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let surface_texture = pixels::SurfaceTexture::new(
-        display.surface_width,
-        display.surface_height,
-        &window,
-    );
-    let mut pixels =
-        Pixels::new(display.internal_width, display.internal_height, surface_texture).unwrap();
+    let surface_texture =
+        pixels::SurfaceTexture::new(display.surface_width, display.surface_height, &window);
+    let mut pixels = Pixels::new(
+        display.internal_width,
+        display.internal_height,
+        surface_texture,
+    )
+    .unwrap();
 
     let mut history = SurfaceHistory::new(16);
     let mut last_poll = Instant::now();
@@ -87,14 +87,18 @@ fn main() {
                     let frame = if let Ok(snap) = read_snapshot(&snapshot_path) {
                         project_surface_frame(&snap)
                     } else {
-                        bionic_v0::surface_projection::SurfaceFrame { objects: Vec::new() }
+                        bionic_v0::surface_projection::SurfaceFrame {
+                            objects: Vec::new(),
+                        }
                     };
 
                     history.update(&frame);
                     let trails = history.render_trails();
 
-                    let config =
-                        RenderConfig::new(display.internal_width as usize, display.internal_height as usize);
+                    let config = RenderConfig::new(
+                        display.internal_width as usize,
+                        display.internal_height as usize,
+                    );
                     let img = render_surface_frame(&frame, &trails, config);
 
                     let texture = pixels.frame_mut();
@@ -110,19 +114,19 @@ fn main() {
             Event::MainEventsCleared => {
                 window.request_redraw();
             }
-            Event::WindowEvent { event, .. } => {
-                match event {
-                    WindowEvent::CloseRequested => {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => {
+                    *control_flow = ControlFlow::Exit;
+                }
+                WindowEvent::KeyboardInput { input, .. } => {
+                    if input.state == ElementState::Pressed
+                        && input.virtual_keycode == Some(VirtualKeyCode::Escape)
+                    {
                         *control_flow = ControlFlow::Exit;
                     }
-                    WindowEvent::KeyboardInput { input, .. } => {
-                        if input.state == ElementState::Pressed && input.virtual_keycode == Some(VirtualKeyCode::Escape) {
-                            *control_flow = ControlFlow::Exit;
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             _ => {}
         }
     });

@@ -444,13 +444,7 @@ impl Viewport {
             return 0;
         }
 
-        let recent: Vec<u64> = ac
-            .pairs
-            .iter()
-            .rev()
-            .take(16)
-            .map(|p| p.delay_us)
-            .collect();
+        let recent: Vec<u64> = ac.pairs.iter().rev().take(16).map(|p| p.delay_us).collect();
 
         if recent.is_empty() {
             return 0;

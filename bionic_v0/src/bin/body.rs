@@ -11,6 +11,7 @@ use bionic_v0::phot_camera::{RealCameraFrameProvider, StubRealCameraFrameProvide
 use bionic_v0::predictor::Ar2Predictor;
 use bionic_v0::snapshot::{write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
+use bionic_v0::vocal_adapter::spawn_vocal_output;
 use bionic_v0::VIB_BANDS;
 use bionic_v0::{BINDING_REFRESH_HZ, PHOT_CONSEQUENCE_QUIESCENCE_US};
 
@@ -136,6 +137,17 @@ fn main() {
         vp_endo.tick_quiet_history_replay(t);
     });
 
+    // Vocal substrate ticker, 50 Hz. Body-side execution only: learned vocal
+    // curves update continuously without text, TTS, or request/response logic.
+    let vp_vocal = vp.clone();
+    let h_vocal = spawn_ticker(50, stop.clone(), move |_| {
+        let t = now_us();
+        vp_vocal.tick_vocal_imitation_loop(t);
+        vp_vocal.tick_vocal_memory(t);
+    });
+
+    let h_vocal_output = spawn_vocal_output(vp.clone(), stop.clone());
+
     // Global orchestrator: attention → relations → snapshot (30 Hz).
     //
     // Replaces the three independent tickers that previously ran at 30/20/30 Hz.
@@ -166,6 +178,8 @@ fn main() {
     let _ = h_ingress.join();
     let _ = h_binding.join();
     let _ = h_endogenous.join();
+    let _ = h_vocal.join();
+    let _ = h_vocal_output.join();
     let _ = h_orchestrator.join();
     let _ = h_master.join();
 

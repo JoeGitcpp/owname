@@ -224,15 +224,14 @@ impl Viewport {
                     event_t_us: now_us,
                 })
             }
-            (
-                Some(ActionOutputPhase::Active | ActionOutputPhase::Decaying),
-                ProbePhase::P3,
-            ) => Some(ActionOutputEvent {
-                channel_kind: OutputChannelKind::GenericWrite,
-                feedback: ActionOutputFeedback::Decay,
-                magnitude: decay_magnitude,
-                event_t_us: now_us,
-            }),
+            (Some(ActionOutputPhase::Active | ActionOutputPhase::Decaying), ProbePhase::P3) => {
+                Some(ActionOutputEvent {
+                    channel_kind: OutputChannelKind::GenericWrite,
+                    feedback: ActionOutputFeedback::Decay,
+                    magnitude: decay_magnitude,
+                    event_t_us: now_us,
+                })
+            }
             (Some(ActionOutputPhase::Active | ActionOutputPhase::Decaying), ProbePhase::P0) => {
                 Some(ActionOutputEvent {
                     channel_kind: OutputChannelKind::GenericWrite,

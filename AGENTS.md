@@ -59,12 +59,19 @@ back into rejected architecture.
    approximation; all laws map onto existing cleaned substrate without
    introducing independent modules.
 
-10. **Implementation plan (executed 2026-04-20)** —
+10. **Subconscious/conscious language boundary spec (FROZEN)** —
+   [docs/superpowers/specs/2026-04-29-subconscious-conscious-language-boundary-design.md](docs/superpowers/specs/2026-04-29-subconscious-conscious-language-boundary-design.md):
+   defines the hard boundary for using "subconscious" and "conscious" as
+   external metaphors only, and maps language execution vs language learning
+   responsibilities onto existing substrate laws without adding ontology
+   modules.
+
+11. **Implementation plan (executed 2026-04-20)** —
    [docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md](docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md):
    the plan that removed the rejected layers from the live body /
    snapshot / observer / test path.
 
-11. **Older v0 spec (PARTIALLY DEPRECATED)** —
+12. **Older v0 spec (PARTIALLY DEPRECATED)** —
    [docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md](docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md):
    read its §0 deprecation banner before trusting any of its content.
 
@@ -84,6 +91,27 @@ returning. Do not re-add them under any name:
 Quarantined contract tests for the rejected architecture live in
 [bionic_v0/experimental/](bionic_v0/experimental/) for archaeological
 reference only — do not reactivate.
+
+## Subconscious/Conscious Boundary (Hard Rule)
+
+- "潜意识" (`subconscious`) is an external design metaphor for body-side
+  continuous execution (passive prediction, perception maintenance,
+  low-level action/vocal execution, local closed-loop correction).
+  It must not be implemented as an internal module/ontology named
+  `Subconscious`.
+- "表意识" (`conscious`) is an external design metaphor for active
+  reasoning/active learning dispatch (active probes, hypothesis verification,
+  learning correction, pronunciation/vocal correction, long-horizon style
+  formation). It must not be implemented as a chat/request-response layer
+  or a text-only reasoning engine.
+- Language execution can run body-side after learned curves exist.
+  Language learning/correction/style sedimentation belongs to active
+  learning/reasoning loops.
+- Style must remain learned and revisable curves, rhythms, selection biases,
+  and correction history; never fixed persona labels or personality structs.
+- Preserve the highest principle: silicon-life substrate, not
+  request/response software; no human-readable output in `body`; observation
+  belongs to `observer`.
 
 ## Learned Boundaries Only
 
