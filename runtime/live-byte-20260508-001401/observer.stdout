@@ -1,0 +1,3 @@
+# observer start dir=/Users/joe/unnamed/.worktrees/architecture-contraction-tdd/runtime/live-byte-20260508-001401 poll_hz=5 max_polls=10
+seq,clock_s,health,phot_h,src_w,code_frames,code_windows,egress_phase,egress_frames,egress_returns,pairs,probe_i,probe_o,evidence_p,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or
+90,2.967,2,3,1104,3,1,0,0,0,0,0.0000,0.0000,0.0000,0.000,0.000,0.000,0.000,0.000,0.000

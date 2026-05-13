@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use bionic_v0::action_output::{ActionOutputEvent, ActionOutputFeedback, OutputChannelKind};
 use bionic_v0::adapter::{ModalityAdapter, RealPhotAdapter, SyntheticVibAdapter};
 use bionic_v0::language_binding::{
     BindingEvent, BindingFeedback, BindingStatus, BindingTargetRef, PatternKind,
 };
 use bionic_v0::phot_camera::{SynthCamStep, SyntheticCameraFrameProvider};
 use bionic_v0::synthetic_vib::SyntheticVibSource;
-use bionic_v0::viewport::Viewport;
+use bionic_v0::viewport::{EventEvidence, Viewport};
+use bionic_v0::MOD_VIB;
 
 #[test]
 fn viewport_adapter_binding_api_records_trace() {
@@ -101,4 +103,152 @@ fn binding_maintenance_ticker_decays_stale_strength() {
         after.traces[0].strength.value <= before_strength,
         "maintenance ticker should not strengthen stale traces"
     );
+}
+
+#[test]
+fn missing_pair_evidence_does_not_form_binding_event() {
+    let vp = Arc::new(Viewport::new());
+
+    let formed = vp.try_form_binding_event_from_pair(
+        PatternKind::SymbolSeq,
+        0xCAFE,
+        BindingTargetRef::ObjectSlot { slot_id: 0 },
+        1,
+        1,
+    );
+
+    assert!(!formed);
+    assert_eq!(vp.read_language_binding().n_bindings, 0);
+}
+
+fn claim_vib_slot(vp: &Arc<Viewport>, t: u64) -> usize {
+    let ev = EventEvidence {
+        modality_bit: MOD_VIB,
+        event_t_us: t,
+        event_energy: 0.5,
+        surprise: 0.2,
+        spatial: None,
+        nomination_seq_hint: 1,
+    };
+    vp.claim_slot_for_event(&ev).slot_id().expect("slot")
+}
+
+fn paired_write_and_window(
+    vp: &Arc<Viewport>,
+    t: u64,
+    write_mag: f64,
+    window_mag: f64,
+) -> (u64, u64) {
+    vp.apply_action_output_event(ActionOutputEvent {
+        channel_kind: OutputChannelKind::GenericWrite,
+        feedback: ActionOutputFeedback::Begin,
+        magnitude: write_mag,
+        event_t_us: t,
+    });
+    let write_seq = vp.read_action_output().channels[0].current_write_seq;
+    let window_id = vp.accumulate_ingress_change(t + 100, window_mag);
+    assert!(vp.close_action_consequence_window(window_id, t + 110));
+    assert!(vp.try_auto_pair_latest_epoch_to_window(t + 120));
+    (write_seq, window_id)
+}
+
+#[test]
+fn strong_pair_evidence_forms_candidate_binding_for_live_slot() {
+    let vp = Arc::new(Viewport::new());
+    let slot_id = claim_vib_slot(&vp, 1_000);
+    let (write_seq, window_id) = paired_write_and_window(&vp, 2_000, 0.7, 0.68);
+
+    let formed = vp.try_form_binding_event_from_pair(
+        PatternKind::SymbolSeq,
+        0xA11CE,
+        BindingTargetRef::ObjectSlot {
+            slot_id: slot_id as u8,
+        },
+        write_seq,
+        window_id,
+    );
+
+    let bindings = vp.read_language_binding();
+    assert!(formed);
+    assert_eq!(bindings.n_bindings, 1);
+    assert_eq!(bindings.traces[0].status, BindingStatus::Candidate);
+    assert_eq!(bindings.traces[0].pattern_hash, 0xA11CE);
+}
+
+#[test]
+fn pair_evidence_does_not_bind_inactive_slot_target() {
+    let vp = Arc::new(Viewport::new());
+    let (write_seq, window_id) = paired_write_and_window(&vp, 2_000, 0.7, 0.68);
+
+    let formed = vp.try_form_binding_event_from_pair(
+        PatternKind::SymbolSeq,
+        0xBEEF,
+        BindingTargetRef::ObjectSlot { slot_id: 0 },
+        write_seq,
+        window_id,
+    );
+
+    assert!(!formed);
+    assert_eq!(vp.read_language_binding().n_bindings, 0);
+}
+
+#[test]
+fn ambiguous_pair_similarity_does_not_force_binding_feedback() {
+    let vp = Arc::new(Viewport::new());
+    let slot_id = claim_vib_slot(&vp, 1_000);
+    let (write_seq, window_id) = paired_write_and_window(&vp, 2_000, 0.6, 0.25);
+
+    let formed = vp.try_form_binding_event_from_pair(
+        PatternKind::SymbolSeq,
+        0xC0FFEE,
+        BindingTargetRef::ObjectSlot {
+            slot_id: slot_id as u8,
+        },
+        write_seq,
+        window_id,
+    );
+
+    assert!(!formed);
+    assert_eq!(vp.read_language_binding().n_bindings, 0);
+}
+
+#[test]
+fn low_pair_evidence_weakens_existing_binding_trace() {
+    let vp = Arc::new(Viewport::new());
+    let slot_id = claim_vib_slot(&vp, 1_000);
+    let target = BindingTargetRef::ObjectSlot {
+        slot_id: slot_id as u8,
+    };
+
+    let (good_write_seq, good_window_id) = paired_write_and_window(&vp, 2_000, 0.7, 0.69);
+    assert!(vp.try_form_binding_event_from_pair(
+        PatternKind::SymbolSeq,
+        0xDAD,
+        target,
+        good_write_seq,
+        good_window_id,
+    ));
+    let (good_write_seq_2, good_window_id_2) = paired_write_and_window(&vp, 3_000, 0.7, 0.69);
+    assert!(vp.try_form_binding_event_from_pair(
+        PatternKind::SymbolSeq,
+        0xDAD,
+        target,
+        good_write_seq_2,
+        good_window_id_2,
+    ));
+    let before = vp.read_language_binding().traces[0].strength.value;
+
+    let (bad_write_seq, bad_window_id) = paired_write_and_window(&vp, 4_000, 0.9, 0.05);
+    assert!(vp.try_form_binding_event_from_pair(
+        PatternKind::SymbolSeq,
+        0xDAD,
+        target,
+        bad_write_seq,
+        bad_window_id,
+    ));
+
+    let after = vp.read_language_binding();
+    assert_eq!(after.n_bindings, 1);
+    assert_eq!(after.traces[0].status, BindingStatus::Weakened);
+    assert!(after.traces[0].strength.value < before);
 }

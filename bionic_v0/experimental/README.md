@@ -13,6 +13,10 @@ and language-system axioms
 - `symbolizer.rs.quarantine` — Phase 6A concept-id allocator. Rejected:
   it stamped objects/edges with discrete internal "concepts," violating
   axioms 1, 3, 5, 8.
+- `intention.rs.quarantine` — Fixed `INTENT_0..3`, `IntentionBank`,
+  vitality gates, and goal-directed state. Rejected: they encode a
+  program-like motivational ontology rather than learned and revisable
+  body-side curves; archaeological only.
 
 **Do not** restore these files into the active `tests/` directory or wire
 them into Cargo. They reference removed APIs and represent forbidden

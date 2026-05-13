@@ -1,0 +1,2 @@
+seq,clock_s,source_writes,code_frames,code_windows,egress_phase,egress_frames,egress_returns,pairs,probe_i,probe_o,evidence_p,learned_axes,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or
+602,20.038,7940,64,1,1,16,16,221,0.0458,0.0189,0.0459,2,0.000,0.000,0.000,0.133,0.500,0.500

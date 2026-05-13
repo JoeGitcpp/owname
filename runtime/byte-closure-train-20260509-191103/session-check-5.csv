@@ -1,0 +1,2 @@
+seq,clock_s,source_writes,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,learned_axes,learned_event_total,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or
+16526,600.042,239940,64,1,1,16,16,7052,7030,256,12218,12218,0,0.0572,0.0572,0.0568,2,8047,0.000,0.000,0.000,0.379,0.500,0.500

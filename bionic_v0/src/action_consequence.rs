@@ -10,6 +10,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::evolution_priors::BiasPriors;
+use crate::substrate_pressure::{compute_pressure, PressureSample};
 use crate::viewport::Viewport;
 use crate::CONSEQUENCE_WINDOW_CAP;
 use crate::INGRESS_ACCUMULATION_THRESHOLD;
@@ -20,6 +22,7 @@ use crate::TEMPORAL_PAIR_MAX_DELAY_US;
 pub enum ConsequenceModalityKind {
     #[default]
     GenericIngress,
+    FramedByteReturn,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -78,6 +81,9 @@ pub struct ActionConsequenceWindow {
 
 #[derive(Clone, Debug, Default)]
 pub struct ActionConsequencePair {
+    /// Monotonic pair handle assigned when a write/window pair is recorded.
+    /// Engineering locator only; not target, result, success, or meaning.
+    pub pair_seq: u64,
     pub write_seq: u64,
     /// Stable window identifier. Matches ActionConsequenceWindow::window_id.
     /// This is NOT a Vec position — it remains valid across Vec compaction.
@@ -96,6 +102,9 @@ pub struct ActionConsequenceState {
     pub n_windows: u32,
     pub windows: Vec<ActionConsequenceWindow>,
     pub n_pairs: u32,
+    pub total_pairs: u64,
+    pub total_framed_byte_pairs: u64,
+    pub total_other_pairs: u64,
     pub pairs: Vec<ActionConsequencePair>,
 }
 
@@ -105,6 +114,61 @@ pub struct ActionConsequenceWindowEvent {
     pub start_t_us: u64,
     pub end_t_us: u64,
     pub magnitude: f64,
+}
+
+fn pair_retention_pressure(
+    pair: &ActionConsequencePair,
+    typical_delay_us: u64,
+    birth_sensitivity: &BiasPriors,
+) -> f64 {
+    let delay_stability = if typical_delay_us == 0 {
+        0.5
+    } else {
+        let delta = pair.delay_us.abs_diff(typical_delay_us) as f64;
+        (1.0 - delta / typical_delay_us.max(1) as f64).clamp(0.0, 1.0)
+    };
+    compute_pressure(
+        PressureSample {
+            alignment: pair.curve_similarity,
+            support: if pair.status == ConsequencePairStatus::Paired {
+                1.0
+            } else {
+                0.0
+            },
+            deviation: 1.0 - pair.curve_similarity,
+            temporal_gap: 1.0 - delay_stability,
+            recurrence: pair.curve_similarity,
+            ..Default::default()
+        },
+        &birth_sensitivity.pressure_weights,
+    )
+}
+
+fn evict_pairs_by_retention_pressure(
+    pairs: &mut Vec<ActionConsequencePair>,
+    birth_sensitivity: &BiasPriors,
+) {
+    while pairs.len() > PAIR_HISTORY_CAP {
+        let typical_delay_us = {
+            let mut delays: Vec<u64> = pairs.iter().map(|p| p.delay_us).collect();
+            delays.sort_unstable();
+            delays[delays.len() / 2]
+        };
+        let idx = pairs
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let a_pressure = pair_retention_pressure(a, typical_delay_us, birth_sensitivity);
+                let b_pressure = pair_retention_pressure(b, typical_delay_us, birth_sensitivity);
+                a_pressure
+                    .partial_cmp(&b_pressure)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.pair_t_us.cmp(&b.pair_t_us))
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        pairs.remove(idx);
+    }
 }
 
 impl Viewport {
@@ -347,24 +411,28 @@ impl Viewport {
             }
         }
 
-        // Step 4: look up write epoch peak magnitude from the action_output
-        // channel traces, and consequence window magnitude for similarity.
-        let (write_mag, consequence_mag) = {
+        // Step 4: look up the closed write epoch boundary magnitude and
+        // consequence window magnitude for similarity. The write-side value
+        // comes from the epoch ledger, not the live channel, so later Adjust
+        // events cannot rewrite the evidence used for this pair. The
+        // consequence side also carries the return modality for cumulative
+        // observer traces.
+        let (write_mag, consequence_mag, modality_kind) = {
             let ao = self.action_output.read().unwrap();
             let write_mag = ao
-                .channels
+                .write_epoch_history
                 .iter()
-                .find(|ch| ch.current_write_seq == write_seq)
-                .map(|ch| ch.peak_magnitude)
+                .find(|ep| ep.write_seq == write_seq)
+                .map(|ep| ep.start_magnitude)
                 .unwrap_or(0.0);
             let ac = self.action_consequence.read().unwrap();
             let consequence_mag = ac
                 .windows
                 .iter()
                 .find(|w| w.window_id == window_id)
-                .map(|w| w.magnitude)
-                .unwrap_or(0.0);
-            (write_mag, consequence_mag)
+                .map(|w| (w.magnitude, w.modality_kind))
+                .unwrap_or((0.0, ConsequenceModalityKind::GenericIngress));
+            (write_mag, consequence_mag.0, consequence_mag.1)
         };
         let curve_similarity = 1.0 - (write_mag - consequence_mag).abs();
 
@@ -382,7 +450,12 @@ impl Viewport {
         {
             return false;
         }
+        let pair_seq = self
+            .action_consequence_pair_seq
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
         ac.pairs.push(ActionConsequencePair {
+            pair_seq,
             write_seq,
             window_id,
             delay_us,
@@ -390,11 +463,10 @@ impl Viewport {
             pair_t_us,
             curve_similarity: curve_similarity.clamp(0.0, 1.0),
         });
-        if ac.pairs.len() > PAIR_HISTORY_CAP {
-            let evict_n = ac.pairs.len() - PAIR_HISTORY_CAP;
-            ac.pairs.drain(0..evict_n);
-        }
+        evict_pairs_by_retention_pressure(&mut ac.pairs, &self.birth_sensitivity);
         ac.n_pairs = ac.pairs.len() as u32;
+        ac.total_pairs = pair_seq;
+        bump_pair_source_totals(&mut ac, modality_kind);
         true
     }
 
@@ -480,24 +552,25 @@ impl Viewport {
         // Substrate time at pairing — comes from the body's shared clock.
         let pair_t_us = self.clock_us.load(Ordering::Relaxed);
 
-        // Look up write epoch peak magnitude and consequence window magnitude
-        // for curve similarity computation.
-        let (write_mag, consequence_mag) = {
+        // Look up the closed write epoch boundary magnitude and consequence
+        // window magnitude for curve similarity computation. The consequence
+        // side also carries the return modality for cumulative observer traces.
+        let (write_mag, consequence_mag, modality_kind) = {
             let ao = self.action_output.read().unwrap();
             let write_mag = ao
-                .channels
+                .write_epoch_history
                 .iter()
-                .find(|ch| ch.current_write_seq == write_seq)
-                .map(|ch| ch.peak_magnitude)
+                .find(|ep| ep.write_seq == write_seq)
+                .map(|ep| ep.start_magnitude)
                 .unwrap_or(0.0);
             let ac_read = self.action_consequence.read().unwrap();
             let consequence_mag = ac_read
                 .windows
                 .iter()
                 .find(|w| w.window_id == window_id)
-                .map(|w| w.magnitude)
-                .unwrap_or(0.0);
-            (write_mag, consequence_mag)
+                .map(|w| (w.magnitude, w.modality_kind))
+                .unwrap_or((0.0, ConsequenceModalityKind::GenericIngress));
+            (write_mag, consequence_mag.0, consequence_mag.1)
         };
         let curve_similarity = 1.0 - (write_mag - consequence_mag).abs();
 
@@ -516,7 +589,12 @@ impl Viewport {
             return false;
         }
 
+        let pair_seq = self
+            .action_consequence_pair_seq
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
         s.pairs.push(ActionConsequencePair {
+            pair_seq,
             write_seq,
             window_id,
             delay_us,
@@ -524,15 +602,27 @@ impl Viewport {
             pair_t_us,
             curve_similarity: curve_similarity.clamp(0.0, 1.0),
         });
-        // Eviction: keep within PAIR_HISTORY_CAP. Evict oldest first.
-        // After eviction, old (write_seq, window_id) pairs may be re-paired —
-        // acceptable boundary behavior per spec.
-        if s.pairs.len() > PAIR_HISTORY_CAP {
-            let evict_n = s.pairs.len() - PAIR_HISTORY_CAP;
-            s.pairs.drain(0..evict_n);
-        }
+        // Eviction: keep within PAIR_HISTORY_CAP. Retention pressure is computed
+        // from numeric write-return alignment only; no target/result semantics.
+        evict_pairs_by_retention_pressure(&mut s.pairs, &self.birth_sensitivity);
         s.n_pairs = s.pairs.len() as u32;
+        s.total_pairs = pair_seq;
+        bump_pair_source_totals(&mut s, modality_kind);
         true
+    }
+}
+
+fn bump_pair_source_totals(
+    state: &mut ActionConsequenceState,
+    modality_kind: ConsequenceModalityKind,
+) {
+    match modality_kind {
+        ConsequenceModalityKind::FramedByteReturn => {
+            state.total_framed_byte_pairs = state.total_framed_byte_pairs.saturating_add(1);
+        }
+        ConsequenceModalityKind::GenericIngress => {
+            state.total_other_pairs = state.total_other_pairs.saturating_add(1);
+        }
     }
 }
 

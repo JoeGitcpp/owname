@@ -278,6 +278,7 @@ fn observer_renders_action_consequence_without_result_semantics() {
             .expect("read observer.rs");
 
     assert!(observer_src.contains("acq:"));
+    assert!(observer_src.contains("|cs{:.3}"));
     assert!(!observer_src.contains("success"));
     assert!(!observer_src.contains("target_object"));
     assert!(!observer_src.contains("imit"));

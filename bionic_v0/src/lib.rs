@@ -1,18 +1,34 @@
 pub mod action_consequence;
 pub mod action_output;
 pub mod adapter;
+pub mod adaptive_stability;
 pub mod clock;
+pub mod code_ingress;
+pub mod code_ingress_adapter;
+pub mod curriculum;
+pub mod evidence_tension;
 pub mod evolution_priors;
+pub mod framed_byte_carrier;
+pub mod framed_byte_egress;
 pub mod highlevel;
 pub mod language_binding;
+pub mod learned_bias;
+pub mod life_closure_producers;
+pub mod live_byte_carrier;
+pub mod live_byte_closure;
+pub mod live_byte_loopback;
+pub mod live_io_evidence;
+pub mod post_effect;
 pub mod predictor;
 pub mod probe_law;
 pub mod snapshot;
 pub mod source;
+pub mod substrate_pressure;
 pub mod surface_history;
 pub mod surface_projection;
 pub mod surface_render;
 pub mod synthetic_vib;
+pub mod training_curve;
 pub mod vib;
 pub mod viewport;
 pub mod vocal_adapter;
@@ -197,6 +213,16 @@ pub const PHOT_CONSEQUENCE_QUIESCENCE_US: u64 = 300_000;
 /// consequence window accumulation. Substrate knob, not theoretical bound.
 pub const INGRESS_ACCUMULATION_THRESHOLD: f64 = 0.01;
 
+/// Engineering approximation: VIB ambient energy must exceed this before it can
+/// refresh the short-lived vocal target contour. Substrate knob, not a
+/// theoretical sound boundary.
+pub const VOCAL_TARGET_INGRESS_MIN_ENERGY: f64 = INGRESS_ACCUMULATION_THRESHOLD;
+
+/// Engineering caution window: recent body writes can couple into VIB ingress,
+/// so those frames must not overwrite `vocal_target` as if they were external
+/// target contours. This is not source identity or ownership.
+pub const VOCAL_TARGET_WRITE_COUPLED_GUARD_US: u64 = 300_000;
+
 // --- Phase 4C: slot-local PHOT predictor ---
 pub mod phot_predictor;
 
@@ -253,17 +279,23 @@ pub const PROBE_SUPPRESSION_ALPHA: f64 = 0.05;
 /// Short history ring length for probe intensity values.
 pub const PROBE_HISTORY_CAP: usize = 8;
 
-/// Engineering approximation: global_surprise_load threshold for the
-/// surprise-driven action-output trigger. Strictly above this, tick_surprise_trigger
-/// fires a Begin event. Range [0,1]; 0.5 targets the upper half of the load range.
-pub const SURPRISE_TRIGGER_THRESHOLD: f64 = 0.5;
+// --- v37: computer-native byte disturbance ingress traces ---
+pub const CODE_INGRESS_FRAME_HISTORY_CAP: usize = 64;
+pub const CODE_INGRESS_PROJECTION_HISTORY_CAP: usize = 128;
+pub const CODE_INGRESS_SEQUENCE_WINDOW_CAP: usize = 32;
+pub const CODE_INGRESS_BYTE_SAMPLE_CAP: usize = 32;
 
-/// Engineering approximation: relation_surprise (EMA of relation_err²) threshold
-/// for the relation-instability action-output trigger. Strictly above this on any
-/// active edge, tick_relation_instability_trigger fires a Begin event.
-/// relation_surprise inputs are in [0, REL_PRED_SURPRISE_MAX]; 0.3 sits in the
-/// lower third, catching sustained surprises before they compound.
-pub const RELATION_INSTABILITY_TRIGGER_THRESHOLD: f64 = 0.3;
+/// Short history ring length for evidence-tension pressure traces.
+pub const EVIDENCE_TENSION_HISTORY_CAP: usize = 16;
+
+/// Engineering scale for mapping bounded tension [0,4] into pressure [0,1].
+pub const EVIDENCE_TENSION_PRESSURE_SCALE: f64 = 4.0;
+
+/// Engineering decay rate when new evidence tension is lower than carried load.
+pub const EVIDENCE_TENSION_DECAY_ALPHA: f64 = 0.25;
+
+/// Engineering closure rate applied from paired write/return curve support.
+pub const EVIDENCE_TENSION_CLOSURE_ALPHA: f64 = 0.5;
 
 pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v30: probe_law substrate added (intensity, suppression, phase, output_intensity,
@@ -275,7 +307,17 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v35: precision→surprise rename + unified [0,1] scale (PHOT [0,100]→[0,1],
 //      relation [0,2]→[0,1], HighLevel [0.2,8]→[0,1]).
 // v36: vocal substrate added (vocal_target, vocal_organ, vocal_imitation, vocal_memory).
-pub const SNAPSHOT_VERSION: u64 = 36;
+// v37: code-ingress trace substrate added.
+// v38: learned-bias delta summary added; base priors remain separate.
+// v39: adaptive stability route-local numeric traces added.
+// v40: evidence-tension pressure trace substrate added.
+// v41: framed-byte egress substrate added.
+// v42: action-consequence pair_seq added as a monotonic engineering cursor.
+// v43: slot-local spatial worldline + relation-edge spatial projection fields.
+// v44: write epoch start_magnitude added for closed action-consequence evidence.
+// v45: cumulative closure counters added for long-run observer traces, split by
+//      return modality.
+pub const SNAPSHOT_VERSION: u64 = 45;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.
@@ -286,6 +328,16 @@ pub const BINDING_RESONANCE_THRESHOLD: f64 = 0.5;
 
 /// Alpha for binding → attention bias injection.
 pub const BINDING_ATTN_ALPHA: f64 = 0.05;
+
+/// Engineering approximation over action/consequence curve evidence.
+/// High values may support a binding event; this is not a naming gate and does
+/// not decide object or relation existence.
+pub const BINDING_PAIR_ALIGN_MIN: f64 = 0.70;
+
+/// Engineering approximation over action/consequence curve evidence.
+/// Low values may oppose an existing binding trace; this is not a naming gate
+/// and does not create an internal concept or object class.
+pub const BINDING_PAIR_DEVIATE_MAX: f64 = 0.30;
 
 // --- Endogenous Activity Laws (spec 2026-04-20) ---
 

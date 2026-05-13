@@ -1,6 +1,11 @@
 // External research tool — NOT part of AI body.
 // Strings / logs permitted here per architecture doc (研发工具).
 
+#[path = "observer_helpers/compact.rs"]
+mod observer_compact;
+#[path = "observer_helpers/session.rs"]
+mod observer_session;
+
 use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
@@ -21,6 +26,9 @@ fn main() {
         .unwrap_or_else(|| "runtime".to_string());
     let poll_hz: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
     let max_polls: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let compact = args.get(4).is_some_and(|mode| mode == "compact");
+    let session_csv = args.get(5).map(PathBuf::from);
+    let mut session_header_written = false;
 
     let snapshot_path = PathBuf::from(&runtime_dir).join("snapshot.bin");
     let period = Duration::from_millis(1000 / poll_hz.max(1));
@@ -30,8 +38,11 @@ fn main() {
         runtime_dir, poll_hz, max_polls
     );
     // Header: global + per-band (obs|pred|err|mse|prec) + HL avg err + snap_fails
-    println!(
-        "seq\tclock_s\thealth\tphot_h\tphot_started_age_ms\tphot_last_frame_age_ms\tsrc_w\tpred_t\t\
+    if compact {
+        println!("{}", observer_compact::compact_header());
+    } else {
+        println!(
+            "seq\tclock_s\thealth\tphot_h\tphot_started_age_ms\tphot_last_frame_age_ms\tsrc_w\tpred_t\t\
          b0:obs|pred|err|mse|prec\tb1:obs|pred|err|mse|prec\t\
          b2:obs|pred|err|mse|prec\tb3:obs|pred|err|mse|prec\t\
          hl_avg_err\tsnap_fails\t\
@@ -44,8 +55,10 @@ fn main() {
          mem:nov|per|rst|rec|fill|dom\t\
           bind:n|traces[...]|vpc:n|pub[...]|open[...]\t\
          ep:n|epochs[...]\t\
+         voc:tE|tp|tr|te|ob|op|or|oph|ip|ig|ic|if|mn\t\
          prb:i|s|ph|o"
-    );
+        );
+    }
 
     let mut last_seq: u64 = 0;
     let mut polls: u64 = 0;
@@ -55,7 +68,19 @@ fn main() {
             Ok(snap) => {
                 if snap.seq != last_seq {
                     last_seq = snap.seq;
-                    print_row(&snap);
+                    if compact {
+                        println!("{}", observer_compact::compact_row(&snap));
+                    } else {
+                        print_row(&snap);
+                    }
+                    if let Some(path) = session_csv.as_ref() {
+                        let _ = observer_session::append_session_row(
+                            path,
+                            &snap,
+                            !session_header_written,
+                        );
+                        session_header_written = true;
+                    }
                 }
             }
             Err(e) => {
@@ -411,6 +436,28 @@ fn print_row(snap: &SnapshotData) {
         mem.dominant_focus_persistence,
     ));
 
+    let code = &snap.code_ingress;
+    let code_latest = code
+        .recent_frames
+        .last()
+        .map(|frame| {
+            format!(
+                "f{}|s{}|len{}|h{:x}|p{}|w{}",
+                frame.frame_seq,
+                frame.stream_context_id,
+                frame.byte_len,
+                frame.byte_hash,
+                code.projection_candidates.len(),
+                code.sequence_windows.len()
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
+    row.push_str(&format!(
+        "\tcode:n{}|{}",
+        code.recent_frames.len(),
+        code_latest
+    ));
+
     let bind = &snap.language_binding;
     let trace_str = if bind.traces.is_empty() {
         "-".to_string()
@@ -535,8 +582,14 @@ fn print_row(snap: &SnapshotData) {
         .enumerate()
         .map(|(i, ep)| {
             format!(
-                "e{}[ws{}|k{}|s{}|u{}|ph{}]",
-                i, ep.write_seq, ep.channel_kind, ep.start_t_us, ep.last_update_t_us, ep.last_phase
+                "e{}[ws{}|k{}|m{:.3}|s{}|u{}|ph{}]",
+                i,
+                ep.write_seq,
+                ep.channel_kind,
+                ep.start_magnitude,
+                ep.start_t_us,
+                ep.last_update_t_us,
+                ep.last_phase
             )
         })
         .collect::<Vec<_>>()
@@ -578,8 +631,8 @@ fn print_row(snap: &SnapshotData) {
         .enumerate()
         .map(|(i, p)| {
             format!(
-                "p{}[ws{}|wid{}|d{}|st{}]",
-                i, p.write_seq, p.window_id, p.delay_us, p.status
+                "p{}[ws{}|wid{}|d{}|st{}|cs{:.3}]",
+                i, p.write_seq, p.window_id, p.delay_us, p.status, p.curve_similarity
             )
         })
         .collect::<Vec<_>>()
@@ -600,11 +653,54 @@ fn print_row(snap: &SnapshotData) {
         }
     ));
 
+    let fbe = &snap.framed_byte_egress;
+    row.push_str(&format!(
+        "\tfbe:ph{}|sid{}|ws{}|nf{}|nr{}|lf{}|rw{}|p{:.3}|pc{:.3}|dev{:.3}",
+        fbe.phase,
+        fbe.active_stream_id,
+        fbe.current_write_seq,
+        fbe.n_frames,
+        fbe.n_returns,
+        fbe.last_frame_seq,
+        fbe.last_return_window_id,
+        fbe.output_pressure,
+        fbe.projection_confidence,
+        fbe.correction_deviation,
+    ));
+
+    // v36: vocal substrate — observer renders snapshot values only.
+    let vt = &snap.vocal_target;
+    let vo = &snap.vocal_organ;
+    let vm = &snap.vocal_memory;
+    let (loop_pressure, last_gap, conv_count, fail_count) = snap.vocal_gap_trace();
+    row.push_str(&format!(
+        "\tvoc:tE{:.3}|tp{:.3}|tr{:.3}|te{:.3}|ob{:.3}|op{:.3}|or{:.3}|oph{}|ip{:.3}|ig{:.3}|ic{}|if{}|mn{}",
+        vt.active_energy,
+        vt.pitch_hint,
+        vt.resonance_hint,
+        vt.envelope_hint,
+        vo.breath_drive,
+        vo.pitch_tension,
+        vo.resonance_position,
+        vo.phase.as_u8(),
+        loop_pressure,
+        last_gap,
+        conv_count,
+        fail_count,
+        vm.n_prototypes,
+    ));
+
     // v30: probe-law — numeric values + phase code only; no semantic labels.
     let prb = &snap.probe_law;
     row.push_str(&format!(
         "\tprb:i{:.4}|s{:.4}|ph{}|o{:.4}",
         prb.intensity, prb.suppression, prb.phase, prb.output_intensity,
+    ));
+
+    let et = &snap.evidence_tension;
+    row.push_str(&format!(
+        "\tetn:t{:.4}|p{:.4}|h{}|pc{}",
+        et.current_tension, et.unresolved_pressure, et.history_len, et.last_pair_cursor,
     ));
 
     println!("{}", row);

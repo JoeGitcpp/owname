@@ -4,9 +4,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bionic_v0::action_consequence::tick_all_ingress_accumulation;
-use bionic_v0::adapter::{spawn_registry_driver, AdapterRegistry, RealPhotAdapter, VibAdapter};
+use bionic_v0::adapter::{
+    spawn_registry_driver, AdapterRegistry, ModalityAdapter, RealPhotAdapter, VibAdapter,
+};
 use bionic_v0::clock::{now_us, spawn_master_clock, spawn_ticker};
 use bionic_v0::highlevel::HighLevelPredictor;
+use bionic_v0::learned_bias::{
+    read_learned_bias_checkpoint, write_learned_bias_checkpoint, LearnedBiasCheckpointPaths,
+};
+use bionic_v0::live_byte_carrier::spawn_live_byte_ingress;
+use bionic_v0::live_byte_closure::LiveByteClosureDriver;
 use bionic_v0::phot_camera::{RealCameraFrameProvider, StubRealCameraFrameProvider};
 use bionic_v0::predictor::Ar2Predictor;
 use bionic_v0::snapshot::{write_snapshot, SnapshotPaths};
@@ -16,24 +23,26 @@ use bionic_v0::VIB_BANDS;
 use bionic_v0::{BINDING_REFRESH_HZ, PHOT_CONSEQUENCE_QUIESCENCE_US};
 
 // Serial global refresh cycle terminates at reasoning history + snapshot.
-// Per cleanup spec 2026-04-20, semantic-readiness and symbolizer are not part
-// of the body main loop and must not be reintroduced here.
+// Per cleanup spec 2026-04-20, rejected naming layers are not part of the
+// body main loop and must not be reintroduced here.
 fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u64) {
     vp.refresh_global_attention(t);
     vp.refresh_global_relations(t);
     vp.refresh_global_relation_predictor(t);
     vp.refresh_global_reasoning(t);
     vp.refresh_global_reasoning_history(t);
+    vp.tick_evidence_tension_from_pairs(t);
+    vp.tick_evidence_tension_from_code_ingress(t);
     vp.refresh_probe_law(t);
     vp.tick_probe_output_from_law(t);
-    // Additional action-output triggers (Tasks 5-7 from body-side-write-trigger plan).
-    // Each reads independently-refreshed substrate state and fires events
-    // only when its engineering threshold is strictly exceeded.
-    vp.tick_surprise_trigger(t);
-    vp.tick_attention_trigger(t);
-    vp.tick_relation_instability_trigger(t);
     if write_snapshot(vp, paths).is_err() {
         vp.mark_snapshot_fail();
+    }
+}
+
+fn register_or_abort(reg: &mut AdapterRegistry, adapter: Box<dyn ModalityAdapter>) {
+    if reg.register(adapter).is_err() {
+        std::process::abort();
     }
 }
 
@@ -48,11 +57,34 @@ fn main() {
     let runtime_dir = PathBuf::from(runtime_dir);
     std::fs::create_dir_all(&runtime_dir).ok();
     let paths = Arc::new(SnapshotPaths::new(&runtime_dir));
+    let learned_bias_paths = Arc::new(LearnedBiasCheckpointPaths::new(&runtime_dir));
 
     let vp = Arc::new(Viewport::new());
+    if let Ok(state) = read_learned_bias_checkpoint(&learned_bias_paths.final_path) {
+        *vp.learned_bias.write().unwrap() = state;
+    }
     let stop = Arc::new(AtomicBool::new(false));
 
     let h_master = spawn_master_clock(vp.clone(), stop.clone());
+    let h_live_byte = spawn_live_byte_ingress(
+        vp.clone(),
+        stop.clone(),
+        runtime_dir.join("live_bytes").join("in.frames"),
+    );
+
+    let h_live_byte_closure = {
+        let vp_live_byte_closure = vp.clone();
+        let live_byte_closure = Arc::new(Mutex::new(LiveByteClosureDriver::new(
+            runtime_dir.join("live_bytes").join("out.frames"),
+        )));
+        let live_byte_closure_ref = live_byte_closure.clone();
+        spawn_ticker(20, stop.clone(), move |_| {
+            let _ = live_byte_closure_ref
+                .lock()
+                .unwrap()
+                .tick(&vp_live_byte_closure, now_us());
+        })
+    };
 
     // All sensory I/O goes through the registry. body.rs is oblivious to
     // which modalities are present — only that the registry exists.
@@ -61,8 +93,7 @@ fn main() {
         spawn_registry_driver(vp.clone(), stop.clone(), move || {
             let mut reg = AdapterRegistry::new();
             // VIB: real mic. Owns its cpal stream inside this thread.
-            reg.register(Box::new(VibAdapter::new(&vp_reg)))
-                .expect("register vib");
+            register_or_abort(&mut reg, Box::new(VibAdapter::new(&vp_reg)));
             // PHOT: attempt to bind the default monocular camera. On success
             // the real hardware path is live; on failure phot_health surfaces
             // FAULT immediately via the stub — never a silent fallback to
@@ -76,8 +107,13 @@ fn main() {
                     Ok(p) => Box::new(p),
                     Err(_) => Box::new(StubRealCameraFrameProvider::try_new()),
                 };
-            reg.register(Box::new(RealPhotAdapter::new(cam)))
-                .expect("register phot");
+            register_or_abort(
+                &mut reg,
+                Box::new(RealPhotAdapter::with_birth_sensitivity(
+                    cam,
+                    vp_reg.birth_sensitivity(),
+                )),
+            );
             reg
         })
     };
@@ -123,7 +159,9 @@ fn main() {
     // Binding maintenance refresh ticker, 5 Hz by default.
     let vp_binding = vp.clone();
     let h_binding = spawn_ticker(BINDING_REFRESH_HZ, stop.clone(), move |_| {
-        vp_binding.tick_binding_maintenance(now_us());
+        let t = now_us();
+        vp_binding.tick_binding_maintenance(t);
+        vp_binding.tick_binding_resonance(t);
     });
 
     // Endogenous activity ticker, 10 Hz.
@@ -135,6 +173,8 @@ fn main() {
         let t = now_us();
         vp_endo.tick_err_driven_attention(t);
         vp_endo.tick_quiet_history_replay(t);
+        vp_endo.tick_life_closure_producers(t);
+        vp_endo.tick_adaptive_stability(t);
     });
 
     // Vocal substrate ticker, 50 Hz. Body-side execution only: learned vocal
@@ -142,11 +182,21 @@ fn main() {
     let vp_vocal = vp.clone();
     let h_vocal = spawn_ticker(50, stop.clone(), move |_| {
         let t = now_us();
+        vp_vocal.tick_vocal_target_from_vib(t);
         vp_vocal.tick_vocal_imitation_loop(t);
         vp_vocal.tick_vocal_memory(t);
     });
 
     let h_vocal_output = spawn_vocal_output(vp.clone(), stop.clone());
+
+    let h_learned_bias_checkpoint = {
+        let vp_checkpoint = vp.clone();
+        let paths_checkpoint = learned_bias_paths.clone();
+        spawn_ticker(1, stop.clone(), move |_| {
+            let state = vp_checkpoint.read_learned_bias();
+            let _ = write_learned_bias_checkpoint(&state, &paths_checkpoint);
+        })
+    };
 
     // Global orchestrator: attention → relations → snapshot (30 Hz).
     //
@@ -180,8 +230,14 @@ fn main() {
     let _ = h_endogenous.join();
     let _ = h_vocal.join();
     let _ = h_vocal_output.join();
+    let _ = h_learned_bias_checkpoint.join();
     let _ = h_orchestrator.join();
+    let _ = h_live_byte.join();
+    let _ = h_live_byte_closure.join();
     let _ = h_master.join();
+
+    let state = vp.read_learned_bias();
+    let _ = write_learned_bias_checkpoint(&state, &learned_bias_paths);
 
     std::process::exit(0);
 }

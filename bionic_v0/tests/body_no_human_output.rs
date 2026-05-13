@@ -4,15 +4,43 @@
 //! research/body separation red line.
 
 #[test]
-fn body_contains_no_human_readable_prints() {
-    let body = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/body.rs"))
-        .expect("read body.rs");
+fn body_owned_sources_contain_no_human_readable_diagnostics() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let sources = [
+        "src/bin/body.rs",
+        "src/vib.rs",
+        "src/adapter.rs",
+        "src/vocal_adapter.rs",
+    ];
+    let forbidden = [
+        "println!",
+        "eprintln!",
+        "dbg!",
+        "panic!(\"",
+        "expect(",
+        "format!(\"",
+        "let _ = reg.register",
+    ];
+
+    let mut violations = Vec::new();
+    for source in sources {
+        let path = std::path::Path::new(manifest_dir).join(source);
+        let contents = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!("failed to read {}: {err}", path.display());
+        });
+
+        for (line_idx, line) in contents.lines().enumerate() {
+            for marker in forbidden {
+                if line.contains(marker) {
+                    violations.push(format!("{source}:{} contains {marker}", line_idx + 1));
+                }
+            }
+        }
+    }
+
     assert!(
-        !body.contains("println!"),
-        "body.rs must not contain println!"
-    );
-    assert!(
-        !body.contains("eprintln!"),
-        "body.rs must not contain eprintln!"
+        violations.is_empty(),
+        "body-owned sources must not contain human-readable diagnostics:\n{}",
+        violations.join("\n")
     );
 }

@@ -47,10 +47,10 @@ fn test_broadband_err_amplifies_surprise_vs_baseline() {
 #[test]
 fn test_low_multiplier_means_smaller_amplification() {
     let mut priors_low = BiasPriors::default();
-    priors_low.disruption_surprise_mul = 1.0;
+    priors_low.pressure_weights.multiplier = 0.5;
 
     let mut priors_high = BiasPriors::default();
-    priors_high.disruption_surprise_mul = 5.0;
+    priors_high.pressure_weights.multiplier = 2.0;
 
     let err = [0.05, 0.1, 0.8, 0.1];
     let bands = [0.1, 0.15, 0.8, 0.1];
@@ -60,7 +60,7 @@ fn test_low_multiplier_means_smaller_amplification() {
 
     assert!(
         surprise_high > surprise_low,
-        "higher disruption_surprise_mul should produce higher surprise: low={}, high={}",
+        "higher generic pressure multiplier should produce higher surprise: low={}, high={}",
         surprise_low,
         surprise_high
     );

@@ -17,6 +17,7 @@ use crate::WRITE_EPOCH_HISTORY_CAP;
 pub enum OutputChannelKind {
     #[default]
     GenericWrite,
+    FramedByteEgress,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -70,6 +71,10 @@ pub struct WriteEpochRecord {
     /// Monotonic pairing handle (same as ActionOutputWriteTrace::current_write_seq).
     pub write_seq: u64,
     pub channel_kind: OutputChannelKind,
+    /// Magnitude at Begin. This is the closed write-out evidence used for
+    /// later action-consequence pairing; subsequent Adjust/Decay/Stop events
+    /// update the live channel but do not rewrite this epoch boundary sample.
+    pub start_magnitude: f64,
     pub start_t_us: u64,
     /// Updated on every Adjust / Decay / Stop event for this epoch.
     pub last_update_t_us: u64,
@@ -125,6 +130,7 @@ impl Viewport {
                 s.write_epoch_history.push(WriteEpochRecord {
                     write_seq: seq,
                     channel_kind: event.channel_kind,
+                    start_magnitude: mag,
                     start_t_us: event.event_t_us,
                     last_update_t_us: event.event_t_us,
                     last_phase: ActionOutputPhase::Active,

@@ -96,6 +96,11 @@ impl LanguageBindingState {
     }
 
     pub fn apply_binding_event(&mut self, event: BindingEvent) {
+        self.apply_binding_event_with_pressure(event, 0.0);
+    }
+
+    pub fn apply_binding_event_with_pressure(&mut self, event: BindingEvent, update_pressure: f64) {
+        let update_scale = 1.0 + 0.25 * update_pressure.clamp(0.0, 2.0);
         if let Some(trace) = self.traces.iter_mut().find(|trace| {
             trace.pattern_kind == event.pattern_kind
                 && trace.pattern_hash == event.pattern_hash
@@ -108,12 +113,14 @@ impl LanguageBindingState {
             match event.feedback {
                 BindingFeedback::Align => {
                     trace.reinforce_count += 1;
-                    trace.strength = BindingStrength::new(trace.strength.value + 0.25);
+                    trace.strength =
+                        BindingStrength::new(trace.strength.value + 0.25 * update_scale);
                     trace.status = BindingStatus::Reinforced;
                 }
                 BindingFeedback::Deviate => {
                     trace.weaken_count += 1;
-                    trace.strength = BindingStrength::new(trace.strength.value - 0.3);
+                    trace.strength =
+                        BindingStrength::new(trace.strength.value - 0.3 * update_scale);
                     trace.status = BindingStatus::Weakened;
                 }
             }
@@ -126,7 +133,7 @@ impl LanguageBindingState {
                 pattern_kind: event.pattern_kind,
                 pattern_hash: event.pattern_hash,
                 target: event.target,
-                strength: BindingStrength::new(0.25),
+                strength: BindingStrength::new(0.25 * update_scale),
                 status: BindingStatus::Candidate,
                 evidence_refs: vec![event.evidence_ref],
                 reinforce_count: 0,
@@ -154,5 +161,99 @@ impl LanguageBindingState {
         }
         self.traces = decayed;
         self.n_bindings = self.traces.len();
+    }
+}
+
+impl crate::viewport::Viewport {
+    pub fn try_form_binding_event_from_pair(
+        &self,
+        pattern_kind: PatternKind,
+        pattern_hash: u64,
+        target: BindingTargetRef,
+        write_seq: u64,
+        window_id: u64,
+    ) -> bool {
+        let pair = {
+            let ac = self.action_consequence.read().unwrap();
+            ac.pairs
+                .iter()
+                .find(|pair| {
+                    pair.write_seq == write_seq
+                        && pair.window_id == window_id
+                        && pair.status == crate::action_consequence::ConsequencePairStatus::Paired
+                })
+                .cloned()
+        };
+
+        let Some(pair) = pair else {
+            return false;
+        };
+
+        let feedback = if pair.curve_similarity >= crate::BINDING_PAIR_ALIGN_MIN {
+            BindingFeedback::Align
+        } else if pair.curve_similarity <= crate::BINDING_PAIR_DEVIATE_MAX {
+            BindingFeedback::Deviate
+        } else {
+            return false;
+        };
+
+        if !self.binding_target_is_live(target) {
+            return false;
+        }
+
+        if feedback == BindingFeedback::Deviate
+            && !self.binding_trace_exists(pattern_kind, pattern_hash, target)
+        {
+            return false;
+        }
+
+        self.apply_language_binding_event(BindingEvent {
+            pattern_kind,
+            pattern_hash,
+            target,
+            feedback,
+            evidence_ref: write_seq.rotate_left(32) ^ window_id,
+            event_t_us: pair.pair_t_us,
+        });
+        true
+    }
+
+    fn binding_target_is_live(&self, target: BindingTargetRef) -> bool {
+        match target {
+            BindingTargetRef::ObjectSlot { slot_id } => self
+                .read_slot(slot_id as usize)
+                .map(|slot| slot.active)
+                .unwrap_or(false),
+            BindingTargetRef::RelationEdge { edge_index } => self
+                .global_relations
+                .read()
+                .unwrap()
+                .edges
+                .get(edge_index as usize)
+                .map(|edge| edge.active)
+                .unwrap_or(false),
+            BindingTargetRef::TimeWindow {
+                start_t_us,
+                end_t_us,
+            } => start_t_us < end_t_us,
+        }
+    }
+
+    fn binding_trace_exists(
+        &self,
+        pattern_kind: PatternKind,
+        pattern_hash: u64,
+        target: BindingTargetRef,
+    ) -> bool {
+        self.language_binding
+            .read()
+            .unwrap()
+            .traces
+            .iter()
+            .any(|trace| {
+                trace.pattern_kind == pattern_kind
+                    && trace.pattern_hash == pattern_hash
+                    && trace.target == target
+            })
     }
 }

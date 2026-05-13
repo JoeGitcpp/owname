@@ -60,20 +60,27 @@ back into rejected architecture.
    introducing independent modules.
 
 10. **Subconscious/conscious language boundary spec (FROZEN)** —
-   [docs/superpowers/specs/2026-04-29-subconscious-conscious-language-boundary-design.md](docs/superpowers/specs/2026-04-29-subconscious-conscious-language-boundary-design.md):
-   defines the hard boundary for using "subconscious" and "conscious" as
-   external metaphors only, and maps language execution vs language learning
-   responsibilities onto existing substrate laws without adding ontology
-   modules.
+    [docs/superpowers/specs/2026-04-29-subconscious-conscious-language-boundary-design.md](docs/superpowers/specs/2026-04-29-subconscious-conscious-language-boundary-design.md):
+    defines the hard boundary for using "subconscious" and "conscious" as
+    external metaphors only, and maps language execution vs language learning
+    responsibilities onto existing substrate laws without adding ontology
+    modules.
 
-11. **Implementation plan (executed 2026-04-20)** —
-   [docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md](docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md):
-   the plan that removed the rejected layers from the live body /
-   snapshot / observer / test path.
+11. **Live I/O preflight life-sign contract (FROZEN CANDIDATE)** —
+    [docs/superpowers/specs/2026-05-05-live-io-preflight-life-sign-contract-design.md](docs/superpowers/specs/2026-05-05-live-io-preflight-life-sign-contract-design.md):
+    defines Live I/O preflight as a body life-sign gate before active
+    probe-feedback closure: write-out, ingress return, temporal pairing,
+    ambiguity preservation, and observer-visible evidence without adding
+    semantic/source/identity ontology.
 
-12. **Older v0 spec (PARTIALLY DEPRECATED)** —
-   [docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md](docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md):
-   read its §0 deprecation banner before trusting any of its content.
+12. **Implementation plan (executed 2026-04-20)** —
+    [docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md](docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md):
+    the plan that removed the rejected layers from the live body /
+    snapshot / observer / test path.
+
+13. **Older v0 spec (PARTIALLY DEPRECATED)** —
+    [docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md](docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md):
+    read its §0 deprecation banner before trusting any of its content.
 
 ## Rejected Architecture (DO NOT REINTRODUCE)
 

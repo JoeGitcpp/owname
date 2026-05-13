@@ -6,15 +6,22 @@ use std::sync::Arc;
 
 use crate::action_consequence::ActionConsequenceState;
 use crate::action_output::ActionOutputState;
+use crate::adaptive_stability::{AdaptiveRouteTrace, AdaptiveStabilityState};
+use crate::code_ingress::{
+    CodeIngressFrameTrace, CodeIngressState, CodeProjectionCandidate, CodeSequenceWindowTrace,
+};
+use crate::evidence_tension::{EvidenceTensionState, EvidenceTensionTrace};
+use crate::framed_byte_egress::{FramedByteEgressPhase, FramedByteEgressState};
 use crate::language_binding::{
     BindingStatus, BindingTargetRef, BindingTrace, LanguageBindingState, PatternKind,
 };
+use crate::learned_bias::LearnedBiasSummary;
 use crate::object_high_layer::ObjectHighLayerState;
 use crate::probe_law::ProbeLawState;
 use crate::viewport::{
     AmbientModalitySnapshot, AxisRing, BandFamilyState, CrossModalFusionState,
     GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,
-    RelationEdgeState, SpatialState, Viewport,
+    RelationEdgeState, SpatialState, SpatialWorldlineState, Viewport,
 };
 use crate::vocal_imitation::VocalImitationState;
 use crate::vocal_memory::VocalMemoryState;
@@ -25,7 +32,8 @@ use crate::vpc::{
     PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
 };
 use crate::{
-    AXIS_COUNT, HISTORY_CAP, N_OBJECT_SLOTS, PROBE_HISTORY_CAP, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
+    AXIS_COUNT, CODE_INGRESS_BYTE_SAMPLE_CAP, EVIDENCE_TENSION_HISTORY_CAP, HISTORY_CAP,
+    N_OBJECT_SLOTS, PROBE_HISTORY_CAP, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
 };
 use crate::{N_REL_EDGES, N_ROUTING_FOCUS_EDGES, N_ROUTING_FOCUS_SLOTS};
 
@@ -129,6 +137,7 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
         write_family(&mut buf, snap.phot.as_ref());
         write_family(&mut buf, snap.mech.as_ref());
         write_spatial(&mut buf, snap.spatial);
+        write_spatial_worldline(&mut buf, snap.spatial_worldline);
         write_fusion(&mut buf, snap.fusion);
         write_high_layer(&mut buf, snap.high_layer);
         buf.extend_from_slice(&snap.attention_share.to_le_bytes());
@@ -185,9 +194,25 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
     write_vocal_imitation(&mut buf, &vp.read_vocal_imitation());
     write_vocal_memory(&mut buf, &vp.read_vocal_memory());
 
-    // v21 (semantic readiness) and v22 (symbolizer / concept-id) sections
-    // removed by cleanup spec 2026-04-20. Snapshot terminates at the
-    // reasoning memory summary + language-binding traces.
+    // v37: code-ingress trace substrate.
+    write_code_ingress(&mut buf, &vp.read_code_ingress());
+
+    // v38: learned-bias delta summary. Numeric-only observer evidence; base
+    // priors remain separate and are never serialized as learned state here.
+    write_learned_bias_summary(&mut buf, &vp.read_learned_bias().summary());
+
+    // v39: adaptive stability route-local numeric traces.
+    write_adaptive_stability(&mut buf, &vp.read_adaptive_stability());
+
+    // v40: evidence-tension pressure trace substrate.
+    write_evidence_tension(&mut buf, &vp.read_evidence_tension());
+
+    // v41: framed-byte egress substrate.
+    write_framed_byte_egress(&mut buf, &vp.read_framed_byte_egress());
+
+    // Rejected v21/v22 naming sections were removed by cleanup spec
+    // 2026-04-20. Snapshot terminates at the reasoning memory summary
+    // plus language-binding traces.
 
     {
         let mut f = File::create(&paths.tmp_path)?;
@@ -209,6 +234,29 @@ fn write_spatial(buf: &mut Vec<u8>, sp: Option<SpatialState>) {
             buf.extend_from_slice(&s.span_y.to_le_bytes());
             buf.extend_from_slice(&s.precision.to_le_bytes());
             buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+            buf.push(if s.valid { 1u8 } else { 0u8 });
+        }
+    }
+}
+
+fn write_spatial_worldline(buf: &mut Vec<u8>, wl: Option<SpatialWorldlineState>) {
+    match wl {
+        None => buf.push(0u8),
+        Some(s) => {
+            buf.push(1u8);
+            buf.extend_from_slice(&(s.n_updates as u64).to_le_bytes());
+            buf.extend_from_slice(&s.prev_t_us.to_le_bytes());
+            buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+            buf.extend_from_slice(&s.prev_pos_x.to_le_bytes());
+            buf.extend_from_slice(&s.prev_pos_y.to_le_bytes());
+            buf.extend_from_slice(&s.predicted_pos_x.to_le_bytes());
+            buf.extend_from_slice(&s.predicted_pos_y.to_le_bytes());
+            buf.extend_from_slice(&s.velocity_x_per_s.to_le_bytes());
+            buf.extend_from_slice(&s.velocity_y_per_s.to_le_bytes());
+            buf.extend_from_slice(&s.err_x.to_le_bytes());
+            buf.extend_from_slice(&s.err_y.to_le_bytes());
+            buf.extend_from_slice(&s.err_norm.to_le_bytes());
+            buf.extend_from_slice(&s.last_dt_us.to_le_bytes());
             buf.push(if s.valid { 1u8 } else { 0u8 });
         }
     }
@@ -317,6 +365,7 @@ pub struct SnapshotSlot {
     pub phot: Option<SnapshotBandFamily>,
     pub mech: Option<SnapshotBandFamily>,
     pub spatial: Option<SnapshotSpatial>,
+    pub spatial_worldline: Option<SpatialWorldlineState>,
     /// Phase 5A: cross-modal fusion state. None when never refreshed.
     pub fusion: Option<CrossModalFusionState>,
     /// Phase 5B: high-layer output state. None when never refreshed.
@@ -383,8 +432,7 @@ pub struct SnapshotData {
     pub language_binding: LanguageBindingState,
     // v33: VPC timing / provenance trace state
     pub vpc_contract: VpcContractState,
-    // v21 (semantic-readiness) and v22 (symbolizer) removed by cleanup spec
-    // 2026-04-20.
+    // Rejected v21/v22 naming sections removed by cleanup spec 2026-04-20.
     // v25: action-output substrate (write-out side)
     pub action_output: SnapshotActionOutput,
     // v26: action-consequence loop substrate
@@ -396,6 +444,28 @@ pub struct SnapshotData {
     pub vocal_organ: VocalOrganState,
     pub vocal_imitation: VocalImitationState,
     pub vocal_memory: SnapshotVocalMemory,
+    // v37: code-ingress trace substrate
+    pub code_ingress: CodeIngressState,
+    // v38: learned-bias delta summary
+    pub learned_bias: LearnedBiasSummary,
+    // v39: adaptive stability route-local numeric traces.
+    pub adaptive_stability: AdaptiveStabilityState,
+    // v40: evidence-tension pressure trace substrate.
+    pub evidence_tension: EvidenceTensionState,
+    // v41: framed-byte egress substrate.
+    pub framed_byte_egress: SnapshotFramedByteEgress,
+}
+
+impl SnapshotData {
+    pub fn vocal_gap_trace(&self) -> (f64, f64, u32, u32) {
+        let s = self.vocal_imitation;
+        (
+            s.imitation_pressure,
+            s.last_gap,
+            s.converge_count,
+            s.fail_count,
+        )
+    }
 }
 
 /// Snapshot-visible representation of the action-output substrate (v25/v26/v27).
@@ -415,6 +485,7 @@ pub struct SnapshotActionOutput {
 pub struct SnapshotWriteEpochRecord {
     pub write_seq: u64,
     pub channel_kind: u64,
+    pub start_magnitude: f64,
     pub start_t_us: u64,
     pub last_update_t_us: u64,
     pub last_phase: u64,
@@ -442,6 +513,9 @@ pub struct SnapshotActionConsequence {
     pub n_windows: u32,
     pub windows: Vec<SnapshotConsequenceWindow>,
     pub n_pairs: u32,
+    pub total_pairs: u64,
+    pub total_framed_byte_pairs: u64,
+    pub total_other_pairs: u64,
     pub pairs: Vec<SnapshotConsequencePair>,
 }
 
@@ -461,6 +535,8 @@ pub struct SnapshotConsequenceWindow {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SnapshotConsequencePair {
+    /// v42: monotonic pair sequence for downstream observer cursors.
+    pub pair_seq: u64,
     pub write_seq: u64,
     /// v29: stable window identifier (replaces window_index Vec position).
     pub window_id: u64,
@@ -490,6 +566,27 @@ pub struct SnapshotProbeLaw {
 pub struct SnapshotVocalMemory {
     pub n_prototypes: u32,
     pub prototypes: Vec<SnapshotVocalPrototype>,
+    pub last_update_t_us: u64,
+}
+
+/// Snapshot-visible framed-byte egress trace (v37).
+/// Numeric/time/byte-shape only; no meaning or controller fields.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotFramedByteEgress {
+    pub phase: u8,
+    pub active_stream_id: u64,
+    pub current_write_seq: u64,
+    pub byte_cursor: u64,
+    pub n_frames: u32,
+    pub n_returns: u32,
+    pub total_frames: u64,
+    pub total_returns: u64,
+    pub last_frame_seq: u64,
+    pub last_return_window_id: u64,
+    pub output_pressure: f64,
+    pub projection_confidence: f64,
+    pub correction_deviation: f64,
+    pub correction_count: u32,
     pub last_update_t_us: u64,
 }
 
@@ -647,6 +744,7 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         let phot = read_family(&bytes, &mut cur);
         let mech = read_family(&bytes, &mut cur);
         let spatial = read_spatial(&bytes, &mut cur);
+        let spatial_worldline = read_spatial_worldline(&bytes, &mut cur);
         let fusion = read_fusion(&bytes, &mut cur);
         let high_layer = read_high_layer(&bytes, &mut cur);
         let attention_share = rd_f64(&bytes, &mut cur);
@@ -660,6 +758,7 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
             phot,
             mech,
             spatial,
+            spatial_worldline,
             fusion,
             high_layer,
             attention_share,
@@ -773,9 +872,39 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         SnapshotVocalMemory::default()
     };
 
-    // v21 (semantic-readiness) and v22 (symbolizer) sections removed by
-    // cleanup spec 2026-04-20. Older snapshot files containing those bytes
-    // are no longer readable; v23+ omits them entirely.
+    let code_ingress = if version >= 37 {
+        read_code_ingress_snapshot(&bytes, &mut cur)
+    } else {
+        CodeIngressState::default()
+    };
+
+    let learned_bias = if version >= 38 {
+        read_learned_bias_summary(&bytes, &mut cur)
+    } else {
+        LearnedBiasSummary::default()
+    };
+
+    let adaptive_stability = if version >= 39 {
+        read_adaptive_stability_snapshot(&bytes, &mut cur)
+    } else {
+        AdaptiveStabilityState::default()
+    };
+
+    let evidence_tension = if version >= 40 {
+        read_evidence_tension_snapshot(&bytes, &mut cur)
+    } else {
+        EvidenceTensionState::default()
+    };
+
+    let framed_byte_egress = if version >= 41 {
+        read_framed_byte_egress_snapshot(&bytes, &mut cur)
+    } else {
+        SnapshotFramedByteEgress::default()
+    };
+
+    // Rejected v21/v22 naming sections removed by cleanup spec 2026-04-20.
+    // Older snapshot files containing those bytes are no longer readable;
+    // v23+ omits them entirely.
 
     Ok(SnapshotData {
         seq,
@@ -819,6 +948,11 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         vocal_organ,
         vocal_imitation,
         vocal_memory,
+        code_ingress,
+        learned_bias,
+        adaptive_stability,
+        evidence_tension,
+        framed_byte_egress,
     })
 }
 
@@ -855,6 +989,57 @@ fn read_spatial(bytes: &[u8], cur: &mut usize) -> Option<SnapshotSpatial> {
         span_y,
         precision,
         last_update_t_us,
+        valid,
+    })
+}
+
+fn read_spatial_worldline(bytes: &[u8], cur: &mut usize) -> Option<SpatialWorldlineState> {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    let present = bytes[*cur];
+    *cur += 1;
+    if present == 0 {
+        return None;
+    }
+    let n_updates = rd_u64(bytes, cur) as u32;
+    let prev_t_us = rd_u64(bytes, cur);
+    let last_update_t_us = rd_u64(bytes, cur);
+    let prev_pos_x = rd_f64(bytes, cur);
+    let prev_pos_y = rd_f64(bytes, cur);
+    let predicted_pos_x = rd_f64(bytes, cur);
+    let predicted_pos_y = rd_f64(bytes, cur);
+    let velocity_x_per_s = rd_f64(bytes, cur);
+    let velocity_y_per_s = rd_f64(bytes, cur);
+    let err_x = rd_f64(bytes, cur);
+    let err_y = rd_f64(bytes, cur);
+    let err_norm = rd_f64(bytes, cur);
+    let last_dt_us = rd_u64(bytes, cur);
+    let valid = bytes[*cur] != 0;
+    *cur += 1;
+    Some(SpatialWorldlineState {
+        n_updates,
+        prev_t_us,
+        last_update_t_us,
+        prev_pos_x,
+        prev_pos_y,
+        predicted_pos_x,
+        predicted_pos_y,
+        velocity_x_per_s,
+        velocity_y_per_s,
+        err_x,
+        err_y,
+        err_norm,
+        last_dt_us,
         valid,
     })
 }
@@ -1102,6 +1287,8 @@ fn write_global_relations(buf: &mut Vec<u8>, gr: &GlobalRelationState) {
         buf.extend_from_slice(&edge.lead_lag_score.to_le_bytes());
         buf.extend_from_slice(&edge.predictive_score.to_le_bytes());
         buf.extend_from_slice(&edge.relation_confidence.to_le_bytes());
+        buf.extend_from_slice(&edge.spatial_distance_score.to_le_bytes());
+        buf.extend_from_slice(&edge.spatial_overlap_score.to_le_bytes());
         buf.extend_from_slice(&edge.last_update_t_us.to_le_bytes());
         // v18: Phase 5E relation predictor output
         buf.extend_from_slice(&edge.pred.predicted_co_change.to_le_bytes());
@@ -1138,6 +1325,8 @@ fn read_global_relations_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalRelati
         let lead_lag_score = rd_f64(bytes, cur);
         let predictive_score = rd_f64(bytes, cur);
         let relation_confidence = rd_f64(bytes, cur);
+        let spatial_distance_score = rd_f64(bytes, cur);
+        let spatial_overlap_score = rd_f64(bytes, cur);
         let last_update = rd_u64(bytes, cur);
         // v18: Phase 5E relation predictor output
         let predicted_co_change = rd_f64(bytes, cur);
@@ -1156,6 +1345,8 @@ fn read_global_relations_snapshot(bytes: &[u8], cur: &mut usize) -> GlobalRelati
             lead_lag_score,
             predictive_score,
             relation_confidence,
+            spatial_distance_score,
+            spatial_overlap_score,
             last_update_t_us: last_update,
             pred: RelationEdgePredictionState {
                 predicted_co_change,
@@ -1694,6 +1885,7 @@ fn write_action_output(buf: &mut Vec<u8>, s: &ActionOutputState) {
     for ep in &s.write_epoch_history {
         buf.extend_from_slice(&ep.write_seq.to_le_bytes());
         buf.extend_from_slice(&(ep.channel_kind as u64).to_le_bytes());
+        buf.extend_from_slice(&ep.start_magnitude.to_le_bytes());
         buf.extend_from_slice(&ep.start_t_us.to_le_bytes());
         buf.extend_from_slice(&ep.last_update_t_us.to_le_bytes());
         buf.extend_from_slice(&(ep.last_phase as u64).to_le_bytes());
@@ -1750,12 +1942,14 @@ fn read_action_output_snapshot(
         for _ in 0..n {
             let write_seq = rd_u64(bytes, cur);
             let channel_kind = rd_u64(bytes, cur);
+            let start_magnitude = rd_f64(bytes, cur);
             let start_t_us = rd_u64(bytes, cur);
             let last_update_t_us = rd_u64(bytes, cur);
             let last_phase = rd_u64(bytes, cur);
             history.push(SnapshotWriteEpochRecord {
                 write_seq,
                 channel_kind,
+                start_magnitude,
                 start_t_us,
                 last_update_t_us,
                 last_phase,
@@ -1789,7 +1983,12 @@ fn write_action_consequence(buf: &mut Vec<u8>, s: &ActionConsequenceState) {
         buf.extend_from_slice(&w.last_update_t_us.to_le_bytes());
     }
     buf.extend_from_slice(&(s.n_pairs as u64).to_le_bytes());
+    buf.extend_from_slice(&s.total_pairs.to_le_bytes());
+    buf.extend_from_slice(&s.total_framed_byte_pairs.to_le_bytes());
+    buf.extend_from_slice(&s.total_other_pairs.to_le_bytes());
     for p in &s.pairs {
+        // v42: pair_seq is first field per pair.
+        buf.extend_from_slice(&p.pair_seq.to_le_bytes());
         buf.extend_from_slice(&p.write_seq.to_le_bytes());
         // v29: window_id replaces window_index
         buf.extend_from_slice(&p.window_id.to_le_bytes());
@@ -1841,8 +2040,19 @@ fn read_action_consequence_snapshot(
         });
     }
     let n_pairs = rd_u64(bytes, cur) as u32;
+    let total_pairs = if version >= 43 {
+        rd_u64(bytes, cur)
+    } else {
+        n_pairs as u64
+    };
+    let (total_framed_byte_pairs, total_other_pairs) = if version >= 44 {
+        (rd_u64(bytes, cur), rd_u64(bytes, cur))
+    } else {
+        (0, total_pairs)
+    };
     let mut pairs = Vec::with_capacity(n_pairs as usize);
     for _ in 0..n_pairs {
+        let pair_seq = if version >= 42 { rd_u64(bytes, cur) } else { 0 };
         let write_seq = rd_u64(bytes, cur);
         // v29: window_id replaces window_index
         let window_id = rd_u64(bytes, cur);
@@ -1855,6 +2065,7 @@ fn read_action_consequence_snapshot(
             0.0
         };
         pairs.push(SnapshotConsequencePair {
+            pair_seq,
             write_seq,
             window_id,
             delay_us,
@@ -1867,6 +2078,9 @@ fn read_action_consequence_snapshot(
         n_windows,
         windows,
         n_pairs,
+        total_pairs,
+        total_framed_byte_pairs,
+        total_other_pairs,
         pairs,
     }
 }
@@ -2076,5 +2290,372 @@ fn read_vocal_memory_snapshot(bytes: &[u8], cur: &mut usize) -> SnapshotVocalMem
         n_prototypes,
         prototypes,
         last_update_t_us,
+    }
+}
+
+// ─── v39: adaptive stability substrate ───────────────────────────────────────
+
+fn write_adaptive_stability(buf: &mut Vec<u8>, s: &AdaptiveStabilityState) {
+    buf.extend_from_slice(&(s.routes.len() as u64).to_le_bytes());
+    for r in &s.routes {
+        buf.extend_from_slice(&r.route_id.to_le_bytes());
+        buf.extend_from_slice(&(r.route_code as u64).to_le_bytes());
+        buf.extend_from_slice(&(r.phase_code as u64).to_le_bytes());
+        buf.extend_from_slice(&r.err_ema.to_le_bytes());
+        buf.extend_from_slice(&r.resource_cost_ema.to_le_bytes());
+        buf.extend_from_slice(&r.closure_gain_ema.to_le_bytes());
+        buf.extend_from_slice(&r.degradation_score.to_le_bytes());
+        buf.extend_from_slice(&r.bypass_weight.to_le_bytes());
+        buf.extend_from_slice(&r.relearn_pressure.to_le_bytes());
+        buf.extend_from_slice(&r.slow_path_weight.to_le_bytes());
+        buf.extend_from_slice(&r.fast_path_strength.to_le_bytes());
+        buf.extend_from_slice(&(r.stable_run as u64).to_le_bytes());
+        buf.extend_from_slice(&(r.drift_run as u64).to_le_bytes());
+        buf.extend_from_slice(&r.last_good_t_us.to_le_bytes());
+        buf.extend_from_slice(&r.last_update_t_us.to_le_bytes());
+    }
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_adaptive_stability_snapshot(bytes: &[u8], cur: &mut usize) -> AdaptiveStabilityState {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    let n_routes = rd_u64(bytes, cur) as u32;
+    let mut routes = Vec::with_capacity(n_routes as usize);
+    for _ in 0..n_routes {
+        routes.push(AdaptiveRouteTrace {
+            route_id: rd_u64(bytes, cur),
+            route_code: rd_u64(bytes, cur).min(u16::MAX as u64) as u16,
+            phase_code: rd_u64(bytes, cur).min(u8::MAX as u64) as u8,
+            err_ema: rd_f64(bytes, cur),
+            resource_cost_ema: rd_f64(bytes, cur),
+            closure_gain_ema: rd_f64(bytes, cur),
+            degradation_score: rd_f64(bytes, cur),
+            bypass_weight: rd_f64(bytes, cur),
+            relearn_pressure: rd_f64(bytes, cur),
+            slow_path_weight: rd_f64(bytes, cur),
+            fast_path_strength: rd_f64(bytes, cur),
+            stable_run: rd_u64(bytes, cur) as u32,
+            drift_run: rd_u64(bytes, cur) as u32,
+            last_good_t_us: rd_u64(bytes, cur),
+            last_update_t_us: rd_u64(bytes, cur),
+        });
+    }
+    let last_update_t_us = rd_u64(bytes, cur);
+    AdaptiveStabilityState {
+        n_routes,
+        routes,
+        last_update_t_us,
+    }
+}
+
+// ─── v40: evidence-tension pressure trace substrate ──────────────────────────
+
+fn write_evidence_tension(buf: &mut Vec<u8>, s: &EvidenceTensionState) {
+    buf.extend_from_slice(&s.current_tension.to_le_bytes());
+    buf.extend_from_slice(&s.unresolved_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+    buf.extend_from_slice(&s.last_pair_cursor.to_le_bytes());
+    buf.extend_from_slice(&(s.history_head as u64).to_le_bytes());
+    buf.extend_from_slice(&(s.history_len as u64).to_le_bytes());
+    for trace in &s.history {
+        buf.extend_from_slice(&trace.t_us.to_le_bytes());
+        buf.extend_from_slice(&trace.tension.to_le_bytes());
+        buf.extend_from_slice(&trace.unresolved_pressure.to_le_bytes());
+        buf.extend_from_slice(&trace.closure_support.to_le_bytes());
+        buf.extend_from_slice(&trace.pair_cursor.to_le_bytes());
+    }
+}
+
+fn read_evidence_tension_snapshot(bytes: &[u8], cur: &mut usize) -> EvidenceTensionState {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+
+    let current_tension = rd_f64(bytes, cur);
+    let unresolved_pressure = rd_f64(bytes, cur);
+    let last_update_t_us = rd_u64(bytes, cur);
+    let last_pair_cursor = rd_u64(bytes, cur);
+    let history_head = rd_u64(bytes, cur) as usize;
+    let history_len = rd_u64(bytes, cur) as usize;
+    let mut history = [EvidenceTensionTrace::default(); EVIDENCE_TENSION_HISTORY_CAP];
+    for trace in history.iter_mut() {
+        *trace = EvidenceTensionTrace {
+            t_us: rd_u64(bytes, cur),
+            tension: rd_f64(bytes, cur),
+            unresolved_pressure: rd_f64(bytes, cur),
+            closure_support: rd_f64(bytes, cur),
+            pair_cursor: rd_u64(bytes, cur),
+        };
+    }
+
+    EvidenceTensionState {
+        current_tension,
+        unresolved_pressure,
+        last_update_t_us,
+        last_pair_cursor,
+        history,
+        history_head,
+        history_len,
+    }
+}
+
+// ─── v41: framed-byte egress substrate ───────────────────────────────────────
+
+fn write_framed_byte_egress(buf: &mut Vec<u8>, s: &FramedByteEgressState) {
+    buf.push(s.phase.as_u8());
+    buf.extend_from_slice(&[0u8; 7]);
+    buf.extend_from_slice(&s.active_stream_id.to_le_bytes());
+    buf.extend_from_slice(&s.current_write_seq.to_le_bytes());
+    buf.extend_from_slice(&s.byte_cursor.to_le_bytes());
+    buf.extend_from_slice(&(s.n_frames as u64).to_le_bytes());
+    buf.extend_from_slice(&(s.n_returns as u64).to_le_bytes());
+    buf.extend_from_slice(&s.total_frames.to_le_bytes());
+    buf.extend_from_slice(&s.total_returns.to_le_bytes());
+    buf.extend_from_slice(&s.last_frame_seq.to_le_bytes());
+    buf.extend_from_slice(&s.last_return_window_id.to_le_bytes());
+    buf.extend_from_slice(&s.output_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.projection_confidence.to_le_bytes());
+    buf.extend_from_slice(&s.correction_deviation.to_le_bytes());
+    buf.extend_from_slice(&(s.correction_count as u64).to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_framed_byte_egress_snapshot(bytes: &[u8], cur: &mut usize) -> SnapshotFramedByteEgress {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+
+    let phase = bytes[*cur];
+    *cur += 8;
+    let _ = FramedByteEgressPhase::from_u8(phase);
+    SnapshotFramedByteEgress {
+        phase,
+        active_stream_id: rd_u64(bytes, cur),
+        current_write_seq: rd_u64(bytes, cur),
+        byte_cursor: rd_u64(bytes, cur),
+        n_frames: rd_u64(bytes, cur) as u32,
+        n_returns: rd_u64(bytes, cur) as u32,
+        total_frames: rd_u64(bytes, cur),
+        total_returns: rd_u64(bytes, cur),
+        last_frame_seq: rd_u64(bytes, cur),
+        last_return_window_id: rd_u64(bytes, cur),
+        output_pressure: rd_f64(bytes, cur),
+        projection_confidence: rd_f64(bytes, cur),
+        correction_deviation: rd_f64(bytes, cur),
+        correction_count: rd_u64(bytes, cur) as u32,
+        last_update_t_us: rd_u64(bytes, cur),
+    }
+}
+
+// ─── v37: code-ingress trace substrate ───────────────────────────────────────
+
+fn write_code_ingress(buf: &mut Vec<u8>, s: &CodeIngressState) {
+    buf.extend_from_slice(&s.stream_count.to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+    buf.extend_from_slice(&(s.recent_frames.len() as u32).to_le_bytes());
+    for frame in &s.recent_frames {
+        buf.extend_from_slice(&frame.frame_seq.to_le_bytes());
+        buf.extend_from_slice(&frame.stream_context_id.to_le_bytes());
+        buf.extend_from_slice(&frame.t_start_us.to_le_bytes());
+        buf.extend_from_slice(&frame.t_end_us.to_le_bytes());
+        buf.extend_from_slice(&frame.byte_len.to_le_bytes());
+        buf.extend_from_slice(&frame.byte_hash.to_le_bytes());
+        buf.extend_from_slice(&frame.byte_transition_energy.to_le_bytes());
+        buf.extend_from_slice(&frame.byte_distribution_skew.to_le_bytes());
+        buf.extend_from_slice(&frame.framing_validity.to_le_bytes());
+        buf.extend_from_slice(&frame.evidence_ref.to_le_bytes());
+        let sample_len = (frame.byte_sample_len as usize).min(CODE_INGRESS_BYTE_SAMPLE_CAP);
+        buf.push(sample_len as u8);
+        buf.extend_from_slice(&frame.byte_sample[..sample_len]);
+    }
+
+    buf.extend_from_slice(&(s.projection_candidates.len() as u32).to_le_bytes());
+    for projection in &s.projection_candidates {
+        buf.extend_from_slice(&projection.projection_ref.to_le_bytes());
+        buf.extend_from_slice(&projection.frame_seq.to_le_bytes());
+        buf.push(projection.decoder_kind_code);
+        buf.extend_from_slice(&projection.confidence.to_le_bytes());
+        buf.extend_from_slice(&projection.validity.to_le_bytes());
+        buf.extend_from_slice(&projection.error_magnitude.to_le_bytes());
+        buf.extend_from_slice(&projection.code_unit_count.to_le_bytes());
+        buf.extend_from_slice(&projection.last_update_t_us.to_le_bytes());
+    }
+
+    buf.extend_from_slice(&(s.sequence_windows.len() as u32).to_le_bytes());
+    for window in &s.sequence_windows {
+        buf.extend_from_slice(&window.window_id.to_le_bytes());
+        buf.extend_from_slice(&window.stream_context_id.to_le_bytes());
+        buf.extend_from_slice(&window.start_frame_seq.to_le_bytes());
+        buf.extend_from_slice(&window.end_frame_seq.to_le_bytes());
+        buf.extend_from_slice(&window.t_start_us.to_le_bytes());
+        buf.extend_from_slice(&window.t_end_us.to_le_bytes());
+        buf.extend_from_slice(&window.recurrence_score.to_le_bytes());
+        buf.extend_from_slice(&window.boundary_confidence.to_le_bytes());
+        buf.extend_from_slice(&window.ambiguity_level.to_le_bytes());
+    }
+}
+
+fn read_code_ingress_snapshot(bytes: &[u8], cur: &mut usize) -> CodeIngressState {
+    fn rd_u8(b: &[u8], c: &mut usize) -> u8 {
+        let v = b[*c];
+        *c += 1;
+        v
+    }
+    fn rd_u32(b: &[u8], c: &mut usize) -> u32 {
+        let mut a = [0u8; 4];
+        a.copy_from_slice(&b[*c..*c + 4]);
+        *c += 4;
+        u32::from_le_bytes(a)
+    }
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+
+    let stream_count = rd_u32(bytes, cur);
+    let last_update_t_us = rd_u64(bytes, cur);
+    let n_frames = rd_u32(bytes, cur) as usize;
+    let mut recent_frames = Vec::with_capacity(n_frames);
+    for _ in 0..n_frames {
+        let frame_seq = rd_u64(bytes, cur);
+        let stream_context_id = rd_u64(bytes, cur);
+        let t_start_us = rd_u64(bytes, cur);
+        let t_end_us = rd_u64(bytes, cur);
+        let byte_len = rd_u32(bytes, cur);
+        let byte_hash = rd_u64(bytes, cur);
+        let byte_transition_energy = rd_f64(bytes, cur);
+        let byte_distribution_skew = rd_f64(bytes, cur);
+        let framing_validity = rd_f64(bytes, cur);
+        let evidence_ref = rd_u64(bytes, cur);
+        let byte_sample_len = rd_u8(bytes, cur).min(CODE_INGRESS_BYTE_SAMPLE_CAP as u8);
+        let mut byte_sample = [0u8; CODE_INGRESS_BYTE_SAMPLE_CAP];
+        let sample_len = byte_sample_len as usize;
+        byte_sample[..sample_len].copy_from_slice(&bytes[*cur..*cur + sample_len]);
+        *cur += sample_len;
+        recent_frames.push(CodeIngressFrameTrace {
+            frame_seq,
+            stream_context_id,
+            t_start_us,
+            t_end_us,
+            byte_len,
+            byte_hash,
+            byte_transition_energy,
+            byte_distribution_skew,
+            framing_validity,
+            evidence_ref,
+            byte_sample,
+            byte_sample_len,
+        });
+    }
+
+    let n_projections = rd_u32(bytes, cur) as usize;
+    let mut projection_candidates = Vec::with_capacity(n_projections);
+    for _ in 0..n_projections {
+        projection_candidates.push(CodeProjectionCandidate {
+            projection_ref: rd_u64(bytes, cur),
+            frame_seq: rd_u64(bytes, cur),
+            decoder_kind_code: rd_u8(bytes, cur),
+            confidence: rd_f64(bytes, cur),
+            validity: rd_f64(bytes, cur),
+            error_magnitude: rd_f64(bytes, cur),
+            code_unit_count: rd_u32(bytes, cur),
+            last_update_t_us: rd_u64(bytes, cur),
+        });
+    }
+
+    let n_windows = rd_u32(bytes, cur) as usize;
+    let mut sequence_windows = Vec::with_capacity(n_windows);
+    for _ in 0..n_windows {
+        sequence_windows.push(CodeSequenceWindowTrace {
+            window_id: rd_u64(bytes, cur),
+            stream_context_id: rd_u64(bytes, cur),
+            start_frame_seq: rd_u64(bytes, cur),
+            end_frame_seq: rd_u64(bytes, cur),
+            t_start_us: rd_u64(bytes, cur),
+            t_end_us: rd_u64(bytes, cur),
+            recurrence_score: rd_f64(bytes, cur),
+            boundary_confidence: rd_f64(bytes, cur),
+            ambiguity_level: rd_f64(bytes, cur),
+        });
+    }
+
+    CodeIngressState::from_snapshot(
+        stream_count,
+        recent_frames,
+        projection_candidates,
+        sequence_windows,
+        last_update_t_us,
+    )
+}
+
+fn write_learned_bias_summary(buf: &mut Vec<u8>, s: &LearnedBiasSummary) {
+    buf.extend_from_slice(&(s.n_curves as u64).to_le_bytes());
+    buf.extend_from_slice(&(s.n_recent_events as u64).to_le_bytes());
+    buf.extend_from_slice(&s.total_events.to_le_bytes());
+    buf.extend_from_slice(&s.max_abs_delta.to_le_bytes());
+    buf.extend_from_slice(&(s.protected_axis_curves as u64).to_le_bytes());
+    buf.extend_from_slice(&(s.ordinary_axis_curves as u64).to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_learned_bias_summary(bytes: &[u8], cur: &mut usize) -> LearnedBiasSummary {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+
+    LearnedBiasSummary {
+        n_curves: rd_u64(bytes, cur) as u32,
+        n_recent_events: rd_u64(bytes, cur) as u32,
+        total_events: rd_u64(bytes, cur),
+        max_abs_delta: rd_f64(bytes, cur),
+        protected_axis_curves: rd_u64(bytes, cur) as u32,
+        ordinary_axis_curves: rd_u64(bytes, cur) as u32,
+        last_update_t_us: rd_u64(bytes, cur),
     }
 }

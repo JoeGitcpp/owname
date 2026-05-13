@@ -1,7 +1,13 @@
+use bionic_v0::adaptive_stability::AdaptiveStabilityState;
+use bionic_v0::code_ingress::CodeIngressState;
+use bionic_v0::evidence_tension::EvidenceTensionState;
 use bionic_v0::language_binding::LanguageBindingState;
+use bionic_v0::learned_bias::LearnedBiasSummary;
+use bionic_v0::object_high_layer::ObjectHighLayerState;
 use bionic_v0::snapshot::{
     SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub, SnapshotData,
-    SnapshotLastClaim, SnapshotProbeLaw, SnapshotSlot, SnapshotSpatial, SnapshotVocalMemory,
+    SnapshotFramedByteEgress, SnapshotLastClaim, SnapshotProbeLaw, SnapshotSlot, SnapshotSpatial,
+    SnapshotVocalMemory,
 };
 use bionic_v0::surface_projection::project_surface_frame;
 use bionic_v0::viewport::{
@@ -55,6 +61,11 @@ fn make_empty_snapshot() -> SnapshotData {
         vocal_organ: VocalOrganState::default(),
         vocal_imitation: VocalImitationState::default(),
         vocal_memory: SnapshotVocalMemory::default(),
+        code_ingress: CodeIngressState::default(),
+        learned_bias: LearnedBiasSummary::default(),
+        adaptive_stability: AdaptiveStabilityState::default(),
+        evidence_tension: EvidenceTensionState::default(),
+        framed_byte_egress: SnapshotFramedByteEgress::default(),
     }
 }
 
@@ -85,6 +96,7 @@ fn make_snapshot_with_one_slot(
         phot: None,
         mech: None,
         spatial: Some(spatial),
+        spatial_worldline: None,
         fusion: None,
         high_layer: None,
         attention_share,
@@ -115,6 +127,7 @@ fn make_snapshot_with_mixed_slots() -> SnapshotData {
         phot: None,
         mech: None,
         spatial: Some(active_spatial.clone()),
+        spatial_worldline: None,
         fusion: None,
         high_layer: None,
         attention_share: 0.0,
@@ -138,6 +151,7 @@ fn make_snapshot_with_mixed_slots() -> SnapshotData {
         phot: None,
         mech: None,
         spatial: Some(invalid_spatial),
+        spatial_worldline: None,
         fusion: None,
         high_layer: None,
         attention_share: 0.0,
@@ -152,6 +166,7 @@ fn make_snapshot_with_mixed_slots() -> SnapshotData {
         phot: None,
         mech: None,
         spatial: Some(active_spatial),
+        spatial_worldline: None,
         fusion: None,
         high_layer: None,
         attention_share: 0.6,
@@ -180,4 +195,147 @@ fn projection_ignores_inactive_or_invalid_slots() {
     let frame = project_surface_frame(&snap);
 
     assert_eq!(frame.objects.len(), 1);
+}
+
+fn make_snapshot_with_high_layer() -> SnapshotData {
+    let mut snap = make_empty_snapshot();
+    let spatial = SnapshotSpatial {
+        pos_x: 0.5,
+        pos_y: 0.5,
+        span_x: 0.1,
+        span_y: 0.1,
+        precision: 0.5,
+        last_update_t_us: 1000,
+        valid: true,
+    };
+    let high_layer = ObjectHighLayerState {
+        predicted_confidence: 0.8,
+        predicted_alignment: 0.7,
+        predicted_surprise: 0.3,
+        object_err: 0.4,
+        attention_bias: 0.9,
+        last_update_t_us: 1000,
+    };
+    let slot = SnapshotSlot {
+        active: true,
+        last_update_t_us: 1000,
+        source_modality: 0b0000_0001,
+        nomination_seq: 1,
+        vib: None,
+        phot: None,
+        mech: None,
+        spatial: Some(spatial),
+        spatial_worldline: None,
+        fusion: None,
+        high_layer: Some(high_layer),
+        attention_share: 0.5,
+        precision_bias: 0.5,
+    };
+    snap.slots = vec![slot];
+    snap
+}
+
+#[test]
+fn projection_includes_endogenous_hints_from_high_layer() {
+    let snap = make_snapshot_with_high_layer();
+    let frame = project_surface_frame(&snap);
+
+    assert_eq!(frame.objects.len(), 1);
+    let g = &frame.objects[0];
+    assert!((g.err_hint - 0.4).abs() < 0.001);
+    assert!((g.surprise_hint - 0.3).abs() < 0.001);
+    assert!((g.attention_bias_hint - 0.9).abs() < 0.001);
+}
+
+#[test]
+fn projection_includes_global_state() {
+    let mut snap = make_empty_snapshot();
+    let mut reasoning = GlobalReasoningState::default();
+    reasoning.global_surprise_load = 0.7;
+    reasoning.routing_focus_slot_ids = [2, -1, -1, -1];
+    snap.global_reasoning = reasoning;
+
+    let mut memory = GlobalReasoningMemorySummary::default();
+    memory.novelty_score = 0.5;
+    snap.global_reasoning_memory = memory;
+
+    let frame = project_surface_frame(&snap);
+
+    assert!((frame.global_probe_intensity - 0.5).abs() < 0.001);
+    assert!((frame.global_surprise_load - 0.7).abs() < 0.001);
+    assert_eq!(frame.focus_slot_id, 2);
+}
+
+#[test]
+fn projection_includes_relations_from_active_edges() {
+    let mut snap = make_empty_snapshot();
+
+    let spatial1 = SnapshotSpatial {
+        pos_x: 0.3,
+        pos_y: 0.3,
+        span_x: 0.1,
+        span_y: 0.1,
+        precision: 0.5,
+        last_update_t_us: 1000,
+        valid: true,
+    };
+    let slot1 = SnapshotSlot {
+        active: true,
+        last_update_t_us: 1000,
+        source_modality: 1,
+        nomination_seq: 1,
+        vib: None,
+        phot: None,
+        mech: None,
+        spatial: Some(spatial1),
+        spatial_worldline: None,
+        fusion: None,
+        high_layer: None,
+        attention_share: 0.5,
+        precision_bias: 0.5,
+    };
+
+    let spatial2 = SnapshotSpatial {
+        pos_x: 0.7,
+        pos_y: 0.7,
+        span_x: 0.1,
+        span_y: 0.1,
+        precision: 0.5,
+        last_update_t_us: 1000,
+        valid: true,
+    };
+    let slot2 = SnapshotSlot {
+        active: true,
+        last_update_t_us: 1000,
+        source_modality: 1,
+        nomination_seq: 2,
+        vib: None,
+        phot: None,
+        mech: None,
+        spatial: Some(spatial2),
+        spatial_worldline: None,
+        fusion: None,
+        high_layer: None,
+        attention_share: 0.5,
+        precision_bias: 0.5,
+    };
+
+    snap.slots = vec![slot1, slot2];
+
+    let mut relations = GlobalRelationState::default();
+    relations.edges[0].src_slot_id = 0;
+    relations.edges[0].dst_slot_id = 1;
+    relations.edges[0].active = true;
+    relations.edges[0].relation_confidence = 0.8;
+    relations.edges[0].pred.relation_surprise = 0.2;
+    relations.edges[0].pred.relation_err = 0.1;
+    snap.global_relations = relations;
+
+    let frame = project_surface_frame(&snap);
+
+    assert_eq!(frame.relations.len(), 1);
+    assert_eq!(frame.relations[0].source_slot_id, 0);
+    assert_eq!(frame.relations[0].target_slot_id, 1);
+    assert!((frame.relations[0].strength - 0.8).abs() < 0.001);
+    assert!((frame.relations[0].surprise - 0.2).abs() < 0.001);
 }

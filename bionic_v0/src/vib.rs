@@ -206,6 +206,8 @@ fn make_stream(
                 None,
             )?)
         }
-        _ => Err(format!("unsupported audio sample format: {:?}", fmt).into()),
+        _ => Err(Box::new(std::io::Error::from(
+            std::io::ErrorKind::Unsupported,
+        ))),
     }
 }

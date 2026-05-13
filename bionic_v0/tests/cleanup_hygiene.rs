@@ -18,6 +18,24 @@ fn active_test_suite_contains_no_semantic_contract_files() {
 }
 
 #[test]
+fn active_source_contains_no_orphan_intention_system() {
+    let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    assert!(
+        !std::path::Path::new(&format!("{}/intention.rs", src_root)).exists(),
+        "src/intention.rs must not exist (quarantined)"
+    );
+
+    let lib_src = std::fs::read_to_string(format!("{}/lib.rs", src_root)).expect("read lib.rs");
+    for forbidden in ["mod intention", "pub mod intention"] {
+        assert!(
+            !lib_src.contains(forbidden),
+            "lib.rs must not expose `{}` (cleanup spec 2026-04-20)",
+            forbidden
+        );
+    }
+}
+
+#[test]
 fn snapshot_schema_contains_no_semantic_or_symbolizer_sections() {
     let snap_src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/snapshot.rs"))
         .expect("read snapshot.rs");

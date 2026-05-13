@@ -1,104 +1,67 @@
-// TDD tests for the three additional action-output trigger functions.
+// Probe output pressure tests.
 //
-// Tasks 5-7 from docs/superpowers/plans/2026-04-21-body-side-write-trigger.md
-//
-// All thresholds are engineering approximations; no target/meaning/semantic
-// fields are introduced anywhere in this file.
-//
-// Run order:
-//   1. Tests written first → all fail (RED)
-//   2. Implementation lands → all pass (GREEN)
+// Pressures are folded into refresh_probe_law and emitted through the single
+// tick_probe_output_from_law path. No target/meaning fields are introduced.
 
 use bionic_v0::action_output::{ActionOutputEvent, ActionOutputFeedback, OutputChannelKind};
 use bionic_v0::viewport::Viewport;
-use bionic_v0::{RELATION_INSTABILITY_TRIGGER_THRESHOLD, SURPRISE_TRIGGER_THRESHOLD};
-
-// ─── Task 5: Surprise-driven trigger ──────────────────────────────────────────
 
 #[test]
-fn surprise_trigger_above_threshold_fires_begin() {
+fn refresh_probe_law_collapses_multiple_output_pressures_to_one_write_epoch() {
     let vp = Viewport::new();
-    // Inject high global_surprise_load directly into GlobalReasoningState.
     {
         let mut rs = vp.global_reasoning.write().unwrap();
-        rs.global_surprise_load = SURPRISE_TRIGGER_THRESHOLD + 0.1;
+        rs.global_surprise_load = 1.0;
+        rs.routing_focus_slot_ids[0] = 2;
     }
-    vp.tick_surprise_trigger(1_000_000);
+    {
+        vp.probe_law.write().unwrap().last_top_slot_id = 0;
+    }
+    {
+        let mut gr = vp.global_relations.write().unwrap();
+        gr.edges[0].active = true;
+        gr.edges[0].pred.relation_surprise = 1.0;
+    }
+
+    vp.refresh_probe_law(1_000_000);
+    vp.tick_probe_output_from_law(1_000_000);
+
     let ao = vp.read_action_output();
     assert_eq!(
         ao.n_write_epochs, 1,
-        "surprise_load above threshold must fire Begin (new write epoch)"
+        "one refresh/tick cycle must collapse simultaneous pressures into one write epoch"
     );
 }
 
 #[test]
-fn surprise_trigger_at_threshold_fires_nothing() {
+fn refresh_probe_law_surprise_pressure_starts_one_write_epoch() {
     let vp = Viewport::new();
     {
         let mut rs = vp.global_reasoning.write().unwrap();
-        rs.global_surprise_load = SURPRISE_TRIGGER_THRESHOLD; // equal — must NOT fire
+        rs.global_surprise_load = 0.8;
     }
-    vp.tick_surprise_trigger(1_000_000);
-    let ao = vp.read_action_output();
-    assert_eq!(
-        ao.n_write_epochs, 0,
-        "surprise_load exactly at threshold must not fire (strictly greater required)"
-    );
-}
 
-#[test]
-fn surprise_trigger_below_threshold_fires_nothing() {
-    let vp = Viewport::new();
-    {
-        let mut rs = vp.global_reasoning.write().unwrap();
-        rs.global_surprise_load = SURPRISE_TRIGGER_THRESHOLD * 0.5;
-    }
-    vp.tick_surprise_trigger(1_000_000);
-    let ao = vp.read_action_output();
-    assert_eq!(
-        ao.n_write_epochs, 0,
-        "low surprise_load must not fire any event"
-    );
-}
+    vp.refresh_probe_law(1_000_000);
+    vp.tick_probe_output_from_law(1_000_000);
 
-#[test]
-fn surprise_trigger_zero_load_fires_nothing() {
-    let vp = Viewport::new();
-    // GlobalReasoningState defaults to 0.0 global_surprise_load — no write needed.
-    vp.tick_surprise_trigger(1_000_000);
-    let ao = vp.read_action_output();
-    assert_eq!(ao.n_write_epochs, 0, "zero surprise_load must not fire");
-}
-
-#[test]
-fn surprise_trigger_magnitude_equals_surprise_load() {
-    let vp = Viewport::new();
-    let expected_mag = (SURPRISE_TRIGGER_THRESHOLD + 0.2).min(1.0);
-    {
-        let mut rs = vp.global_reasoning.write().unwrap();
-        rs.global_surprise_load = expected_mag;
-    }
-    vp.tick_surprise_trigger(1_000_000);
     let ao = vp.read_action_output();
     assert_eq!(ao.n_write_epochs, 1);
-    let ch = ao
-        .channels
-        .iter()
-        .find(|c| c.channel_kind == OutputChannelKind::GenericWrite)
-        .expect("channel must exist after Begin");
-    assert!(
-        (ch.current_magnitude - expected_mag).abs() < 1e-9,
-        "Begin magnitude must equal clamped surprise_load"
-    );
 }
 
-// ─── Task 6: Attention-rebalance trigger ──────────────────────────────────────
-
 #[test]
-fn attention_trigger_slot_switch_fires_adjust() {
+fn refresh_probe_law_without_pressure_fires_nothing() {
     let vp = Viewport::new();
 
-    // Create an active channel first (Adjust requires existing channel).
+    vp.refresh_probe_law(1_000_000);
+    vp.tick_probe_output_from_law(1_000_000);
+
+    let ao = vp.read_action_output();
+    assert_eq!(ao.n_write_epochs, 0);
+}
+
+#[test]
+fn refresh_probe_law_slot_switch_updates_last_slot_and_adjusts_existing_epoch() {
+    let vp = Viewport::new();
     vp.apply_action_output_event(ActionOutputEvent {
         channel_kind: OutputChannelKind::GenericWrite,
         feedback: ActionOutputFeedback::Begin,
@@ -112,10 +75,11 @@ fn attention_trigger_slot_switch_fires_adjust() {
     }
     {
         let mut rs = vp.global_reasoning.write().unwrap();
-        rs.routing_focus_slot_ids[0] = 1;
+        rs.routing_focus_slot_ids[0] = 3;
     }
 
-    vp.tick_attention_trigger(2_000_000);
+    vp.refresh_probe_law(2_000_000);
+    vp.tick_probe_output_from_law(2_000_000);
 
     let ao = vp.read_action_output();
     let ch = ao
@@ -123,43 +87,17 @@ fn attention_trigger_slot_switch_fires_adjust() {
         .iter()
         .find(|c| c.channel_kind == OutputChannelKind::GenericWrite)
         .expect("channel must still be present");
+    assert_eq!(ao.n_write_epochs, 1);
     assert!(
         ch.reinforce_count > 0,
-        "slot switch must fire Adjust (reinforce_count must increment)"
+        "slot switch pressure must adjust the existing write epoch"
     );
-}
-
-#[test]
-fn attention_trigger_updates_last_top_slot_id() {
-    let vp = Viewport::new();
-
-    // Seed an active channel.
-    vp.apply_action_output_event(ActionOutputEvent {
-        channel_kind: OutputChannelKind::GenericWrite,
-        feedback: ActionOutputFeedback::Begin,
-        magnitude: 0.4,
-        event_t_us: 1_000_000,
-    });
-
-    {
-        vp.probe_law.write().unwrap().last_top_slot_id = 2;
-    }
-    {
-        let mut rs = vp.global_reasoning.write().unwrap();
-        rs.routing_focus_slot_ids[0] = 3;
-    }
-
-    vp.tick_attention_trigger(2_000_000);
-
     let saved = vp.probe_law.read().unwrap().last_top_slot_id;
-    assert_eq!(
-        saved, 3,
-        "last_top_slot_id must be updated to current top slot after switch"
-    );
+    assert_eq!(saved, 3, "refresh must store the current top slot");
 }
 
 #[test]
-fn attention_trigger_no_slot_switch_fires_nothing() {
+fn refresh_probe_law_same_slot_does_not_create_epoch() {
     let vp = Viewport::new();
     let same_slot: i8 = 2;
     {
@@ -170,106 +108,43 @@ fn attention_trigger_no_slot_switch_fires_nothing() {
         rs.routing_focus_slot_ids[0] = same_slot;
     }
 
-    vp.tick_attention_trigger(1_000_000);
+    vp.refresh_probe_law(1_000_000);
+    vp.tick_probe_output_from_law(1_000_000);
 
     let ao = vp.read_action_output();
-    assert_eq!(
-        ao.n_write_epochs, 0,
-        "same top slot must not fire any event"
-    );
+    assert_eq!(ao.n_write_epochs, 0);
 }
 
 #[test]
-fn attention_trigger_both_minus_one_fires_nothing() {
-    let vp = Viewport::new();
-    // Default: last_top_slot_id = -1, routing_focus_slot_ids[0] = -1.
-    vp.tick_attention_trigger(1_000_000);
-    let ao = vp.read_action_output();
-    assert_eq!(
-        ao.n_write_epochs, 0,
-        "both -1 (no active slot) must not fire"
-    );
-}
-
-// ─── Task 7: Relation-instability trigger ─────────────────────────────────────
-
-#[test]
-fn relation_instability_above_threshold_fires_begin() {
+fn refresh_probe_law_relation_pressure_starts_one_write_epoch_from_active_edge() {
     let vp = Viewport::new();
     {
         let mut gr = vp.global_relations.write().unwrap();
         gr.edges[0].active = true;
-        gr.edges[0].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD + 0.1;
+        gr.edges[0].pred.relation_surprise = 0.7;
     }
-    vp.tick_relation_instability_trigger(1_000_000);
+
+    vp.refresh_probe_law(1_000_000);
+    vp.tick_probe_output_from_law(1_000_000);
+
     let ao = vp.read_action_output();
-    assert_eq!(
-        ao.n_write_epochs, 1,
-        "active edge with high relation_surprise must fire Begin"
-    );
+    assert_eq!(ao.n_write_epochs, 1);
 }
 
 #[test]
-fn relation_instability_at_threshold_fires_nothing() {
-    let vp = Viewport::new();
-    {
-        let mut gr = vp.global_relations.write().unwrap();
-        gr.edges[0].active = true;
-        gr.edges[0].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD;
-    }
-    vp.tick_relation_instability_trigger(1_000_000);
-    let ao = vp.read_action_output();
-    assert_eq!(
-        ao.n_write_epochs, 0,
-        "relation_surprise exactly at threshold must not fire (strictly greater required)"
-    );
-}
-
-#[test]
-fn relation_instability_below_threshold_fires_nothing() {
-    let vp = Viewport::new();
-    {
-        let mut gr = vp.global_relations.write().unwrap();
-        gr.edges[0].active = true;
-        gr.edges[0].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD * 0.5;
-    }
-    vp.tick_relation_instability_trigger(1_000_000);
-    let ao = vp.read_action_output();
-    assert_eq!(ao.n_write_epochs, 0, "low relation_surprise must not fire");
-}
-
-#[test]
-fn relation_instability_inactive_edge_ignored() {
+fn refresh_probe_law_inactive_relation_edge_is_ignored() {
     let vp = Viewport::new();
     {
         let mut gr = vp.global_relations.write().unwrap();
         gr.edges[0].active = false;
         gr.edges[0].pred.relation_surprise = 1.0;
     }
-    vp.tick_relation_instability_trigger(1_000_000);
-    let ao = vp.read_action_output();
-    assert_eq!(
-        ao.n_write_epochs, 0,
-        "inactive edge must not trigger even with high surprise"
-    );
-}
 
-#[test]
-fn relation_instability_max_surprise_across_edges() {
-    let vp = Viewport::new();
-    {
-        let mut gr = vp.global_relations.write().unwrap();
-        gr.edges[0].active = true;
-        gr.edges[0].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD * 0.5;
-        gr.edges[1].active = true;
-        gr.edges[1].pred.relation_surprise = RELATION_INSTABILITY_TRIGGER_THRESHOLD + 0.2;
-    }
-    vp.tick_relation_instability_trigger(1_000_000);
+    vp.refresh_probe_law(1_000_000);
+    vp.tick_probe_output_from_law(1_000_000);
+
     let ao = vp.read_action_output();
-    assert_eq!(
-        ao.n_write_epochs, 1,
-        "max surprise across active edges determines trigger; one high edge must fire"
-    );
+    assert_eq!(ao.n_write_epochs, 0);
 }
 
 // ─── Hygiene: no semantic/target/meaning fields introduced ────────────────────

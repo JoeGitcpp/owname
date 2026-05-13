@@ -22,6 +22,7 @@ use crate::clock::now_us;
 use crate::evolution_priors::BiasPriors;
 use crate::phot::SyntheticPhotSource;
 use crate::phot_camera::{CameraFault, CameraFrameProvider, MotionExtractor};
+use crate::substrate_pressure::{compute_pressure, PressureSample};
 use crate::synthetic_vib::SyntheticVibSource;
 use crate::viewport::{EventEvidence, HealthState, SlotClaim, SpatialEvidence, Viewport};
 use crate::{EVENT_NOMINATION_THRESHOLD, MOD_PHOT, MOD_VIB, PHOT_STALE_WINDOW_US, VIB_BANDS};
@@ -159,7 +160,7 @@ impl VibAdapter {
     /// still returned (faulted); the viewport records the hearing fault so
     /// the registry needs no modality-specific error path.
     pub fn new(vp: &Arc<Viewport>) -> Self {
-        Self::with_priors(vp, Arc::new(BiasPriors::default()))
+        Self::with_priors(vp, vp.birth_sensitivity())
     }
 
     pub fn with_priors(vp: &Arc<Viewport>, priors: Arc<BiasPriors>) -> Self {
@@ -213,7 +214,7 @@ impl VibAdapter {
 
         let inst_energy: f64 = bands.iter().map(|b| b * b).sum();
 
-        // v2.1 Layer 0: collect per-band err, apply disruption sensitivity
+        // Collect per-band err over the shared coordinate substrate.
         let mut per_band_err = [0.0f64; VIB_BANDS];
         for axis in 0..VIB_BANDS {
             if let Some(e) = vp.latest_err(axis) {
@@ -221,20 +222,27 @@ impl VibAdapter {
             }
         }
 
-        // Sensitivity-weighted base surprise (uses disruption_band_coef
-        // as a multiplier — for v0 single tuning knob shared with disruption
-        // signature; revisit if a separate "always-on band weight" is needed)
+        // Sensitivity-weighted base surprise.
         let mut inst_surprise = 0.0;
         for axis in 0..VIB_BANDS {
-            inst_surprise += per_band_err[axis].abs() * self.priors.disruption_band_coef[axis];
+            inst_surprise += per_band_err[axis].abs() * self.priors.band_sensitivity_at(axis);
         }
 
-        // Disruption signature check: if score crosses threshold, amplify
         let disruption_score =
             crate::evolution_priors::compute_disruption_score(&per_band_err, &self.priors);
-        if disruption_score > self.priors.disruption_err_threshold {
-            inst_surprise *= self.priors.disruption_surprise_mul;
-        }
+        let max_err = per_band_err.iter().map(|e| e.abs()).fold(0.0_f64, f64::max);
+        let min_err = per_band_err.iter().map(|e| e.abs()).fold(1.0_f64, f64::min);
+        let broadband = (disruption_score / VIB_BANDS as f64).clamp(0.0, 1.0);
+        let pressure = compute_pressure(
+            PressureSample {
+                err: max_err,
+                deviation: (max_err - min_err).abs(),
+                cross_channel: broadband,
+                ..Default::default()
+            },
+            &self.priors.pressure_weights,
+        );
+        inst_surprise *= 1.0 + 0.25 * pressure;
 
         let alpha = 0.1;
         self.smoothed_energy = (1.0 - alpha) * self.smoothed_energy + alpha * inst_energy;
@@ -456,6 +464,7 @@ pub struct RealPhotAdapter {
     extractor: MotionExtractor,
     smoothed_energy: f64,
     smoothed_surprise: f64,
+    birth_sensitivity: Arc<BiasPriors>,
     faulted: bool,
     /// Wall-clock time when the provider was first confirmed healthy (0 = not yet set).
     started_t_us: u64,
@@ -470,12 +479,20 @@ pub struct RealPhotAdapter {
 impl RealPhotAdapter {
     /// Build over any provider. The adapter takes ownership.
     pub fn new(provider: Box<dyn CameraFrameProvider>) -> Self {
+        Self::with_birth_sensitivity(provider, Arc::new(BiasPriors::default()))
+    }
+
+    pub fn with_birth_sensitivity(
+        provider: Box<dyn CameraFrameProvider>,
+        birth_sensitivity: Arc<BiasPriors>,
+    ) -> Self {
         let initial_fault = !provider.is_healthy();
         Self {
             provider,
             extractor: MotionExtractor::new(),
             smoothed_energy: 0.0,
             smoothed_surprise: 0.0,
+            birth_sensitivity,
             faulted: initial_fault,
             started_t_us: 0,
             last_frame_t_us: 0,
@@ -603,7 +620,27 @@ impl ModalityAdapter for RealPhotAdapter {
         let frame_energy = total_energy;
         let alpha = 0.2_f64;
         self.smoothed_energy = (1.0 - alpha) * self.smoothed_energy + alpha * frame_energy;
-        let inst_surprise = (frame_energy - self.smoothed_energy).abs();
+        let base_inst_surprise = (frame_energy - self.smoothed_energy).abs();
+        let max_span = regions
+            .iter()
+            .map(|r| r.span_x.max(r.span_y))
+            .fold(0.0_f64, f64::max);
+        let spread = if regions.len() > 1 {
+            (regions.len() as f64 / crate::PHOT_MAX_EVENTS_PER_FRAME as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let pressure = compute_pressure(
+            PressureSample {
+                err: base_inst_surprise,
+                deviation: spread,
+                temporal_gap: max_span,
+                cross_channel: if regions.len() > 1 { spread } else { 0.0 },
+                ..Default::default()
+            },
+            &self.birth_sensitivity.pressure_weights,
+        );
+        let inst_surprise = base_inst_surprise * (1.0 + 0.25 * pressure);
         self.smoothed_surprise = (1.0 - alpha) * self.smoothed_surprise + alpha * inst_surprise;
 
         let is_event = self.smoothed_energy > EVENT_NOMINATION_THRESHOLD;

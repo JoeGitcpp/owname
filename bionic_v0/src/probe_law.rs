@@ -8,10 +8,7 @@ use crate::action_output::{
     ActionOutputEvent, ActionOutputFeedback, ActionOutputPhase, OutputChannelKind,
 };
 use crate::viewport::Viewport;
-use crate::{
-    PROBE_HISTORY_CAP, PROBE_INTENSITY_ALPHA, PROBE_SUPPRESSION_ALPHA,
-    RELATION_INSTABILITY_TRIGGER_THRESHOLD, SURPRISE_TRIGGER_THRESHOLD,
-};
+use crate::{PROBE_HISTORY_CAP, PROBE_INTENSITY_ALPHA, PROBE_SUPPRESSION_ALPHA};
 
 /// Probe lifecycle phase. Numeric code.
 /// P0=Idle, P1=Rising, P2=Active, P3=Decaying.
@@ -58,8 +55,8 @@ pub struct ProbeLawState {
     pub history: [f64; PROBE_HISTORY_CAP],
     pub history_head: usize,
     pub history_len: usize,
-    /// Last observed top routing slot id; used by tick_attention_trigger to
-    /// detect top-slot switches. -1 = uninitialized.
+    /// Last observed top routing slot id; used during refresh to fold
+    /// slot-switch pressure into the shared probe drive. -1 = uninitialized.
     /// Ephemeral: not persisted in snapshots.
     pub last_top_slot_id: i8,
 }
@@ -81,16 +78,40 @@ impl Default for ProbeLawState {
 }
 
 impl Viewport {
-    /// Drive probe-law state from current global reasoning novelty (EMA-based).
+    /// Drive probe-law state from current pressure substrate (EMA-based).
     ///
     /// Phase transitions are ratio-based.
     pub fn refresh_probe_law(&self, now_us: u64) {
         let novelty = self.read_global_reasoning_memory_summary().novelty_score;
+        let evidence_pressure = self.read_evidence_tension().unresolved_pressure;
+        let (surprise_pressure, current_top_slot_id) = {
+            let rs = self.global_reasoning.read().unwrap();
+            (rs.global_surprise_load, rs.routing_focus_slot_ids[0])
+        };
+        let relation_pressure = {
+            let gr = self.global_relations.read().unwrap();
+            gr.edges
+                .iter()
+                .filter(|e| e.active)
+                .map(|e| e.pred.relation_surprise)
+                .fold(0.0_f64, f64::max)
+        };
 
         let mut st = self.probe_law.write().unwrap();
+        let slot_switch_pressure =
+            if st.last_top_slot_id != current_top_slot_id && current_top_slot_id >= 0 {
+                1.0
+            } else {
+                0.0
+            };
+        let drive = novelty
+            .max(evidence_pressure)
+            .max(surprise_pressure)
+            .max(relation_pressure)
+            .max(slot_switch_pressure)
+            .clamp(0.0, 1.0);
 
-        st.intensity =
-            (1.0 - PROBE_INTENSITY_ALPHA) * st.intensity + PROBE_INTENSITY_ALPHA * novelty;
+        st.intensity = (1.0 - PROBE_INTENSITY_ALPHA) * st.intensity + PROBE_INTENSITY_ALPHA * drive;
         st.suppression = (1.0 - PROBE_SUPPRESSION_ALPHA) * st.suppression
             + PROBE_SUPPRESSION_ALPHA * st.intensity;
 
@@ -161,6 +182,7 @@ impl Viewport {
         }
 
         st.last_update_t_us = now_us;
+        st.last_top_slot_id = current_top_slot_id;
     }
 
     /// Produce tick output from current probe-law state and drive action_output events.
@@ -244,7 +266,7 @@ impl Viewport {
         };
 
         if let Some(event) = maybe_event {
-            self.apply_action_output_event(event);
+            self.apply_probe_vocal_write_event(event);
         }
 
         let mut st = self.probe_law.write().unwrap();
@@ -259,75 +281,5 @@ impl Viewport {
     /// Returns a clone of the current probe-law state for snapshot and observer.
     pub fn read_probe_law(&self) -> ProbeLawState {
         self.probe_law.read().unwrap().clone()
-    }
-
-    /// Surprise-driven trigger.
-    ///
-    /// Fires a Begin event when global_surprise_load strictly exceeds
-    /// SURPRISE_TRIGGER_THRESHOLD.
-    pub fn tick_surprise_trigger(&self, now_us: u64) {
-        let surprise_load = { self.global_reasoning.read().unwrap().global_surprise_load };
-        if surprise_load <= SURPRISE_TRIGGER_THRESHOLD {
-            return;
-        }
-        self.apply_action_output_event(ActionOutputEvent {
-            channel_kind: OutputChannelKind::GenericWrite,
-            feedback: ActionOutputFeedback::Begin,
-            magnitude: surprise_load.clamp(0.0, 1.0),
-            event_t_us: now_us,
-        });
-    }
-
-    /// Attention-rebalance trigger.
-    ///
-    /// Fires an Adjust event when the top routing-focus slot id changes.
-    pub fn tick_attention_trigger(&self, now_us: u64) {
-        let current_top = { self.global_reasoning.read().unwrap().routing_focus_slot_ids[0] };
-
-        let slot_changed = {
-            let st = self.probe_law.read().unwrap();
-            st.last_top_slot_id != current_top
-        };
-
-        if !slot_changed {
-            return;
-        }
-
-        {
-            self.probe_law.write().unwrap().last_top_slot_id = current_top;
-        }
-
-        self.apply_action_output_event(ActionOutputEvent {
-            channel_kind: OutputChannelKind::GenericWrite,
-            feedback: ActionOutputFeedback::Adjust,
-            magnitude: 1.0,
-            event_t_us: now_us,
-        });
-    }
-
-    /// Relation-instability trigger.
-    ///
-    /// Fires a Begin event when the maximum relation_surprise across all
-    /// active edges strictly exceeds RELATION_INSTABILITY_TRIGGER_THRESHOLD.
-    pub fn tick_relation_instability_trigger(&self, now_us: u64) {
-        let max_surprise = {
-            let gr = self.global_relations.read().unwrap();
-            gr.edges
-                .iter()
-                .filter(|e| e.active)
-                .map(|e| e.pred.relation_surprise)
-                .fold(0.0_f64, f64::max)
-        };
-
-        if max_surprise <= RELATION_INSTABILITY_TRIGGER_THRESHOLD {
-            return;
-        }
-
-        self.apply_action_output_event(ActionOutputEvent {
-            channel_kind: OutputChannelKind::GenericWrite,
-            feedback: ActionOutputFeedback::Begin,
-            magnitude: max_surprise.clamp(0.0, 1.0),
-            event_t_us: now_us,
-        });
     }
 }

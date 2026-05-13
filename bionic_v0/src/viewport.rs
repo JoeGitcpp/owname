@@ -1,15 +1,25 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::action_consequence::ActionConsequenceState;
-use crate::action_output::ActionOutputState;
+use crate::action_output::{
+    ActionOutputEvent, ActionOutputFeedback, ActionOutputPhase, ActionOutputState,
+    OutputChannelKind,
+};
+use crate::adaptive_stability::AdaptiveStabilityState;
+use crate::code_ingress::{CodeIngressFrameInput, CodeIngressState};
+use crate::evidence_tension::EvidenceTensionState;
+use crate::evolution_priors::BiasPriors;
+use crate::framed_byte_egress::FramedByteEgressState;
 use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, LanguageBindingState};
+use crate::learned_bias::{LearnedBiasEventInput, LearnedBiasState};
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::{PhotSlotPredictor, VPC_FAMILY_PHOT};
 use crate::probe_law::ProbeLawState;
+use crate::substrate_pressure::{compute_pressure, PressureSample};
 use crate::vocal_imitation::VocalImitationState;
 use crate::vocal_memory::VocalMemoryState;
-use crate::vocal_organ::VocalOrganState;
+use crate::vocal_organ::{VocalOrganPhase, VocalOrganState};
 use crate::vocal_target::VocalTargetState;
 use crate::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
@@ -27,7 +37,8 @@ use crate::{
     PHOT_PRED_WARMUP_MIN, QUIET_ENERGY_THRESHOLD, QUIET_WINDOW_US, REASONING_HISTORY_ALPHA,
     REASONING_HISTORY_RING_CAP, REASONING_INTENSITY_THRESHOLD, REL_ALPHA, REL_PRED_ALPHA,
     REL_PRED_SURPRISE_ALPHA, REL_PRED_SURPRISE_MAX, REL_PRED_WARMUP_MIN, REPLAY_ALPHA,
-    SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS,
+    SAME_MODAL_SPATIAL_DIST, SLOT_IDLE_US, VIB_BANDS, VOCAL_TARGET_INGRESS_MIN_ENERGY,
+    VOCAL_TARGET_WRITE_COUPLED_GUARD_US,
 };
 
 /// First-class viewport health state. Stored as a numeric atomic; observers
@@ -266,6 +277,29 @@ pub struct SpatialState {
     pub valid: bool,
 }
 
+/// Slot-local spatial worldline fragment.
+///
+/// Numeric-only body substrate: it keeps the spatial estimate in shared time
+/// by recording the previous sample, local velocity, prediction, and residual
+/// error. This is not a tracker identity, scene parser, or spatial reasoner.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpatialWorldlineState {
+    pub n_updates: u32,
+    pub prev_t_us: u64,
+    pub last_update_t_us: u64,
+    pub prev_pos_x: f64,
+    pub prev_pos_y: f64,
+    pub predicted_pos_x: f64,
+    pub predicted_pos_y: f64,
+    pub velocity_x_per_s: f64,
+    pub velocity_y_per_s: f64,
+    pub err_x: f64,
+    pub err_y: f64,
+    pub err_norm: f64,
+    pub last_dt_us: u64,
+    pub valid: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5A: CrossModalFusionState — numeric-only, same-slot fusion subtree.
 //
@@ -443,6 +477,13 @@ pub struct RelationEdgeState {
     /// [0,1] EMA of `clamp01(4 * share_src * share_dst)`.
     /// Low when either slot has negligible attention.
     pub relation_confidence: f64,
+    /// [0,1] EMA of spatial closeness projected from current valid slot
+    /// spatial states. This is a relation view over shared coordinates, not a
+    /// stored relation entity.
+    pub spatial_distance_score: f64,
+    /// [0,1] EMA of normalized 2D extent overlap projected from slot spatial
+    /// states. Zero when no valid spatial subtree exists on either side.
+    pub spatial_overlap_score: f64,
     pub last_update_t_us: u64,
     /// Phase 5E: predictor output — snapshot-visible, observer-facing.
     pub pred: RelationEdgePredictionState,
@@ -651,10 +692,9 @@ pub struct GlobalReasoningMemorySummary {
     pub last_update_t_us: u64,
 }
 
-// SemanticReadinessState (Phase 5H) and SymbolizerState (Phase 6A) were
-// removed by cleanup spec 2026-04-20. They made naming / labeling a
-// resource gate over substrate and stamped objects / edges with discrete
-// concept ids — both forbidden by language-system axioms.
+// Rejected phase-5/6 naming layers were removed by cleanup spec 2026-04-20.
+// They made labeling a resource gate over substrate and stamped objects /
+// edges with discrete internal ids.
 
 /// Compact directed-pair index: src ≠ dst, both in 0..N_OBJECT_SLOTS.
 fn edge_idx(src: usize, dst: usize) -> usize {
@@ -841,6 +881,7 @@ pub struct ObjectSlot {
     pub phot: Option<BandFamilyState>,
     pub mech: Option<BandFamilyState>,
     pub spatial: Option<SpatialState>,
+    pub spatial_worldline: Option<SpatialWorldlineState>,
     /// Phase 4C: slot-local PHOT predictor. Ephemeral — not snapshot'd.
     /// Reset when the slot is cleared by sweep_slots. None until first PHOT write.
     pub phot_pred: Option<PhotSlotPredictor>,
@@ -872,6 +913,7 @@ impl ObjectSlot {
             phot: None,
             mech: None,
             spatial: None,
+            spatial_worldline: None,
             phot_pred: None,
             fusion: None,
             high_layer: None,
@@ -892,6 +934,7 @@ pub struct ObjectSlotSnapshot {
     pub phot: Option<BandFamilyState>,
     pub mech: Option<BandFamilyState>,
     pub spatial: Option<SpatialState>,
+    pub spatial_worldline: Option<SpatialWorldlineState>,
     /// Phase 5A: cross-modal fusion state snapshot. None until first refresh.
     pub fusion: Option<CrossModalFusionState>,
     /// Phase 5B: high-layer output state snapshot. None until first hl refresh.
@@ -900,6 +943,87 @@ pub struct ObjectSlotSnapshot {
     pub attention_share: f64,
     /// Phase 5C: precision bias suggestion (2 * share, clamped [0,2]).
     pub precision_bias: f64,
+}
+
+fn update_spatial_worldline(
+    prev_spatial: Option<SpatialState>,
+    prev_worldline: Option<SpatialWorldlineState>,
+    t_us: u64,
+    pos_x: f64,
+    pos_y: f64,
+) -> SpatialWorldlineState {
+    let Some(prev) = prev_spatial.filter(|sp| sp.valid) else {
+        return SpatialWorldlineState {
+            n_updates: 1,
+            prev_t_us: 0,
+            last_update_t_us: t_us,
+            prev_pos_x: pos_x,
+            prev_pos_y: pos_y,
+            predicted_pos_x: pos_x,
+            predicted_pos_y: pos_y,
+            velocity_x_per_s: 0.0,
+            velocity_y_per_s: 0.0,
+            err_x: 0.0,
+            err_y: 0.0,
+            err_norm: 0.0,
+            last_dt_us: 0,
+            valid: true,
+        };
+    };
+
+    let dt_us = t_us.saturating_sub(prev.last_update_t_us);
+    let dt_s = (dt_us as f64 / 1_000_000.0).max(1e-9);
+    let prev_vx = prev_worldline.map(|wl| wl.velocity_x_per_s).unwrap_or(0.0);
+    let prev_vy = prev_worldline.map(|wl| wl.velocity_y_per_s).unwrap_or(0.0);
+    let predicted_pos_x = (prev.pos_x + prev_vx * dt_s).clamp(0.0, 1.0);
+    let predicted_pos_y = (prev.pos_y + prev_vy * dt_s).clamp(0.0, 1.0);
+    let err_x = pos_x - predicted_pos_x;
+    let err_y = pos_y - predicted_pos_y;
+
+    SpatialWorldlineState {
+        n_updates: prev_worldline
+            .map(|wl| wl.n_updates.saturating_add(1))
+            .unwrap_or(2),
+        prev_t_us: prev.last_update_t_us,
+        last_update_t_us: t_us,
+        prev_pos_x: prev.pos_x,
+        prev_pos_y: prev.pos_y,
+        predicted_pos_x,
+        predicted_pos_y,
+        velocity_x_per_s: (pos_x - prev.pos_x) / dt_s,
+        velocity_y_per_s: (pos_y - prev.pos_y) / dt_s,
+        err_x,
+        err_y,
+        err_norm: (err_x * err_x + err_y * err_y).sqrt().min(1.0),
+        last_dt_us: dt_us,
+        valid: true,
+    }
+}
+
+fn spatial_distance_score(src: SpatialState, dst: SpatialState) -> f64 {
+    let dx = src.pos_x - dst.pos_x;
+    let dy = src.pos_y - dst.pos_y;
+    let d = (dx * dx + dy * dy).sqrt();
+    clamp01(1.0 - d / 2.0_f64.sqrt())
+}
+
+fn spatial_overlap_score(src: SpatialState, dst: SpatialState) -> f64 {
+    let src_left = src.pos_x - src.span_x * 0.5;
+    let src_right = src.pos_x + src.span_x * 0.5;
+    let src_top = src.pos_y - src.span_y * 0.5;
+    let src_bottom = src.pos_y + src.span_y * 0.5;
+
+    let dst_left = dst.pos_x - dst.span_x * 0.5;
+    let dst_right = dst.pos_x + dst.span_x * 0.5;
+    let dst_top = dst.pos_y - dst.span_y * 0.5;
+    let dst_bottom = dst.pos_y + dst.span_y * 0.5;
+
+    let overlap_w = (src_right.min(dst_right) - src_left.max(dst_left)).max(0.0);
+    let overlap_h = (src_bottom.min(dst_bottom) - src_top.max(dst_top)).max(0.0);
+    let overlap_area = overlap_w * overlap_h;
+    let src_area = (src.span_x * src.span_y).max(1e-9);
+    let dst_area = (dst.span_x * dst.span_y).max(1e-9);
+    clamp01(overlap_area / src_area.min(dst_area))
 }
 
 pub struct Viewport {
@@ -932,6 +1056,10 @@ pub struct Viewport {
     /// Phase 4C.1: wall-clock time (µs) of the most recently received camera
     /// frame. Updated on every frame; 0 = no frame ever delivered.
     pub phot_last_frame_t_us: AtomicU64,
+
+    /// Shared birth-sensitivity curves. Numeric physiology only; not a controller
+    /// and not a source of world meanings.
+    pub birth_sensitivity: Arc<BiasPriors>,
 
     pub observed: Vec<RwLock<AxisRing>>,
     pub predicted: Vec<RwLock<AxisRing>>,
@@ -978,14 +1106,17 @@ pub struct Viewport {
     /// decides whether those structures exist.
     pub language_binding: RwLock<LanguageBindingState>,
 
+    /// Code ingress trace substrate (v37). Engineering name only: byte
+    /// disturbances enter body time as numeric traces, not text meaning.
+    pub code_ingress: RwLock<CodeIngressState>,
+
     /// VPC contract trace substrate — timing / provenance only.
     /// Tracks publication and open-prediction metadata without altering
     /// observation truth or granting any ontological authority.
     pub vpc_contract: RwLock<VpcContractState>,
 
-    // semantic_readiness and symbolizer subtrees were removed by cleanup
-    // spec 2026-04-20. Substrate now terminates at global_reasoning_history
-    // / global_reasoning_memory_summary.
+    // Rejected naming subtrees were removed by cleanup spec 2026-04-20.
+    // Substrate now terminates at global reasoning history / memory summary.
     /// Action-output substrate — body's write-out side (v25).
     /// Numeric-only; no world content; no language gate.
     pub action_output: RwLock<ActionOutputState>,
@@ -994,13 +1125,36 @@ pub struct Viewport {
     pub action_output_write_seq: AtomicU64,
     /// Monotonic counter for stable window_id assignment. Parallels action_output_write_seq.
     pub action_consequence_window_seq: AtomicU64,
+    /// Monotonic counter for stable pair_seq assignment. Pair sequence is an
+    /// engineering locator for downstream cursors, not a consequence meaning.
+    pub action_consequence_pair_seq: AtomicU64,
+    /// Cursor for life-closure producer consumption of action-consequence pairs.
+    /// Engineering locator only; keeps producer ticks idempotent.
+    pub life_closure_pair_producer_cursor: AtomicU64,
+    /// Cursor for life-closure producer consumption of framed-byte returns.
+    /// Engineering locator only; keeps producer ticks idempotent.
+    pub life_closure_framed_return_producer_cursor: AtomicU64,
+    /// Cursor for evidence pressure consumption of code ingress frames.
+    /// Engineering locator only; keeps producer ticks idempotent.
+    pub code_ingress_evidence_cursor: AtomicU64,
     /// Action-consequence loop substrate (v26). Records consequence windows
     /// and explicit pairs. No target inference; no success/failure semantics.
     pub action_consequence: RwLock<ActionConsequenceState>,
 
+    /// Adaptive stability substrate. Route-local numeric/time traces for local
+    /// degradation, bypass, slow relearning, and reversible fast paths.
+    pub adaptive_stability: RwLock<AdaptiveStabilityState>,
+
+    /// Framed-byte egress substrate (v41). Body-side digital disturbance
+    /// write-out; numeric/time/byte-shape only.
+    pub framed_byte_egress: RwLock<FramedByteEgressState>,
+
     /// Probe-law substrate (v30). Intensity + suppression + phase + short history.
     /// Numeric/time-only; no target, result, or semantic fields.
     pub probe_law: RwLock<ProbeLawState>,
+
+    /// Evidence-tension substrate (v40). Numeric pressure trace only.
+    pub evidence_tension: RwLock<EvidenceTensionState>,
 
     /// Vocal substrate (v36). Short-lived external vocal target contour.
     pub vocal_target: RwLock<VocalTargetState>,
@@ -1010,6 +1164,10 @@ pub struct Viewport {
     pub vocal_imitation: RwLock<VocalImitationState>,
     /// Vocal substrate (v36). Stable vocal prototypes memory.
     pub vocal_memory: RwLock<VocalMemoryState>,
+
+    /// Learned-bias delta substrate (v37). Numeric event/curve sediment only.
+    /// Does not mutate base priors and does not accept observer interpretation.
+    pub learned_bias: RwLock<LearnedBiasState>,
 }
 
 impl Viewport {
@@ -1043,6 +1201,7 @@ impl Viewport {
             phot_health: AtomicU8::new(HEALTH_QUIET),
             phot_started_t_us: AtomicU64::new(0),
             phot_last_frame_t_us: AtomicU64::new(0),
+            birth_sensitivity: Arc::new(BiasPriors::default()),
             observed,
             predicted,
             err_stream,
@@ -1059,17 +1218,123 @@ impl Viewport {
             global_reasoning_history: RwLock::new(GlobalReasoningHistoryState::new()),
             global_reasoning_memory_summary: RwLock::new(GlobalReasoningMemorySummary::default()),
             language_binding: RwLock::new(LanguageBindingState::default()),
+            code_ingress: RwLock::new(CodeIngressState::default()),
             vpc_contract: RwLock::new(VpcContractState::default()),
             action_output: RwLock::new(ActionOutputState::default()),
             action_output_write_seq: AtomicU64::new(0),
             action_consequence_window_seq: AtomicU64::new(0),
+            action_consequence_pair_seq: AtomicU64::new(0),
+            life_closure_pair_producer_cursor: AtomicU64::new(0),
+            life_closure_framed_return_producer_cursor: AtomicU64::new(0),
+            code_ingress_evidence_cursor: AtomicU64::new(0),
             action_consequence: RwLock::new(ActionConsequenceState::default()),
+            adaptive_stability: RwLock::new(AdaptiveStabilityState::default()),
+            framed_byte_egress: RwLock::new(FramedByteEgressState::default()),
             probe_law: RwLock::new(ProbeLawState::default()),
+            evidence_tension: RwLock::new(EvidenceTensionState::default()),
             vocal_target: RwLock::new(VocalTargetState::default()),
             vocal_organ: RwLock::new(VocalOrganState::default()),
             vocal_imitation: RwLock::new(VocalImitationState::default()),
             vocal_memory: RwLock::new(VocalMemoryState::default()),
+            learned_bias: RwLock::new(LearnedBiasState::default()),
         }
+    }
+
+    pub fn with_birth_sensitivity(birth_sensitivity: Arc<BiasPriors>) -> Self {
+        let mut vp = Self::new();
+        vp.birth_sensitivity = birth_sensitivity;
+        vp
+    }
+
+    pub fn birth_sensitivity(&self) -> Arc<BiasPriors> {
+        self.birth_sensitivity.clone()
+    }
+
+    pub fn read_evidence_tension(&self) -> EvidenceTensionState {
+        self.evidence_tension.read().unwrap().clone()
+    }
+
+    pub fn tick_evidence_tension(&self, sample: PressureSample, t_us: u64) {
+        self.evidence_tension.write().unwrap().absorb_features(
+            sample,
+            &self.birth_sensitivity,
+            t_us,
+        );
+    }
+
+    pub fn tick_evidence_tension_from_pairs(&self, t_us: u64) {
+        let last_pair_cursor = self.evidence_tension.read().unwrap().last_pair_cursor;
+        let (pair_cursor, support) = {
+            let ac = self.action_consequence.read().unwrap();
+            let cursor = ac
+                .pairs
+                .iter()
+                .map(|p| p.pair_seq)
+                .max()
+                .unwrap_or(last_pair_cursor);
+            let support = ac
+                .pairs
+                .iter()
+                .filter(|p| p.pair_seq > last_pair_cursor)
+                .map(|p| p.curve_similarity)
+                .fold(0.0_f64, f64::max);
+            (cursor, support)
+        };
+        self.evidence_tension
+            .write()
+            .unwrap()
+            .absorb_return_support(support, pair_cursor, t_us);
+    }
+
+    pub fn tick_evidence_tension_from_code_ingress(&self, t_us: u64) {
+        let last_frame_seq = self.code_ingress_evidence_cursor.load(Ordering::Relaxed);
+        let Some((max_frame_seq, sample)) = ({
+            let code = self.code_ingress.read().unwrap();
+            let fresh = code
+                .recent_frames
+                .iter()
+                .filter(|frame| frame.frame_seq > last_frame_seq)
+                .collect::<Vec<_>>();
+            if fresh.is_empty() {
+                None
+            } else {
+                let max_frame_seq = fresh
+                    .iter()
+                    .map(|frame| frame.frame_seq)
+                    .max()
+                    .unwrap_or(last_frame_seq);
+                let avg_transition = fresh
+                    .iter()
+                    .map(|frame| frame.byte_transition_energy)
+                    .sum::<f64>()
+                    / fresh.len().max(1) as f64;
+                let avg_skew = fresh
+                    .iter()
+                    .map(|frame| frame.byte_distribution_skew)
+                    .sum::<f64>()
+                    / fresh.len().max(1) as f64;
+                let window = code.sequence_windows.last();
+                let recurrence = window.map(|w| w.recurrence_score).unwrap_or(0.0);
+                let ambiguity = window.map(|w| w.ambiguity_level).unwrap_or(0.0);
+                Some((
+                    max_frame_seq,
+                    PressureSample {
+                        err: avg_transition,
+                        recurrence,
+                        ambiguity,
+                        deviation: avg_skew,
+                        cross_channel: code.stream_count.saturating_sub(1) as f64,
+                        ..Default::default()
+                    },
+                ))
+            }
+        }) else {
+            return;
+        };
+
+        self.tick_evidence_tension(sample, t_us);
+        self.code_ingress_evidence_cursor
+            .store(max_frame_seq, Ordering::Relaxed);
     }
 
     // --- AmbientChannel API ---
@@ -1571,17 +1836,22 @@ impl Viewport {
         if !s.active {
             return;
         }
+        let pos_x = clamp01(pos_x);
+        let pos_y = clamp01(pos_y);
+        let next_worldline =
+            update_spatial_worldline(s.spatial, s.spatial_worldline, t_us, pos_x, pos_y);
         s.last_update_t_us = t_us;
         s.source_modality |= modality_bit;
         s.spatial = Some(SpatialState {
-            pos_x: clamp01(pos_x),
-            pos_y: clamp01(pos_y),
+            pos_x,
+            pos_y,
             span_x: clamp_span(span_x),
             span_y: clamp_span(span_y),
             precision: precision.max(0.0),
             last_update_t_us: t_us,
             valid: true,
         });
+        s.spatial_worldline = Some(next_worldline);
     }
 
     /// Mark the spatial subtree as present but currently invalid (the adapter
@@ -1598,6 +1868,11 @@ impl Viewport {
         sp.valid = false;
         sp.last_update_t_us = t_us;
         s.spatial = Some(sp);
+        if let Some(mut wl) = s.spatial_worldline {
+            wl.valid = false;
+            wl.last_update_t_us = t_us;
+            s.spatial_worldline = Some(wl);
+        }
     }
 
     pub fn read_slot(&self, slot_id: usize) -> Option<ObjectSlotSnapshot> {
@@ -1614,6 +1889,7 @@ impl Viewport {
             phot: s.phot.clone(),
             mech: s.mech.clone(),
             spatial: s.spatial,
+            spatial_worldline: s.spatial_worldline,
             fusion: s.fusion,
             high_layer: s.high_layer,
             attention_share: s.attention_share,
@@ -1625,19 +1901,91 @@ impl Viewport {
         self.language_binding.read().unwrap().clone()
     }
 
+    pub fn read_code_ingress(&self) -> CodeIngressState {
+        self.code_ingress.read().unwrap().clone()
+    }
+
+    pub fn observe_code_ingress_frame(&self, input: CodeIngressFrameInput<'_>) {
+        self.code_ingress.write().unwrap().observe_frame(input);
+    }
+
+    pub fn read_learned_bias(&self) -> LearnedBiasState {
+        self.learned_bias.read().unwrap().clone()
+    }
+
+    pub fn apply_learned_bias_event(&self, event: LearnedBiasEventInput) {
+        self.learned_bias
+            .write()
+            .unwrap()
+            .apply_event(&self.birth_sensitivity, event);
+    }
+
     pub fn push_language_binding_trace(&self, trace: BindingTrace) {
         self.language_binding.write().unwrap().push_trace(trace);
     }
 
     pub fn apply_language_binding_event(&self, event: BindingEvent) {
+        let update_pressure = self.binding_update_pressure(&event);
         self.language_binding
             .write()
             .unwrap()
-            .apply_binding_event(event);
+            .apply_binding_event_with_pressure(event, update_pressure);
     }
 
     pub fn apply_binding_event_from_adapter(&self, event: BindingEvent) {
         self.apply_language_binding_event(event);
+    }
+
+    fn binding_update_pressure(&self, event: &BindingEvent) -> f64 {
+        let (repeat, correction_density, support_history, recent_alignment) = {
+            let bindings = self.language_binding.read().unwrap();
+            if let Some(trace) = bindings.traces.iter().find(|trace| {
+                trace.pattern_kind == event.pattern_kind
+                    && trace.pattern_hash == event.pattern_hash
+                    && trace.target == event.target
+            }) {
+                let dt = event.event_t_us.saturating_sub(trace.last_update_t_us);
+                (
+                    1.0,
+                    ((trace.reinforce_count + trace.weaken_count) as f64 / 4.0).clamp(0.0, 1.0),
+                    (trace.evidence_refs.len() as f64 / 4.0).clamp(0.0, 1.0),
+                    (1.0 - dt as f64 / BINDING_MAINTENANCE_IDLE_US as f64).clamp(0.0, 1.0),
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            }
+        };
+
+        let communication_pressure = compute_pressure(
+            PressureSample {
+                recurrence: repeat,
+                alignment: recent_alignment,
+                support: support_history,
+                deviation: correction_density,
+                ..Default::default()
+            },
+            &self.birth_sensitivity.pressure_weights,
+        );
+
+        let cross_modal_slot_pressure = match event.target {
+            BindingTargetRef::ObjectSlot { slot_id } => self
+                .read_slot(slot_id as usize)
+                .and_then(|s| s.fusion)
+                .map(|f| f.cross_modal_confidence)
+                .unwrap_or(0.0),
+            _ => 0.0,
+        };
+        let cross_modal_pressure = compute_pressure(
+            PressureSample {
+                recurrence: repeat,
+                alignment: cross_modal_slot_pressure,
+                cross_channel: cross_modal_slot_pressure,
+                ..Default::default()
+            },
+            &self.birth_sensitivity.pressure_weights,
+        );
+
+        (communication_pressure + cross_modal_pressure).clamp(0.0, 2.0)
     }
 
     pub fn tick_binding_maintenance(&self, now_us: u64) {
@@ -1920,8 +2268,8 @@ impl Viewport {
     ///   * Does NOT touch claim/scoring, band families, fusion, or adapters.
     ///   * `precision_bias` / `attention_share` are never written here.
     pub fn refresh_global_relations(&self, now_us: u64) {
-        // First pass: collect per-slot data (bias, err, last_fused_t_us, share).
-        let mut slot_data = [None::<(f64, f64, u64, f64)>; N_OBJECT_SLOTS];
+        // First pass: collect per-slot data (bias, err, last_fused_t_us, share, spatial).
+        let mut slot_data = [None::<(f64, f64, u64, f64, Option<SpatialState>)>; N_OBJECT_SLOTS];
         for i in 0..N_OBJECT_SLOTS {
             let s = self.slots[i].read().unwrap();
             if s.active {
@@ -1931,6 +2279,7 @@ impl Viewport {
                         hl.object_err.min(1.0),
                         fusion.last_fused_t_us,
                         s.attention_share,
+                        s.spatial.filter(|sp| sp.valid),
                     ));
                 }
             }
@@ -1952,20 +2301,24 @@ impl Viewport {
                 edge.dst_slot_id = dst as u8;
 
                 let decay = |v: f64| v * (1.0 - REL_ALPHA);
-                let Some((s_bias, s_err, s_t, s_share)) = slot_data[src] else {
+                let Some((s_bias, s_err, s_t, s_share, s_spatial)) = slot_data[src] else {
                     edge.active = false;
                     edge.co_change_score = decay(edge.co_change_score);
                     edge.lead_lag_score = decay(edge.lead_lag_score);
                     edge.predictive_score = decay(edge.predictive_score);
                     edge.relation_confidence = decay(edge.relation_confidence);
+                    edge.spatial_distance_score = decay(edge.spatial_distance_score);
+                    edge.spatial_overlap_score = decay(edge.spatial_overlap_score);
                     continue;
                 };
-                let Some((d_bias, d_err, d_t, d_share)) = slot_data[dst] else {
+                let Some((d_bias, d_err, d_t, d_share, d_spatial)) = slot_data[dst] else {
                     edge.active = false;
                     edge.co_change_score = decay(edge.co_change_score);
                     edge.lead_lag_score = decay(edge.lead_lag_score);
                     edge.predictive_score = decay(edge.predictive_score);
                     edge.relation_confidence = decay(edge.relation_confidence);
+                    edge.spatial_distance_score = decay(edge.spatial_distance_score);
+                    edge.spatial_overlap_score = decay(edge.spatial_overlap_score);
                     continue;
                 };
 
@@ -1975,6 +2328,8 @@ impl Viewport {
                     edge.lead_lag_score = decay(edge.lead_lag_score);
                     edge.predictive_score = decay(edge.predictive_score);
                     edge.relation_confidence = decay(edge.relation_confidence);
+                    edge.spatial_distance_score = decay(edge.spatial_distance_score);
+                    edge.spatial_overlap_score = decay(edge.spatial_overlap_score);
                     continue;
                 }
 
@@ -2000,6 +2355,18 @@ impl Viewport {
                 let obs_conf = (4.0 * s_share * d_share).clamp(0.0, 1.0);
                 edge.relation_confidence =
                     REL_ALPHA * obs_conf + (1.0 - REL_ALPHA) * edge.relation_confidence;
+
+                if let (Some(src_sp), Some(dst_sp)) = (s_spatial, d_spatial) {
+                    let obs_distance = spatial_distance_score(src_sp, dst_sp);
+                    let obs_overlap = spatial_overlap_score(src_sp, dst_sp);
+                    edge.spatial_distance_score =
+                        REL_ALPHA * obs_distance + (1.0 - REL_ALPHA) * edge.spatial_distance_score;
+                    edge.spatial_overlap_score =
+                        REL_ALPHA * obs_overlap + (1.0 - REL_ALPHA) * edge.spatial_overlap_score;
+                } else {
+                    edge.spatial_distance_score = decay(edge.spatial_distance_score);
+                    edge.spatial_overlap_score = decay(edge.spatial_overlap_score);
+                }
 
                 edge.last_update_t_us = now_us;
             }
@@ -2573,8 +2940,7 @@ impl Viewport {
         )
     }
 
-    // refresh_semantic_readiness / read_semantic_readiness /
-    // refresh_symbolizer / read_symbolizer were removed by cleanup spec
+    // Rejected naming-layer API calls were removed by cleanup spec
     // 2026-04-20. They are not part of the substrate API.
 
     pub fn push_observation(&self, axis: usize, t_us: u64, value: f64) {
@@ -2861,6 +3227,76 @@ impl Viewport {
     // --- Vocal Substrate API (Phase 1, spec 2026-04-23) ---
     // Numeric-only; no text, no TTS, no token ontology.
 
+    pub fn tick_vocal_target_from_vib(&self, now_us: u64) {
+        let ambient = self.read_ambient();
+        let vib = ambient.vib;
+        if !vib.candidate_flag || vib.event_energy < VOCAL_TARGET_INGRESS_MIN_ENERGY {
+            return;
+        }
+        if now_us.saturating_sub(vib.last_event_t_us) > QUIET_WINDOW_US {
+            return;
+        }
+        if self.has_recent_write_coupled_vib_caution(now_us) {
+            return;
+        }
+
+        let mut bands = [0.0_f64; VIB_BANDS];
+        for (axis, band) in bands.iter_mut().enumerate() {
+            let Some(sample) = self.latest_observation(axis) else {
+                return;
+            };
+            if !sample.valid || now_us.saturating_sub(sample.t_us) > QUIET_WINDOW_US {
+                return;
+            }
+            *band = sample.value.abs();
+        }
+
+        let band_sum = bands.iter().sum::<f64>();
+        if band_sum <= f64::EPSILON {
+            return;
+        }
+
+        let denom = (VIB_BANDS.saturating_sub(1).max(1)) as f64;
+        let spectral_center = bands
+            .iter()
+            .enumerate()
+            .map(|(axis, value)| *value * (axis as f64 / denom))
+            .sum::<f64>()
+            / band_sum;
+        let high_band_sum = bands
+            .iter()
+            .enumerate()
+            .filter(|(axis, _)| *axis >= VIB_BANDS / 2)
+            .map(|(_, value)| *value)
+            .sum::<f64>();
+        let resonance = high_band_sum / band_sum;
+        let envelope = (vib.surprise.abs()
+            / (vib.event_energy.abs() + vib.surprise.abs() + f64::EPSILON))
+            .clamp(0.0, 1.0);
+
+        self.observe_vocal_target(
+            now_us,
+            vib.event_energy.clamp(0.0, 1.0),
+            spectral_center.clamp(0.0, 1.0),
+            resonance.clamp(0.0, 1.0),
+            envelope,
+        );
+    }
+
+    fn has_recent_write_coupled_vib_caution(&self, now_us: u64) -> bool {
+        let out = self.action_output.read().unwrap();
+        if out.channels.iter().any(|ch| {
+            ch.phase != ActionOutputPhase::Idle
+                && now_us.saturating_sub(ch.last_update_t_us) <= VOCAL_TARGET_WRITE_COUPLED_GUARD_US
+        }) {
+            return true;
+        }
+        out.write_epoch_history
+            .iter()
+            .rev()
+            .any(|ep| now_us.saturating_sub(ep.start_t_us) <= VOCAL_TARGET_WRITE_COUPLED_GUARD_US)
+    }
+
     pub fn observe_vocal_target(
         &self,
         now_us: u64,
@@ -2877,9 +3313,105 @@ impl Viewport {
         *self.vocal_target.read().unwrap()
     }
 
+    pub fn apply_vocal_write_event(&self, event: ActionOutputEvent, pitch: f64, resonance: f64) {
+        let magnitude = event.magnitude.clamp(0.0, 1.0);
+        let mut action_magnitude = magnitude;
+        let event = ActionOutputEvent { magnitude, ..event };
+        match event.feedback {
+            ActionOutputFeedback::Begin => {
+                let mut organ = self.vocal_organ.write().unwrap();
+                organ.begin_voicing(event.event_t_us, magnitude, pitch, resonance);
+            }
+            ActionOutputFeedback::Adjust => {
+                let mut organ = self.vocal_organ.write().unwrap();
+                if organ.phase == VocalOrganPhase::Active {
+                    organ.adjust_toward(event.event_t_us, magnitude, pitch, resonance);
+                    action_magnitude = organ.breath_drive;
+                }
+            }
+            ActionOutputFeedback::Decay => {
+                let mut organ = self.vocal_organ.write().unwrap();
+                if organ.phase == VocalOrganPhase::Active {
+                    organ.breath_drive = (organ.breath_drive - magnitude).max(0.0);
+                    organ.last_update_t_us = event.event_t_us;
+                    if organ.breath_drive < 0.01 {
+                        organ.breath_drive = 0.0;
+                        organ.phase = VocalOrganPhase::Idle;
+                    }
+                }
+            }
+            ActionOutputFeedback::Stop => {
+                let mut organ = self.vocal_organ.write().unwrap();
+                organ.breath_drive = 0.0;
+                organ.phase = VocalOrganPhase::Idle;
+                organ.last_update_t_us = event.event_t_us;
+            }
+        }
+        self.apply_action_output_event(ActionOutputEvent {
+            magnitude: action_magnitude,
+            ..event
+        });
+    }
+
+    pub fn apply_probe_vocal_write_event(&self, event: ActionOutputEvent) {
+        let event = ActionOutputEvent {
+            magnitude: event.magnitude.clamp(0.0, 1.0),
+            ..event
+        };
+        if event.feedback == ActionOutputFeedback::Adjust {
+            {
+                let mut organ = self.vocal_organ.write().unwrap();
+                if organ.phase == VocalOrganPhase::Active {
+                    organ.breath_drive = event.magnitude;
+                    organ.last_update_t_us = event.event_t_us;
+                }
+            }
+            self.apply_action_output_event(event);
+            return;
+        }
+
+        let (pitch, resonance) = {
+            let organ = self.vocal_organ.read().unwrap();
+            if organ.phase == VocalOrganPhase::Active {
+                (organ.pitch_tension, organ.resonance_position)
+            } else {
+                let target = self.vocal_target.read().unwrap();
+                if target.active_energy >= 0.01
+                    && event.event_t_us.saturating_sub(target.last_update_t_us) <= QUIET_WINDOW_US
+                {
+                    (target.pitch_hint, target.resonance_hint)
+                } else {
+                    (0.5, 0.5)
+                }
+            }
+        };
+        self.apply_vocal_write_event(event, pitch, resonance);
+    }
+
     pub fn begin_voicing(&self, now_us: u64, breath: f64, pitch: f64, resonance: f64) {
-        let mut vo = self.vocal_organ.write().unwrap();
-        vo.begin_voicing(now_us, breath, pitch, resonance);
+        self.apply_vocal_write_event(
+            ActionOutputEvent {
+                channel_kind: OutputChannelKind::GenericWrite,
+                feedback: ActionOutputFeedback::Begin,
+                magnitude: breath,
+                event_t_us: now_us,
+            },
+            pitch,
+            resonance,
+        );
+    }
+
+    pub fn adjust_voicing(&self, now_us: u64, breath: f64, pitch: f64, resonance: f64) {
+        self.apply_vocal_write_event(
+            ActionOutputEvent {
+                channel_kind: OutputChannelKind::GenericWrite,
+                feedback: ActionOutputFeedback::Adjust,
+                magnitude: breath,
+                event_t_us: now_us,
+            },
+            pitch,
+            resonance,
+        );
     }
 
     pub fn read_vocal_organ(&self) -> VocalOrganState {
@@ -2903,8 +3435,30 @@ impl Viewport {
         let target = self.read_vocal_target();
 
         if target.active_energy < 0.01 {
-            let mut organ = self.vocal_organ.write().unwrap();
-            organ.tick_decay(now_us);
+            let (was_active, is_idle, decay_magnitude) = {
+                let mut organ = self.vocal_organ.write().unwrap();
+                let was_active = organ.phase == crate::vocal_organ::VocalOrganPhase::Active;
+                let prev_breath = organ.breath_drive;
+                organ.tick_decay(now_us);
+                (
+                    was_active,
+                    organ.phase == crate::vocal_organ::VocalOrganPhase::Idle,
+                    (prev_breath - organ.breath_drive).max(0.0),
+                )
+            };
+            if was_active {
+                let feedback = if is_idle {
+                    ActionOutputFeedback::Stop
+                } else {
+                    ActionOutputFeedback::Decay
+                };
+                self.apply_action_output_event(ActionOutputEvent {
+                    channel_kind: OutputChannelKind::GenericWrite,
+                    feedback,
+                    magnitude: decay_magnitude,
+                    event_t_us: now_us,
+                });
+            }
             return;
         }
 
@@ -2919,23 +3473,20 @@ impl Viewport {
             imit.observe_gap(now_us, total_gap, organ.breath_drive);
         }
 
-        {
-            let mut organ = self.vocal_organ.write().unwrap();
-            if organ.phase == crate::vocal_organ::VocalOrganPhase::Idle {
-                organ.begin_voicing(
-                    now_us,
-                    target.active_energy * 0.5,
-                    target.pitch_hint,
-                    target.resonance_hint,
-                );
-            } else {
-                organ.adjust_toward(
-                    now_us,
-                    target.active_energy * 0.5,
-                    target.pitch_hint,
-                    target.resonance_hint,
-                );
-            }
+        if organ.phase == crate::vocal_organ::VocalOrganPhase::Idle {
+            self.begin_voicing(
+                now_us,
+                target.active_energy * 0.5,
+                target.pitch_hint,
+                target.resonance_hint,
+            );
+        } else {
+            self.adjust_voicing(
+                now_us,
+                target.active_energy * 0.5,
+                target.pitch_hint,
+                target.resonance_hint,
+            );
         }
 
         let imit = self.read_vocal_imitation();

@@ -10,9 +10,17 @@ fn frame_at(cx: f64, cy: f64, slot_id: usize) -> SurfaceFrame {
         radius_y: 0.1,
         attention_share: 0.5,
         stability_hint: 0.8,
+        err_hint: 0.1,
+        surprise_hint: 0.1,
+        attention_bias_hint: 0.5,
+        action_intensity_hint: 0.0,
     };
     SurfaceFrame {
         objects: vec![glyph],
+        relations: Vec::new(),
+        global_probe_intensity: 0.0,
+        global_surprise_load: 0.0,
+        focus_slot_id: -1,
     }
 }
 
@@ -52,6 +60,10 @@ fn history_tracks_stable_slot_identity_when_projection_order_changes() {
                 radius_y: 0.1,
                 attention_share: 0.5,
                 stability_hint: 0.8,
+                err_hint: 0.1,
+                surprise_hint: 0.1,
+                attention_bias_hint: 0.5,
+                action_intensity_hint: 0.0,
             },
             SurfaceObjectGlyph {
                 slot_id: 9,
@@ -61,8 +73,16 @@ fn history_tracks_stable_slot_identity_when_projection_order_changes() {
                 radius_y: 0.1,
                 attention_share: 0.5,
                 stability_hint: 0.8,
+                err_hint: 0.1,
+                surprise_hint: 0.1,
+                attention_bias_hint: 0.5,
+                action_intensity_hint: 0.0,
             },
         ],
+        relations: Vec::new(),
+        global_probe_intensity: 0.0,
+        global_surprise_load: 0.0,
+        focus_slot_id: -1,
     });
 
     hist.update(&SurfaceFrame {
@@ -75,6 +95,10 @@ fn history_tracks_stable_slot_identity_when_projection_order_changes() {
                 radius_y: 0.1,
                 attention_share: 0.5,
                 stability_hint: 0.8,
+                err_hint: 0.1,
+                surprise_hint: 0.1,
+                attention_bias_hint: 0.5,
+                action_intensity_hint: 0.0,
             },
             SurfaceObjectGlyph {
                 slot_id: 7,
@@ -84,8 +108,16 @@ fn history_tracks_stable_slot_identity_when_projection_order_changes() {
                 radius_y: 0.1,
                 attention_share: 0.5,
                 stability_hint: 0.8,
+                err_hint: 0.1,
+                surprise_hint: 0.1,
+                attention_bias_hint: 0.5,
+                action_intensity_hint: 0.0,
             },
         ],
+        relations: Vec::new(),
+        global_probe_intensity: 0.0,
+        global_surprise_load: 0.0,
+        focus_slot_id: -1,
     });
 
     let trails = hist.render_trails();
@@ -106,6 +138,10 @@ fn history_drops_stale_slots_after_consecutive_missing_frames() {
     for _ in 0..4 {
         hist.update(&SurfaceFrame {
             objects: Vec::new(),
+            relations: Vec::new(),
+            global_probe_intensity: 0.0,
+            global_surprise_load: 0.0,
+            focus_slot_id: -1,
         });
     }
 

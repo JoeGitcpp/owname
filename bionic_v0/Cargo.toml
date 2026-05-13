@@ -18,6 +18,26 @@ path = "src/bin/observer.rs"
 name = "observer_surface"
 path = "src/bin/observer_surface.rs"
 
+[[bin]]
+name = "curriculum_report"
+path = "src/bin/curriculum_report.rs"
+
+[[bin]]
+name = "byte_loopback"
+path = "src/bin/byte_loopback.rs"
+
+[[bin]]
+name = "training_curve"
+path = "src/bin/training_curve.rs"
+
+[[bin]]
+name = "post_effect_probe"
+path = "src/bin/post_effect_probe.rs"
+
+[[bin]]
+name = "learned_bias_probe"
+path = "src/bin/learned_bias_probe.rs"
+
 [dependencies]
 cpal = "0.15"
 nokhwa = { version = "0.10", features = ["input-avfoundation"] }

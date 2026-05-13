@@ -1,76 +1,125 @@
-# bionic_v0 全局架构版图（2026-04-21）
+# bionic_v0 Global Architecture Map
 
-> 状态：工作基线（用于对齐“已落地 / 未落地 / 优先级 / 缺口”）
+> Status: updated control review baseline on 2026-05-06 after integrating the
+> completed worktrees into `replace-by-filament`.
 
-## 0. 边界说明
+## 0. Boundary Notes
 
-本文理论描述尽量只使用：对象、关系、时间结构、共享视口、外部模式、写出历元、后果窗口、快照、观察口。
+This document is an external engineering map. File names such as
+`language_binding.rs`, `code_ingress.rs`, `framed_byte_egress.rs`,
+`evidence_tension.rs`, and `adaptive_stability.rs` are engineering indices, not
+internal ontology units.
 
-本文出现的工程文件名（如 `language_binding.rs`、`action_output.rs`、`viewport.rs`）全部是**工程索引名，不是内部本体**。
+High-risk words such as `semantic`, `concept`, `token`, `label`, `name`,
+`identity`, `owner`, and `personality` appear here only to describe forbidden
+drift or external review categories. They are not admissible body-side facts.
+The body remains numeric, temporal, curve-based, and observer-separated.
 
-## 1. 当前总图（按层级）
+## 1. Integrated Flow
 
 ```text
-外部模式(感知)
-  -> 共享视口(对象 / 关系 / 时间结构)
-  -> 快照
-  -> 观察口
+ordinary ingress
+  -> ambient / slot claim / object slots / fusion / spatial
+  -> predictor family / relation predictor / reasoning / reasoning history
+  -> probe law / evidence tension / adaptive stability
+  -> action output
+       -> vocal organ / vocal adapter
+       -> framed byte egress
+  -> ordinary ingress consequence windows
+  -> action-consequence pairs
+  -> language binding events only when pair evidence is strong enough
+  -> snapshot v45
+  -> observer
 
-共享视口
-  -> 写出历元
-  -> 后果窗口
-  -> 快照
-  -> 观察口
+computer-native byte ingress
+  -> code ingress trace substrate
+  -> snapshot / observer
 
-外部模式(符号/声音)
-  -> 绑定轨迹(工程索引: language_binding.rs)
-  -> 共享视口
+birth sensitivity and learned bias
+  -> numeric update-pressure curves
+  -> learned delta summary
+  -> snapshot / observer
 ```
 
-## 2. 已落地层级
+Observer output is downstream only. It must not request body fields that would
+turn observations into body ontology.
 
-| 层级 | 当前状态 | 工程落点（均为工程索引名，不是内部本体） | 证据 |
+## 2. Current Completion Matrix
+
+| Area | Status | Engineering landing | Evidence |
 |---|---|---|---|
-| 外部模式 -> 共享视口（对象/关系/时间结构） | 已落地（主循环在跑） | `adapter.rs`、`viewport.rs`、`predictor.rs`、`phot_predictor.rs`、`object_high_layer.rs`、`bin/body.rs` | 主循环包含全局刷新链；适配器持续写入共享视口 |
-| 共享视口 -> 快照 -> 观察口 | 已落地 | `snapshot.rs`、`bin/observer.rs` | 快照序列化和观察口渲染稳定存在 |
-| 写出历元（结构本身） | 已落地（结构层） | `action_output.rs`、`viewport.rs`、`snapshot.rs`、`observer.rs` | `action_output_substrate` 测试通过 |
-| 后果窗口（结构本身） | 已落地（结构层） | `action_consequence.rs`、`viewport.rs`、`snapshot.rs`、`observer.rs` | `action_consequence_loop` 测试通过 |
-| 清理边界（去除被拒绝层） | 已落地 | `cleanup_hygiene.rs`、`ordered_global_refresh.rs` | 相关防回退测试通过 |
+| Cleanup boundary | Complete | `body.rs`, `viewport.rs`, `snapshot.rs`, `observer.rs`, cleanup tests | rejected semantic-readiness / symbolizer / concept-id path remains absent |
+| Perception ingress | Complete for current v0 | `adapter.rs`, `vib.rs`, `phot_camera.rs`, `phot_predictor.rs` | VIB/PHOT adapter, health, stale, multi-event, and predictor tests pass |
+| Object / relation / reasoning substrate | Complete for current v0 | `viewport.rs`, `object_high_layer.rs`, `surface_*`, relation and reasoning state | object, relation, surface, reasoning, and history tests pass |
+| VPC timing and error contract | Complete | `vpc.rs`, `snapshot.rs`, observer trace | VPC contract tests pass |
+| Action output | Complete as substrate | `action_output.rs`, `probe_law.rs`, `viewport.rs` | action-output, probe, and live preflight tests pass |
+| Action consequence | Complete as substrate | `action_consequence.rs`, snapshot / observer | 45 action-consequence tests pass |
+| Vocal runtime bridge | Complete as body-side execution path | `vocal_target.rs`, `vocal_organ.rs`, `vocal_adapter.rs`, `vocal_imitation.rs`, `vocal_memory.rs`, `body.rs` | vocal runtime and body contract tests pass |
+| Live I/O preflight | Complete as deterministic substrate proof | action output + vocal + ingress + consequence + observer | live preflight tests pass; physical hardware availability remains an environment finding |
+| Code ingress | Complete as byte disturbance ingress | `code_ingress.rs`, `code_ingress_adapter.rs`, snapshot / observer | code ingress tests pass |
+| Framed byte egress | Complete as minimal digital write-out substrate | `framed_byte_egress.rs`, action output, consequence, snapshot / observer | framed-byte egress tests pass |
+| Evidence pressure | Contracted to generic pressure substrate | `substrate_pressure.rs`, `evidence_tension.rs`, `probe_law.rs` | contraction and evidence-tension tests pass |
+| Learned bias persistence | Contracted to generic pressure-axis sediment only | `learned_bias.rs`, snapshot summary | learned-bias and contraction tests pass |
+| Adaptive route dynamics | Contracted to numeric route traces only | `adaptive_stability.rs`, snapshot / observer | adaptive-stability and contraction tests pass |
+| Pattern binding events | Complete as pair-evidence binding event path | `language_binding.rs`, action-consequence pair evidence | language binding runtime tests pass |
+| Snapshot / observer | Complete for integrated v45 layout | `snapshot.rs`, `observer.rs` | full cargo test passes |
 
-## 3. 半落地 / 未落地层级
+## 3. Relationship Notes
 
-| 层级 | 状态 | 说明 |
-|---|---|---|
-| 共享视口 -> 写出历元（活态触发） | 未落地 | `src/` 内没有任何运行态调用 `apply_action_output_event(...)`，写出历元在真实运行中缺少触发源 |
-| 写出历元 -> 后果窗口（活态配对闭环） | 半落地 | 自动配对函数存在并被调用，但上游写出历元缺少主循环触发，闭环仍不完整 |
-| 外部模式 -> 绑定轨迹 -> 共享视口（运行态） | 半落地 | 绑定轨迹结构存在，但运行链中缺少调用 `apply_language_binding_event(...)` |
-| 后果窗口保留策略（按开闭与引用优先淘汰） | 部分未落地 | 当前实现主要按 Vec 头部淘汰；与冻结规范中“优先级淘汰顺序”仍有差距 |
-| 外部模式短时保持/比较/逼近（后续法则层） | 未落地 | 冻结规范已定义方向，但工程中尚无对应运行层 |
+`viewport` is still the shared state substrate. New systems were integrated as
+subtrees under this shared substrate rather than point-to-point pipelines.
 
-## 4. 优先级顺序（建议执行）
+`action_output` is the common write epoch ledger. Vocal output and framed byte
+egress both create or adjust write epochs before their consequences are allowed
+to pair back through ordinary ingress.
 
-1. P0：补齐“共享视口 -> 写出历元”的真实触发路径（先让写出历元在主循环稳定出现）。
-2. P1：在真实运行中完成“写出历元 -> 后果窗口”闭环验证（不是只在测试里成立）。
-3. P2：把“外部模式 -> 绑定轨迹”从测试路径推进到运行路径，但保持绑定轨迹仅作绑定，不改写对象/关系本体。
-4. P3：对齐后果窗口历史保留策略与冻结规范（淘汰顺序、引用完整性边界）。
-5. P4：再进入“外部模式短时保持/比较/逼近”等后续层。
+`action_consequence` is the common return structure. It records windows and
+pairs, not goals, success labels, failure labels, source ownership, or identity.
 
-## 5. 当前已知缺口（可直接跟踪）
+`probe_law` now reads both reasoning novelty and unresolved evidence pressure.
+It remains a numeric pressure/phase substrate, not a curiosity module and not a
+text reasoning layer.
 
-1. 写出历元无运行态触发源：`rg` 结果显示 `src/` 中 `apply_action_output_event(...)` 仅定义未被调用。
-2. 绑定轨迹无运行态入口：`apply_language_binding_event(...)` 目前只在测试中出现。
-3. `probe` 线路尚未进仓：`src/` 内不存在 `tick_probe_output` / `tick_consequence_ingress` / `PROBE_*` 常量。
-4. 后果窗口目前主要由 PHOT 路径推动，跨更多外部模式的统一入口尚未完成。
-5. 后果窗口淘汰策略与冻结规范存在实现差距（当前以工程上界为主，优先级淘汰细则未完全落地）。
+`evidence_tension` is downstream of generic pressure samples and upstream of
+probe pressure. It records unresolved pressure and closure support only.
 
-## 6. 当前基线测试（2026-04-21）
+`language_binding` is downstream of pair evidence. It can form, reinforce, or
+weaken binding traces, but it does not decide object existence and does not
+introduce a naming readiness gate.
 
-已执行并通过：
-- `action_consequence_loop`（45 passed）
-- `action_output_substrate`（9 passed）
-- `language_binding`（7 passed）
-- `cleanup_hygiene`（3 passed）
-- `ordered_global_refresh`（5 passed）
-- `body_no_human_output`（1 passed）
+`learned_bias` changes only generic pressure-axis deltas and summary traces.
+Base birth sensitivity remains separate from learned sediment.
 
-这组结果说明：结构底座已经可测成立；当前主要缺口在“运行态接通顺序”，而不是“结构是否存在”。
+`adaptive_stability` is route-local. It can raise numeric degradation,
+recovery, and compression pressures for a route without rewriting neighboring
+routes or restoring an artificial template.
+
+`snapshot` v45 appends the newer substrates after earlier sections. The current
+layout keeps the already-integrated v37 code ingress, v38 learned-bias summary,
+v39 adaptive stability, v40 evidence tension, v41 framed-byte egress, v42
+action-consequence pair sequence order, and v43 long-run cumulative closure
+counters. v44 records write epoch start magnitude for closed action-consequence
+evidence. v45 splits cumulative pair counts by consequence-return modality so
+long-run byte-closure training can be read without conflating unrelated return
+paths.
+
+## 4. Remaining Hardening Items
+
+1. Live hardware feedback is still environment-dependent. Deterministic tests
+   prove the substrate path; actual microphone/camera/audio device evidence must
+   be reported as observer-side capability, not body-side semantic failure.
+2. Framed byte egress has a body-side framed-byte trace and return loop, but no
+   external carrier policy beyond the minimal substrate contract.
+3. Snapshot compatibility is intentionally current-version only. If long-lived
+   snapshot archives matter, add explicit migration readers rather than
+   weakening the body schema.
+
+## 5. Verification Baseline
+
+Fresh verification on 2026-05-06:
+
+```bash
+cargo test --manifest-path bionic_v0/Cargo.toml
+```
+
+Result: all unit tests, integration tests, and doc tests passed.
