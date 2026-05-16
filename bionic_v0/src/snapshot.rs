@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::action_consequence::ActionConsequenceState;
 use crate::action_output::ActionOutputState;
+use crate::active_reasoning::{ActiveReasoningGapState, ActiveReasoningGapTrace};
 use crate::adaptive_stability::{AdaptiveRouteTrace, AdaptiveStabilityState};
 use crate::code_ingress::{
     CodeIngressFrameTrace, CodeIngressState, CodeProjectionCandidate, CodeSequenceWindowTrace,
@@ -209,6 +210,9 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
 
     // v41: framed-byte egress substrate.
     write_framed_byte_egress(&mut buf, &vp.read_framed_byte_egress());
+
+    // v46: active reasoning gap observer trace.
+    write_active_reasoning_gap(&mut buf, &vp.read_active_reasoning_gap());
 
     // Rejected v21/v22 naming sections were removed by cleanup spec
     // 2026-04-20. Snapshot terminates at the reasoning memory summary
@@ -454,6 +458,8 @@ pub struct SnapshotData {
     pub evidence_tension: EvidenceTensionState,
     // v41: framed-byte egress substrate.
     pub framed_byte_egress: SnapshotFramedByteEgress,
+    // v46: active reasoning gap observer trace.
+    pub active_reasoning_gap: ActiveReasoningGapState,
 }
 
 impl SnapshotData {
@@ -902,6 +908,12 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         SnapshotFramedByteEgress::default()
     };
 
+    let active_reasoning_gap = if version >= 46 {
+        read_active_reasoning_gap_snapshot(&bytes, &mut cur)
+    } else {
+        ActiveReasoningGapState::default()
+    };
+
     // Rejected v21/v22 naming sections removed by cleanup spec 2026-04-20.
     // Older snapshot files containing those bytes are no longer readable;
     // v23+ omits them entirely.
@@ -953,6 +965,7 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         adaptive_stability,
         evidence_tension,
         framed_byte_egress,
+        active_reasoning_gap,
     })
 }
 
@@ -2473,6 +2486,93 @@ fn read_framed_byte_egress_snapshot(bytes: &[u8], cur: &mut usize) -> SnapshotFr
         correction_deviation: rd_f64(bytes, cur),
         correction_count: rd_u64(bytes, cur) as u32,
         last_update_t_us: rd_u64(bytes, cur),
+    }
+}
+
+// ─── v46: active reasoning gap observer trace ────────────────────────────────
+
+fn write_active_reasoning_gap(buf: &mut Vec<u8>, s: &ActiveReasoningGapState) {
+    buf.extend_from_slice(&s.gap_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.drive_score.to_le_bytes());
+    buf.extend_from_slice(&s.persistence_score.to_le_bytes());
+    buf.extend_from_slice(&s.closure_score.to_le_bytes());
+    buf.extend_from_slice(&s.reentry_score.to_le_bytes());
+    buf.extend_from_slice(&(s.focus_slot_id as i64).to_le_bytes());
+    buf.extend_from_slice(&(s.focus_edge_id as i64).to_le_bytes());
+    buf.extend_from_slice(&(s.active_cycles as u64).to_le_bytes());
+    buf.extend_from_slice(&s.last_pair_seq.to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+    buf.extend_from_slice(&(s.history_len as u64).to_le_bytes());
+    buf.extend_from_slice(&(s.history_head as u64).to_le_bytes());
+    buf.extend_from_slice(&s.total_samples.to_le_bytes());
+    for trace in &s.history {
+        buf.extend_from_slice(&trace.t_us.to_le_bytes());
+        buf.extend_from_slice(&trace.gap_pressure.to_le_bytes());
+        buf.extend_from_slice(&trace.closure_score.to_le_bytes());
+        buf.extend_from_slice(&trace.reentry_score.to_le_bytes());
+        buf.extend_from_slice(&(trace.active_cycles as u64).to_le_bytes());
+    }
+}
+
+fn read_active_reasoning_gap_snapshot(bytes: &[u8], cur: &mut usize) -> ActiveReasoningGapState {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_i64(b: &[u8], c: &mut usize) -> i64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        i64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+
+    let gap_pressure = rd_f64(bytes, cur);
+    let drive_score = rd_f64(bytes, cur);
+    let persistence_score = rd_f64(bytes, cur);
+    let closure_score = rd_f64(bytes, cur);
+    let reentry_score = rd_f64(bytes, cur);
+    let focus_slot_id = rd_i64(bytes, cur) as i8;
+    let focus_edge_id = rd_i64(bytes, cur) as i16;
+    let active_cycles = rd_u64(bytes, cur) as u32;
+    let last_pair_seq = rd_u64(bytes, cur);
+    let last_update_t_us = rd_u64(bytes, cur);
+    let history_len = rd_u64(bytes, cur) as u8;
+    let history_head = rd_u64(bytes, cur) as usize;
+    let total_samples = rd_u64(bytes, cur);
+    let mut history = [ActiveReasoningGapTrace::default(); crate::ACTIVE_REASONING_GAP_TRACE_CAP];
+    for trace in history.iter_mut() {
+        *trace = ActiveReasoningGapTrace {
+            t_us: rd_u64(bytes, cur),
+            gap_pressure: rd_f64(bytes, cur),
+            closure_score: rd_f64(bytes, cur),
+            reentry_score: rd_f64(bytes, cur),
+            active_cycles: rd_u64(bytes, cur) as u32,
+        };
+    }
+
+    ActiveReasoningGapState {
+        gap_pressure,
+        drive_score,
+        persistence_score,
+        closure_score,
+        reentry_score,
+        focus_slot_id,
+        focus_edge_id,
+        active_cycles,
+        last_pair_seq,
+        last_update_t_us,
+        history_len,
+        history_head,
+        total_samples,
+        history,
     }
 }
 

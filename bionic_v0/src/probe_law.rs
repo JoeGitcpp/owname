@@ -96,6 +96,7 @@ impl Viewport {
                 .map(|e| e.pred.relation_surprise)
                 .fold(0.0_f64, f64::max)
         };
+        let active_gap_pressure = self.read_active_reasoning_gap().gap_pressure;
 
         let mut st = self.probe_law.write().unwrap();
         let slot_switch_pressure =
@@ -108,6 +109,7 @@ impl Viewport {
             .max(evidence_pressure)
             .max(surprise_pressure)
             .max(relation_pressure)
+            .max(active_gap_pressure)
             .max(slot_switch_pressure)
             .clamp(0.0, 1.0);
 

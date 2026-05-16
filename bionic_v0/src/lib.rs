@@ -1,5 +1,6 @@
 pub mod action_consequence;
 pub mod action_output;
+pub mod active_reasoning;
 pub mod adapter;
 pub mod adaptive_stability;
 pub mod clock;
@@ -297,6 +298,9 @@ pub const EVIDENCE_TENSION_DECAY_ALPHA: f64 = 0.25;
 /// Engineering closure rate applied from paired write/return curve support.
 pub const EVIDENCE_TENSION_CLOSURE_ALPHA: f64 = 0.5;
 
+/// Fixed observer trace capacity for active-gap numeric curve samples.
+pub const ACTIVE_REASONING_GAP_TRACE_CAP: usize = 32;
+
 pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v30: probe_law substrate added (intensity, suppression, phase, output_intensity,
 // last_update_t_us, short history). Old snapshots (v29) are rejected.
@@ -317,7 +321,8 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v44: write epoch start_magnitude added for closed action-consequence evidence.
 // v45: cumulative closure counters added for long-run observer traces, split by
 //      return modality.
-pub const SNAPSHOT_VERSION: u64 = 45;
+// v46: active reasoning gap observer trace added.
+pub const SNAPSHOT_VERSION: u64 = 46;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

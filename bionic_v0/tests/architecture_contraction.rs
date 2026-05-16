@@ -124,7 +124,8 @@ fn code_ingress_no_ascii_or_glyph_projection_terms() {
 #[test]
 fn global_architecture_map_is_not_stale_snapshot_v41() {
     let lib = read_repo_file("bionic_v0/src/lib.rs");
-    let source = read_repo_file("docs/superpowers/specs/2026-04-21-bionic-v0-global-architecture-map.md");
+    let source =
+        read_repo_file("docs/superpowers/specs/2026-04-21-bionic-v0-global-architecture-map.md");
 
     let version_line = lib
         .lines()

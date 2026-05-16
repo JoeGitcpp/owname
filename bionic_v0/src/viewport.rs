@@ -6,6 +6,7 @@ use crate::action_output::{
     ActionOutputEvent, ActionOutputFeedback, ActionOutputPhase, ActionOutputState,
     OutputChannelKind,
 };
+use crate::active_reasoning::ActiveReasoningGapState;
 use crate::adaptive_stability::AdaptiveStabilityState;
 use crate::code_ingress::{CodeIngressFrameInput, CodeIngressState};
 use crate::evidence_tension::EvidenceTensionState;
@@ -1101,6 +1102,9 @@ pub struct Viewport {
     /// Written by refresh_global_reasoning_history.
     pub global_reasoning_memory_summary: RwLock<GlobalReasoningMemorySummary>,
 
+    /// Runtime active-gap pressure over reasoning history and return pairing.
+    pub active_reasoning_gap: RwLock<ActiveReasoningGapState>,
+
     /// Language binding remains an observation-side trace substrate.
     /// It references existing object / relation / time structures but never
     /// decides whether those structures exist.
@@ -1217,6 +1221,7 @@ impl Viewport {
             global_reasoning: RwLock::new(GlobalReasoningState::default()),
             global_reasoning_history: RwLock::new(GlobalReasoningHistoryState::new()),
             global_reasoning_memory_summary: RwLock::new(GlobalReasoningMemorySummary::default()),
+            active_reasoning_gap: RwLock::new(ActiveReasoningGapState::default()),
             language_binding: RwLock::new(LanguageBindingState::default()),
             code_ingress: RwLock::new(CodeIngressState::default()),
             vpc_contract: RwLock::new(VpcContractState::default()),

@@ -82,9 +82,7 @@ fn drift_revokes_fast_path_strength_and_keeps_slow_path_available() {
     let route = st.route(5).expect("drifted route trace");
     assert!(route.fast_path_strength < fast_before);
     assert!(route.slow_path_weight > 0.0);
-    assert!(
-        route.phase_code == ROUTE_PHASE_DEGRADED || route.phase_code == ROUTE_PHASE_RECOVERING
-    );
+    assert!(route.phase_code == ROUTE_PHASE_DEGRADED || route.phase_code == ROUTE_PHASE_RECOVERING);
 }
 
 #[test]

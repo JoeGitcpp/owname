@@ -17,6 +17,11 @@ fn observer_compact_source_exposes_only_short_numeric_trace_columns() {
         "pairs",
         "probe_i",
         "evidence_p",
+        "gap_p",
+        "gap_c",
+        "gap_r",
+        "gap_cycles",
+        "gap_samples",
         "voc_tE",
     ] {
         assert!(

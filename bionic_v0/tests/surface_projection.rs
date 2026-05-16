@@ -1,3 +1,4 @@
+use bionic_v0::active_reasoning::ActiveReasoningGapState;
 use bionic_v0::adaptive_stability::AdaptiveStabilityState;
 use bionic_v0::code_ingress::CodeIngressState;
 use bionic_v0::evidence_tension::EvidenceTensionState;
@@ -66,6 +67,7 @@ fn make_empty_snapshot() -> SnapshotData {
         adaptive_stability: AdaptiveStabilityState::default(),
         evidence_tension: EvidenceTensionState::default(),
         framed_byte_egress: SnapshotFramedByteEgress::default(),
+        active_reasoning_gap: ActiveReasoningGapState::default(),
     }
 }
 

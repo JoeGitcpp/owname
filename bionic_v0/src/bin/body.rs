@@ -33,6 +33,7 @@ fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u
     vp.refresh_global_reasoning_history(t);
     vp.tick_evidence_tension_from_pairs(t);
     vp.tick_evidence_tension_from_code_ingress(t);
+    vp.refresh_active_reasoning_gap(t);
     vp.refresh_probe_law(t);
     vp.tick_probe_output_from_law(t);
     if write_snapshot(vp, paths).is_err() {

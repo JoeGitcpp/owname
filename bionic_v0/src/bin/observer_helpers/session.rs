@@ -5,14 +5,14 @@ use std::path::Path;
 use bionic_v0::snapshot::SnapshotData;
 
 pub fn session_header() -> &'static str {
-    "seq,clock_s,source_writes,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,egress_pressure,egress_deviation,pair_similarity,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,learned_axes,learned_event_total,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or"
+    "seq,clock_s,source_writes,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,egress_pressure,egress_deviation,pair_similarity,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,gap_p,gap_c,gap_r,gap_cycles,gap_samples,gap_slot,gap_edge,learned_axes,learned_event_total,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or"
 }
 
 pub fn session_row(snap: &SnapshotData) -> String {
     let clock_s = (snap.clock_us.saturating_sub(snap.start_us)) as f64 * 1e-6;
     let latest_pair_similarity = latest_framed_byte_pair_similarity(snap);
     format!(
-        "{},{:.3},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+        "{},{:.3},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
         snap.seq,
         clock_s,
         snap.source_writes,
@@ -33,6 +33,13 @@ pub fn session_row(snap: &SnapshotData) -> String {
         snap.probe_law.intensity,
         snap.probe_law.output_intensity,
         snap.evidence_tension.unresolved_pressure,
+        snap.active_reasoning_gap.gap_pressure,
+        snap.active_reasoning_gap.closure_score,
+        snap.active_reasoning_gap.reentry_score,
+        snap.active_reasoning_gap.active_cycles,
+        snap.active_reasoning_gap.total_samples,
+        snap.active_reasoning_gap.focus_slot_id,
+        snap.active_reasoning_gap.focus_edge_id,
         snap.learned_bias.n_curves,
         snap.learned_bias.total_events,
         snap.vocal_target.active_energy,

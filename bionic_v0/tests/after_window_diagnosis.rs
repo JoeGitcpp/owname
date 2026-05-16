@@ -71,9 +71,7 @@ fn action_consequence_delta(vp: &Viewport) -> f64 {
     vp.read_learned_bias()
         .curves
         .iter()
-        .find(|curve| {
-            curve.axis == BiasAxis::AlignmentGain && curve.locator == BiasLocator::Global
-        })
+        .find(|curve| curve.axis == BiasAxis::AlignmentGain && curve.locator == BiasLocator::Global)
         .map(|curve| curve.delta_value)
         .unwrap_or(0.0)
 }

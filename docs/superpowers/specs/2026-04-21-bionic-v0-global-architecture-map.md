@@ -28,7 +28,7 @@ ordinary ingress
   -> ordinary ingress consequence windows
   -> action-consequence pairs
   -> language binding events only when pair evidence is strong enough
-  -> snapshot v45
+  -> snapshot v46
   -> observer
 
 computer-native byte ingress
@@ -62,7 +62,8 @@ turn observations into body ontology.
 | Learned bias persistence | Contracted to generic pressure-axis sediment only | `learned_bias.rs`, snapshot summary | learned-bias and contraction tests pass |
 | Adaptive route dynamics | Contracted to numeric route traces only | `adaptive_stability.rs`, snapshot / observer | adaptive-stability and contraction tests pass |
 | Pattern binding events | Complete as pair-evidence binding event path | `language_binding.rs`, action-consequence pair evidence | language binding runtime tests pass |
-| Snapshot / observer | Complete for integrated v45 layout | `snapshot.rs`, `observer.rs` | full cargo test passes |
+| Active gap observer evidence | Complete as numeric observer trace | `active_reasoning.rs`, snapshot / observer session rows | active-gap observer tests pass |
+| Snapshot / observer | Complete for integrated v46 layout | `snapshot.rs`, `observer.rs` | full cargo test passes |
 
 ## 3. Relationship Notes
 
@@ -94,14 +95,15 @@ Base birth sensitivity remains separate from learned sediment.
 recovery, and compression pressures for a route without rewriting neighboring
 routes or restoring an artificial template.
 
-`snapshot` v45 appends the newer substrates after earlier sections. The current
+`snapshot` v46 appends the newer substrates after earlier sections. The current
 layout keeps the already-integrated v37 code ingress, v38 learned-bias summary,
 v39 adaptive stability, v40 evidence tension, v41 framed-byte egress, v42
 action-consequence pair sequence order, and v43 long-run cumulative closure
 counters. v44 records write epoch start magnitude for closed action-consequence
 evidence. v45 splits cumulative pair counts by consequence-return modality so
 long-run byte-closure training can be read without conflating unrelated return
-paths.
+paths. v46 appends active-gap pressure, closure, re-entry, cycle count, and
+trace samples for observer-side long-run curves.
 
 ## 4. Remaining Hardening Items
 

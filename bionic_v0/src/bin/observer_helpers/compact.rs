@@ -1,7 +1,7 @@
 use bionic_v0::snapshot::SnapshotData;
 
 pub fn compact_header() -> &'static str {
-    "seq,clock_s,health,phot_h,src_w,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,egress_pressure,egress_deviation,pair_similarity,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or"
+    "seq,clock_s,health,phot_h,src_w,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,egress_pressure,egress_deviation,pair_similarity,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,gap_p,gap_c,gap_r,gap_cycles,gap_samples,gap_slot,gap_edge,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or"
 }
 
 pub fn compact_row(snap: &SnapshotData) -> String {
@@ -13,7 +13,7 @@ pub fn compact_row(snap: &SnapshotData) -> String {
         .map(|pair| pair.curve_similarity)
         .unwrap_or(0.0);
     format!(
-        "{},{:.3},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+        "{},{:.3},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
         snap.seq,
         clock_s,
         snap.health_state,
@@ -36,6 +36,13 @@ pub fn compact_row(snap: &SnapshotData) -> String {
         snap.probe_law.intensity,
         snap.probe_law.output_intensity,
         snap.evidence_tension.unresolved_pressure,
+        snap.active_reasoning_gap.gap_pressure,
+        snap.active_reasoning_gap.closure_score,
+        snap.active_reasoning_gap.reentry_score,
+        snap.active_reasoning_gap.active_cycles,
+        snap.active_reasoning_gap.total_samples,
+        snap.active_reasoning_gap.focus_slot_id,
+        snap.active_reasoning_gap.focus_edge_id,
         snap.vocal_target.active_energy,
         snap.vocal_target.pitch_hint,
         snap.vocal_target.resonance_hint,
