@@ -73,12 +73,19 @@ back into rejected architecture.
     ambiguity preservation, and observer-visible evidence without adding
     semantic/source/identity ontology.
 
-12. **Implementation plan (executed 2026-04-20)** —
+12. **Thinking as gap-driven active reasoning (FROZEN CANDIDATE)** —
+    [docs/superpowers/specs/2026-05-17-thinking-gap-driven-active-reasoning-design.md](docs/superpowers/specs/2026-05-17-thinking-gap-driven-active-reasoning-design.md):
+    repairs older goal/intention/reasoning language by defining active
+    thinking as unresolved passive prediction gaps becoming cross-scale
+    active closure pressure; "desire", "subconscious", "conscious", "goal",
+    and "intention" are external metaphors only, not body ontology modules.
+
+13. **Implementation plan (executed 2026-04-20)** —
     [docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md](docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md):
     the plan that removed the rejected layers from the live body /
     snapshot / observer / test path.
 
-13. **Older v0 spec (PARTIALLY DEPRECATED)** —
+14. **Older v0 spec (PARTIALLY DEPRECATED)** —
     [docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md](docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md):
     read its §0 deprecation banner before trusting any of its content.
 

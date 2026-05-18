@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bionic_v0::curriculum::{
     run_action_consequence_pulse_course, run_curriculum_episodes, run_curriculum_suite,
-    run_persistent_curriculum_session, run_single_object_motion_course,
-    run_two_object_relation_course, CurriculumConfig,
+    run_long_retention_curriculum, run_persistent_curriculum_session,
+    run_single_object_motion_course, run_two_object_relation_course, CurriculumConfig,
 };
 use bionic_v0::snapshot::{read_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
@@ -106,6 +106,45 @@ fn persistent_curriculum_session_accumulates_evidence_in_one_body() {
     assert_eq!(summary.final_pairs, 4);
     assert!(summary.final_learned_events >= 4);
     assert!(summary.max_learned_abs_delta > 0.0);
+}
+
+#[test]
+fn long_retention_curriculum_proves_hold_generalization_and_reentry_evidence() {
+    let evidence =
+        run_long_retention_curriculum(CurriculumConfig::default()).expect("long run completes");
+
+    assert_eq!(evidence.train_episodes, 6);
+    assert_eq!(evidence.after_episodes, 3);
+    assert_eq!(evidence.reentry_episodes, 3);
+    assert!(evidence.train_pairs >= 6);
+    assert!(evidence.train_learned_events >= 6);
+    assert!(evidence.train_adaptive_routes > 0);
+
+    assert!(
+        evidence.hold_learned_delta_ratio >= 0.80,
+        "hold should preserve learned-bias evidence relative to train"
+    );
+    assert!(
+        evidence.hold_adaptive_route_ratio >= 0.50,
+        "hold should preserve observer-visible route traces relative to train"
+    );
+
+    assert!(
+        evidence.after_persistent_learned_delta > evidence.after_cold_learned_delta,
+        "related after-stage perturbation should retain stronger evidence than cold baseline"
+    );
+    assert!(
+        evidence.reentry_persistent_learned_delta > evidence.reentry_cold_learned_delta,
+        "reentry should close stronger than cold baseline after hold"
+    );
+    assert!(
+        evidence.after_persistent_pairs > evidence.after_cold_pairs,
+        "after-stage persistent pair closure should exceed cold baseline"
+    );
+    assert!(
+        evidence.reentry_persistent_pairs > evidence.reentry_cold_pairs,
+        "reentry persistent pair closure should exceed cold baseline"
+    );
 }
 
 #[test]

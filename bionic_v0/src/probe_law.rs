@@ -97,6 +97,12 @@ impl Viewport {
                 .fold(0.0_f64, f64::max)
         };
         let active_gap_pressure = self.read_active_reasoning_gap().gap_pressure;
+        let active_surface = self.read_active_surface();
+        let field_pressure = if active_surface.traces_alive > 0 {
+            active_surface.effective_probe_pressure()
+        } else {
+            self.read_prediction_pressure_field().dominant_pressure
+        };
 
         let mut st = self.probe_law.write().unwrap();
         let slot_switch_pressure =
@@ -110,6 +116,7 @@ impl Viewport {
             .max(surprise_pressure)
             .max(relation_pressure)
             .max(active_gap_pressure)
+            .max(field_pressure)
             .max(slot_switch_pressure)
             .clamp(0.0, 1.0);
 

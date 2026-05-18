@@ -22,7 +22,8 @@ use bionic_v0::vocal_adapter::spawn_vocal_output;
 use bionic_v0::VIB_BANDS;
 use bionic_v0::{BINDING_REFRESH_HZ, PHOT_CONSEQUENCE_QUIESCENCE_US};
 
-// Serial global refresh cycle terminates at reasoning history + snapshot.
+// Serial global refresh cycle carries numeric pressure through probe output
+// before snapshot observation.
 // Per cleanup spec 2026-04-20, rejected naming layers are not part of the
 // body main loop and must not be reintroduced here.
 fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u64) {
@@ -34,6 +35,14 @@ fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u
     vp.tick_evidence_tension_from_pairs(t);
     vp.tick_evidence_tension_from_code_ingress(t);
     vp.refresh_active_reasoning_gap(t);
+    vp.tick_prediction_pressure_field_from_substrate(t);
+    vp.tick_active_surface_relation_resonance(t);
+    vp.refresh_active_surface(t);
+    vp.tick_active_surface_probe_chain(t);
+    vp.tick_active_surface_chain_memory(t);
+    vp.tick_auditory_visual_from_pairs(t);
+    vp.tick_auditory_visual_from_fusion(t);
+    vp.tick_auditory_visual_expression(t);
     vp.refresh_probe_law(t);
     vp.tick_probe_output_from_law(t);
     if write_snapshot(vp, paths).is_err() {
@@ -183,6 +192,7 @@ fn main() {
     let vp_vocal = vp.clone();
     let h_vocal = spawn_ticker(50, stop.clone(), move |_| {
         let t = now_us();
+        vp_vocal.tick_vocal_reflex_from_pressure(t);
         vp_vocal.tick_vocal_target_from_vib(t);
         vp_vocal.tick_vocal_imitation_loop(t);
         vp_vocal.tick_vocal_memory(t);

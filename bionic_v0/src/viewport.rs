@@ -7,20 +7,25 @@ use crate::action_output::{
     OutputChannelKind,
 };
 use crate::active_reasoning::ActiveReasoningGapState;
+use crate::active_surface::ActiveSurfaceState;
 use crate::adaptive_stability::AdaptiveStabilityState;
+use crate::auditory_visual::{AuditoryVisualState, ChannelSample, ReturnSample};
 use crate::code_ingress::{CodeIngressFrameInput, CodeIngressState};
 use crate::evidence_tension::EvidenceTensionState;
 use crate::evolution_priors::BiasPriors;
 use crate::framed_byte_egress::FramedByteEgressState;
 use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, LanguageBindingState};
 use crate::learned_bias::{LearnedBiasEventInput, LearnedBiasState};
+use crate::mark_disturbance::MarkDisturbanceState;
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::{PhotSlotPredictor, VPC_FAMILY_PHOT};
+use crate::prediction_pressure_field::PredictionPressureFieldState;
 use crate::probe_law::ProbeLawState;
 use crate::substrate_pressure::{compute_pressure, PressureSample};
 use crate::vocal_imitation::VocalImitationState;
 use crate::vocal_memory::VocalMemoryState;
 use crate::vocal_organ::{VocalOrganPhase, VocalOrganState};
+use crate::vocal_reflex::{VocalReflexDrive, VocalReflexState};
 use crate::vocal_target::VocalTargetState;
 use crate::vpc::{
     ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
@@ -1105,6 +1110,13 @@ pub struct Viewport {
     /// Runtime active-gap pressure over reasoning history and return pairing.
     pub active_reasoning_gap: RwLock<ActiveReasoningGapState>,
 
+    /// Continuous prediction pressure field. Numeric wave substrate only;
+    /// one dominant focus may feed active probe pressure.
+    pub prediction_pressure_field: RwLock<PredictionPressureFieldState>,
+
+    /// Parallel focus traces with one active aperture and one bounded echo.
+    pub active_surface: RwLock<ActiveSurfaceState>,
+
     /// Language binding remains an observation-side trace substrate.
     /// It references existing object / relation / time structures but never
     /// decides whether those structures exist.
@@ -1168,10 +1180,18 @@ pub struct Viewport {
     pub vocal_imitation: RwLock<VocalImitationState>,
     /// Vocal substrate (v36). Stable vocal prototypes memory.
     pub vocal_memory: RwLock<VocalMemoryState>,
+    /// Vocal substrate. Numeric reflex pressure over abrupt prediction load.
+    pub vocal_reflex: RwLock<VocalReflexState>,
+
+    /// Hearing/vision coupling substrate. Numeric return and expression trace.
+    pub auditory_visual: RwLock<AuditoryVisualState>,
 
     /// Learned-bias delta substrate (v37). Numeric event/curve sediment only.
     /// Does not mutate base priors and does not accept observer interpretation.
     pub learned_bias: RwLock<LearnedBiasState>,
+
+    /// External mark disturbance substrate. Numeric trace evidence only.
+    pub mark_disturbance: RwLock<MarkDisturbanceState>,
 }
 
 impl Viewport {
@@ -1222,6 +1242,8 @@ impl Viewport {
             global_reasoning_history: RwLock::new(GlobalReasoningHistoryState::new()),
             global_reasoning_memory_summary: RwLock::new(GlobalReasoningMemorySummary::default()),
             active_reasoning_gap: RwLock::new(ActiveReasoningGapState::default()),
+            prediction_pressure_field: RwLock::new(PredictionPressureFieldState::default()),
+            active_surface: RwLock::new(ActiveSurfaceState::default()),
             language_binding: RwLock::new(LanguageBindingState::default()),
             code_ingress: RwLock::new(CodeIngressState::default()),
             vpc_contract: RwLock::new(VpcContractState::default()),
@@ -1241,7 +1263,10 @@ impl Viewport {
             vocal_organ: RwLock::new(VocalOrganState::default()),
             vocal_imitation: RwLock::new(VocalImitationState::default()),
             vocal_memory: RwLock::new(VocalMemoryState::default()),
+            vocal_reflex: RwLock::new(VocalReflexState::default()),
+            auditory_visual: RwLock::new(AuditoryVisualState::default()),
             learned_bias: RwLock::new(LearnedBiasState::default()),
+            mark_disturbance: RwLock::new(MarkDisturbanceState::default()),
         }
     }
 
@@ -3429,6 +3454,162 @@ impl Viewport {
 
     pub fn read_vocal_memory(&self) -> VocalMemoryState {
         self.vocal_memory.read().unwrap().clone()
+    }
+
+    pub fn read_vocal_reflex(&self) -> VocalReflexState {
+        *self.vocal_reflex.read().unwrap()
+    }
+
+    pub fn read_auditory_visual(&self) -> AuditoryVisualState {
+        *self.auditory_visual.read().unwrap()
+    }
+
+    pub fn tick_auditory_visual_from_pairs(&self, now_us: u64) {
+        let ac = self.read_action_consequence();
+        let out = self.read_action_output();
+        let cursor = self.auditory_visual.read().unwrap().pair_cursor;
+        let mut samples = Vec::new();
+
+        for pair in ac.pairs.iter().filter(|pair| pair.pair_seq > cursor) {
+            let Some(window) = ac
+                .windows
+                .iter()
+                .find(|window| window.window_id == pair.window_id)
+            else {
+                continue;
+            };
+            let Some(epoch) = out
+                .write_epoch_history
+                .iter()
+                .find(|epoch| epoch.write_seq == pair.write_seq)
+            else {
+                continue;
+            };
+            samples.push((
+                pair.pair_seq,
+                ReturnSample {
+                    delay_us: pair.delay_us,
+                    curve_similarity: pair.curve_similarity,
+                    return_magnitude: window.magnitude,
+                    write_magnitude: epoch.start_magnitude,
+                },
+            ));
+        }
+
+        if samples.is_empty() {
+            return;
+        }
+
+        let mut av = self.auditory_visual.write().unwrap();
+        for (pair_seq, sample) in samples {
+            av.observe_self_return(now_us, sample);
+            av.pair_cursor = av.pair_cursor.max(pair_seq);
+        }
+    }
+
+    pub fn tick_auditory_visual_from_fusion(&self, now_us: u64) {
+        let cursor = self.auditory_visual.read().unwrap().fusion_cursor_t_us;
+        let mut samples = Vec::new();
+        let mut next_cursor = cursor;
+
+        for slot_id in 0..N_OBJECT_SLOTS {
+            let Some(slot) = self.read_slot(slot_id) else {
+                continue;
+            };
+            let Some(fusion) = slot.fusion else {
+                continue;
+            };
+            if fusion.last_fused_t_us <= cursor {
+                continue;
+            }
+            if fusion.last_vib_t_us == 0 || fusion.last_phot_t_us == 0 {
+                next_cursor = next_cursor.max(fusion.last_fused_t_us);
+                continue;
+            }
+            let pressure = fusion
+                .cross_modal_confidence
+                .max(fusion.fused_surprise)
+                .max(fusion.vib_weight.min(fusion.phot_weight));
+            samples.push(ChannelSample {
+                alignment: fusion.temporal_alignment_score,
+                confidence: fusion.cross_modal_confidence,
+                pressure,
+            });
+            next_cursor = next_cursor.max(fusion.last_fused_t_us);
+        }
+
+        if samples.is_empty() {
+            let mut av = self.auditory_visual.write().unwrap();
+            av.fusion_cursor_t_us = next_cursor;
+            return;
+        }
+
+        let mut av = self.auditory_visual.write().unwrap();
+        for sample in samples {
+            av.observe_channel_alignment(now_us, sample);
+        }
+        av.fusion_cursor_t_us = next_cursor;
+    }
+
+    pub fn tick_auditory_visual_expression(&self, now_us: u64) {
+        let drive = self
+            .auditory_visual
+            .write()
+            .unwrap()
+            .drive_expression(now_us);
+        let Some(drive) = drive else {
+            return;
+        };
+
+        let is_active = self.read_vocal_organ().phase == VocalOrganPhase::Active;
+        if is_active {
+            self.adjust_voicing(now_us, drive.breath, drive.pitch, drive.resonance);
+        } else {
+            self.begin_voicing(now_us, drive.breath, drive.pitch, drive.resonance);
+        }
+    }
+
+    pub fn observe_auditory_visual_expression_closure(&self, now_us: u64, support: f64) {
+        self.auditory_visual
+            .write()
+            .unwrap()
+            .observe_expression_closure(now_us, support);
+    }
+
+    pub fn observe_vocal_reflex_closure(&self, now_us: u64, closure_support: f64, vocalized: bool) {
+        self.vocal_reflex
+            .write()
+            .unwrap()
+            .observe_closure(now_us, closure_support, vocalized);
+    }
+
+    pub fn tick_vocal_reflex_from_pressure(&self, now_us: u64) {
+        let field = self.read_prediction_pressure_field();
+        let field_pressure = field
+            .waves
+            .iter()
+            .map(|wave| wave.amplitude)
+            .fold(field.dominant_pressure, f64::max);
+        let evidence_pressure = self.read_evidence_tension().unresolved_pressure;
+        let gap_pressure = self.read_active_reasoning_gap().gap_pressure;
+        let drive_pressure = field_pressure.max(evidence_pressure).max(gap_pressure);
+        let drive = VocalReflexDrive {
+            drive_pressure,
+            energy: drive_pressure,
+        };
+        let burst = self.vocal_reflex.write().unwrap().tick_drive(now_us, drive);
+        let Some(burst) = burst else {
+            return;
+        };
+
+        let is_active = self.read_vocal_organ().phase == VocalOrganPhase::Active;
+        if is_active {
+            self.adjust_voicing(now_us, burst.breath, burst.pitch, burst.resonance);
+        } else {
+            self.begin_voicing(now_us, burst.breath, burst.pitch, burst.resonance);
+        }
+        let mut organ = self.vocal_organ.write().unwrap();
+        organ.noise_mix = organ.noise_mix.max(burst.noise);
     }
 
     pub fn tick_vocal_target_decay(&self, now_us: u64) {
