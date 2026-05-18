@@ -80,12 +80,26 @@ back into rejected architecture.
     active closure pressure; "desire", "subconscious", "conscious", "goal",
     and "intention" are external metaphors only, not body ontology modules.
 
-13. **Implementation plan (executed 2026-04-20)** —
+13. **Organic surface expression substrate (FROZEN CANDIDATE)** —
+    [docs/superpowers/specs/2026-05-18-organic-surface-expression-substrate-design.md](docs/superpowers/specs/2026-05-18-organic-surface-expression-substrate-design.md):
+    supersedes the older predictive visual surface for new pixel-expression
+    work; defines a regulated organism-like observer surface driven by
+    continuous numeric substrate, not a fixed expression dictionary, display
+    controller, or body-side human-readable output path.
+
+14. **Live Human Nursery v0 (FROZEN CANDIDATE; v0 evidence path implemented)** —
+    [docs/superpowers/specs/2026-05-18-live-human-nursery-v0-design.md](docs/superpowers/specs/2026-05-18-live-human-nursery-v0-design.md):
+    defines human teaching as an external live training room using camera,
+    microphone, vocal output, pixel surface, snapshot evidence, and strict
+    numeric acceptance gates; does not add a body-side teacher, chat layer,
+    speech recognition, visual recognition, or fixed lesson-response script.
+
+15. **Implementation plan (executed 2026-04-20)** —
     [docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md](docs/superpowers/plans/2026-04-20-bionic-v0-architecture-cleanup.md):
     the plan that removed the rejected layers from the live body /
     snapshot / observer / test path.
 
-14. **Older v0 spec (PARTIALLY DEPRECATED)** —
+16. **Older v0 spec (PARTIALLY DEPRECATED)** —
     [docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md](docs/superpowers/specs/2026-04-19-bionic-consciousness-stream-v0-design.md):
     read its §0 deprecation banner before trusting any of its content.
 

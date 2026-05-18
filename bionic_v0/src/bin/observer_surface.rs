@@ -93,6 +93,7 @@ fn main() {
                             global_probe_intensity: 0.0,
                             global_surprise_load: 0.0,
                             focus_slot_id: -1,
+                            organ_drive: Default::default(),
                         }
                     };
 

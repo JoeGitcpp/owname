@@ -1,5 +1,5 @@
 use bionic_v0::surface_history::SurfaceHistory;
-use bionic_v0::surface_projection::{SurfaceFrame, SurfaceObjectGlyph};
+use bionic_v0::surface_projection::{SurfaceFrame, SurfaceObjectGlyph, SurfaceOrganDrive};
 
 fn frame_at(cx: f64, cy: f64, slot_id: usize) -> SurfaceFrame {
     let glyph = SurfaceObjectGlyph {
@@ -21,6 +21,7 @@ fn frame_at(cx: f64, cy: f64, slot_id: usize) -> SurfaceFrame {
         global_probe_intensity: 0.0,
         global_surprise_load: 0.0,
         focus_slot_id: -1,
+        organ_drive: SurfaceOrganDrive::default(),
     }
 }
 
@@ -83,6 +84,7 @@ fn history_tracks_stable_slot_identity_when_projection_order_changes() {
         global_probe_intensity: 0.0,
         global_surprise_load: 0.0,
         focus_slot_id: -1,
+        organ_drive: SurfaceOrganDrive::default(),
     });
 
     hist.update(&SurfaceFrame {
@@ -118,6 +120,7 @@ fn history_tracks_stable_slot_identity_when_projection_order_changes() {
         global_probe_intensity: 0.0,
         global_surprise_load: 0.0,
         focus_slot_id: -1,
+        organ_drive: SurfaceOrganDrive::default(),
     });
 
     let trails = hist.render_trails();
@@ -142,6 +145,7 @@ fn history_drops_stale_slots_after_consecutive_missing_frames() {
             global_probe_intensity: 0.0,
             global_surprise_load: 0.0,
             focus_slot_id: -1,
+            organ_drive: SurfaceOrganDrive::default(),
         });
     }
 

@@ -17,7 +17,7 @@ impl RenderConfig {
 /// Render a surface frame into a low-resolution RGBA pixel buffer.
 ///
 /// Returns a flat Vec of [R, G, B, A] pixels in row-major order.
-/// No fixed human-emotion color dictionary; intensities derive purely
+/// No fixed human-state color dictionary; intensities derive purely
 /// from numeric hints produced by projection and history.
 pub fn render_surface_frame(
     frame: &SurfaceFrame,
@@ -29,6 +29,9 @@ pub fn render_surface_frame(
 
     // Global state background layer
     apply_global_state_background(&mut buffer, frame, config.width, config.height);
+
+    // Observer-side expression layer driven by bounded numeric substrate.
+    apply_organ_skin_background(&mut buffer, frame, config.width, config.height);
 
     // Draw trail energy (background layer)
     for trail in trails {
@@ -54,6 +57,68 @@ pub fn render_surface_frame(
     }
 
     buffer
+}
+
+fn apply_organ_skin_background(
+    buffer: &mut [[u8; 4]],
+    frame: &SurfaceFrame,
+    width: usize,
+    height: usize,
+) {
+    let drive = frame.organ_drive;
+    if drive.regulated_activation <= 0.0
+        && drive.tension_drive <= 0.0
+        && drive.residue_drive <= 0.0
+        && drive.reentry_drive <= 0.0
+    {
+        return;
+    }
+
+    let aspect = height as f64 / width.max(1) as f64;
+
+    for y in 0..height {
+        let ny = if height <= 1 {
+            0.0
+        } else {
+            y as f64 / (height - 1) as f64
+        };
+        for x in 0..width {
+            let nx = if width <= 1 {
+                0.0
+            } else {
+                x as f64 / (width - 1) as f64
+            };
+            let dx = (nx - 0.5) * aspect.max(0.1);
+            let dy = ny - 0.5;
+            let dist = (dx * dx * 2.6 + dy * dy * 1.4).sqrt();
+            let core = (1.0 - dist / 0.46).clamp(0.0, 1.0);
+            let wide = (1.0 - dist / 0.82).clamp(0.0, 1.0);
+            let ring = (1.0 - ((dist - 0.42).abs() / 0.08)).clamp(0.0, 1.0);
+            let side = ((nx - 0.5).abs() * 2.0).clamp(0.0, 1.0) * wide;
+
+            let base = drive.regulated_activation.clamp(0.0, 1.0);
+            let residue = (drive.residue_drive * 0.65 + drive.reentry_drive * 0.35).clamp(0.0, 1.0);
+
+            let r = base * core * 42.0
+                + drive.tension_drive.clamp(0.0, 1.0) * side * 54.0
+                + drive.ambiguity_drive.clamp(0.0, 1.0) * ring * 38.0;
+            let g = base * core * 36.0
+                + drive.coherence_drive.clamp(0.0, 1.0) * wide * 48.0
+                + drive.closure_drive.clamp(0.0, 1.0) * core * 30.0;
+            let b = base * core * 50.0
+                + drive.aperture_drive.clamp(0.0, 1.0) * ring * 56.0
+                + drive.vocal_drive.clamp(0.0, 1.0) * wide * 32.0
+                + residue * wide * 28.0;
+
+            let idx = y * width + x;
+            buffer[idx][0] = buffer[idx][0].max(r.clamp(0.0, 180.0) as u8);
+            buffer[idx][1] = buffer[idx][1].max(g.clamp(0.0, 180.0) as u8);
+            buffer[idx][2] = buffer[idx][2].max(b.clamp(0.0, 180.0) as u8);
+            if buffer[idx][0] > 0 || buffer[idx][1] > 0 || buffer[idx][2] > 0 {
+                buffer[idx][3] = 255;
+            }
+        }
+    }
 }
 
 fn apply_global_state_background(

@@ -1,5 +1,14 @@
 # Predictive Visual Surface Design
 
+> **DEPRECATED / SUPERSEDED 2026-05-18**:
+> This design is superseded for all new surface-expression work by
+> [Organic Surface Expression Substrate v0](./2026-05-18-organic-surface-expression-substrate-design.md).
+> It remains valid only as historical context for the first observer-side
+> projection modules (`surface_projection`, `surface_history`,
+> `surface_render`, `observer_surface`). Do not extend this document as the
+> authority for organ-like pixel expression, regulated brightness, primitive
+> reaction drives, or face-like / brain-activity external display behavior.
+
 > **创建**：2026-04-23
 > **状态**：v1.0 设计冻结
 > **基于**：

@@ -1,5 +1,12 @@
 # Surface Endogenous States Visualization Plan
 
+> **DEPRECATED / SUPERSEDED 2026-05-18**:
+> This plan extended the first surface with endogenous visualization fields.
+> It is now historical context only. New pixel-expression work must follow
+> [2026-05-18-organic-surface-expression-substrate.md](./2026-05-18-organic-surface-expression-substrate.md),
+> which adds a regulated organism-like drive layer instead of extending the
+> surface as a state dashboard.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 扩展现有 observer-side visual surface，将内生活动状态（探针强度、惊讶、注意力焦点、关系强度）以纯数值投射方式渲染为视觉表达
@@ -594,4 +601,3 @@ git commit -m "test: add endogenous state visualization tests"
 - Chunk 5: 依赖所有 Chunk 完成
 
 **Plan complete.** Ready to execute?
-

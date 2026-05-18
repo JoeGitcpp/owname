@@ -22,6 +22,7 @@ pub mod life_closure_producers;
 pub mod live_byte_carrier;
 pub mod live_byte_closure;
 pub mod live_byte_loopback;
+pub mod live_human_nursery;
 pub mod live_io_evidence;
 pub mod mark_disturbance;
 pub mod post_effect;

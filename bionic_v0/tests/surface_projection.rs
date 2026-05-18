@@ -269,6 +269,52 @@ fn projection_includes_global_state() {
 }
 
 #[test]
+fn projection_derives_regulated_organ_drive_from_body_pressure() {
+    let mut snap = make_empty_snapshot();
+    snap.global_reasoning.global_surprise_load = 0.7;
+    snap.global_reasoning.network_instability_score = 0.8;
+    snap.global_reasoning_memory.novelty_score = 0.6;
+    snap.active_reasoning_gap.gap_pressure = 0.9;
+    snap.evidence_tension.unresolved_pressure = 0.8;
+    snap.probe_law.intensity = 0.7;
+    snap.probe_law.output_intensity = 0.6;
+    snap.vocal_target.active_energy = 0.5;
+    snap.vocal_organ.breath_drive = 0.4;
+    snap.framed_byte_egress.output_pressure = 0.55;
+
+    let frame = project_surface_frame(&snap);
+    let drive = frame.organ_drive;
+
+    assert!(drive.activation_drive > 0.0);
+    assert!(drive.tension_drive > 0.0);
+    assert!(drive.aperture_drive > 0.0);
+    assert!(drive.vocal_drive > 0.0);
+    assert!(drive.regulated_activation <= drive.activation_drive);
+    assert!((0.0..=1.0).contains(&drive.regulation_gain));
+}
+
+#[test]
+fn projection_keeps_reentry_residue_visible_while_regulating_surge() {
+    let mut snap = make_empty_snapshot();
+    snap.global_reasoning.global_surprise_load = 1.0;
+    snap.global_reasoning.network_instability_score = 1.0;
+    snap.global_reasoning_memory.persistence_score = 0.8;
+    snap.global_reasoning_memory.pattern_recurrence_score = 0.7;
+    snap.active_reasoning_gap.gap_pressure = 1.0;
+    snap.active_reasoning_gap.reentry_score = 0.65;
+    snap.active_reasoning_gap.closure_score = 0.5;
+    snap.probe_law.suppression = 0.75;
+
+    let drive = project_surface_frame(&snap).organ_drive;
+
+    assert!(drive.residue_drive > 0.0);
+    assert!(drive.reentry_drive > 0.0);
+    assert!(drive.closure_drive > 0.0);
+    assert!(drive.regulation_gain <= 0.5);
+    assert!(drive.regulated_activation <= drive.activation_drive * 0.5 + 1e-9);
+}
+
+#[test]
 fn projection_includes_relations_from_active_edges() {
     let mut snap = make_empty_snapshot();
 

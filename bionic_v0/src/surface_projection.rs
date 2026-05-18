@@ -3,8 +3,8 @@ use crate::snapshot::{SnapshotData, SnapshotSlot, SnapshotSpatial};
 /// A single projected object glyph for the visual surface.
 ///
 /// All fields are normalized [0,1] numeric hints. The renderer interprets
-/// them as center, extent, and rendering intensity. No semantic meaning is
-/// attached.
+/// them as center, extent, and rendering intensity. No world-content meaning
+/// is attached.
 #[derive(Clone, Copy, Debug)]
 pub struct SurfaceObjectGlyph {
     pub slot_id: usize,
@@ -33,6 +33,25 @@ pub struct SurfaceRelationGlyph {
     pub surprise: f64,
 }
 
+/// Observer-side organism-like expression drive.
+///
+/// These fields are numeric rendering drives derived from snapshot substrate.
+/// They are not body ontology, fixed human-state buckets, or display commands.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SurfaceOrganDrive {
+    pub activation_drive: f64,
+    pub regulated_activation: f64,
+    pub tension_drive: f64,
+    pub coherence_drive: f64,
+    pub ambiguity_drive: f64,
+    pub aperture_drive: f64,
+    pub residue_drive: f64,
+    pub closure_drive: f64,
+    pub reentry_drive: f64,
+    pub vocal_drive: f64,
+    pub regulation_gain: f64,
+}
+
 /// The complete projected surface frame derived from a snapshot.
 #[derive(Debug)]
 pub struct SurfaceFrame {
@@ -41,6 +60,7 @@ pub struct SurfaceFrame {
     pub global_probe_intensity: f64,
     pub global_surprise_load: f64,
     pub focus_slot_id: i8,
+    pub organ_drive: SurfaceOrganDrive,
 }
 
 /// Project a snapshot into an observer-side surface frame.
@@ -74,6 +94,7 @@ pub fn project_surface_frame(snap: &SnapshotData) -> SurfaceFrame {
         .unwrap_or(-1);
 
     let probe_intensity = snap.global_reasoning_memory.novelty_score;
+    let organ_drive = project_organ_drive(snap, probe_intensity);
 
     SurfaceFrame {
         objects,
@@ -81,6 +102,93 @@ pub fn project_surface_frame(snap: &SnapshotData) -> SurfaceFrame {
         global_probe_intensity: probe_intensity,
         global_surprise_load: snap.global_reasoning.global_surprise_load,
         focus_slot_id,
+        organ_drive,
+    }
+}
+
+fn project_organ_drive(snap: &SnapshotData, probe_intensity: f64) -> SurfaceOrganDrive {
+    let reasoning = &snap.global_reasoning;
+    let memory = &snap.global_reasoning_memory;
+    let gap = &snap.active_reasoning_gap;
+    let tension = &snap.evidence_tension;
+    let probe = &snap.probe_law;
+
+    let action_output_drive = snap
+        .action_output
+        .channels
+        .iter()
+        .map(|ch| ch.current_magnitude.max(ch.peak_magnitude))
+        .fold(0.0_f64, f64::max);
+
+    let vocal_drive = snap
+        .vocal_target
+        .active_energy
+        .max(snap.vocal_organ.breath_drive)
+        .max(action_output_drive)
+        .max(snap.framed_byte_egress.output_pressure);
+
+    let tension_drive = clamp01(
+        reasoning
+            .global_surprise_load
+            .max(reasoning.network_instability_score * 0.5)
+            .max(tension.unresolved_pressure)
+            .max(gap.gap_pressure),
+    );
+    let aperture_drive = clamp01(
+        probe_intensity
+            .max(probe.intensity)
+            .max(probe.output_intensity)
+            .max(gap.drive_score)
+            .max(gap.gap_pressure),
+    );
+    let residue_drive = clamp01(
+        memory
+            .persistence_score
+            .max(memory.pattern_recurrence_score)
+            .max(memory.dominant_focus_persistence),
+    );
+    let closure_drive = clamp01(gap.closure_score);
+    let reentry_drive = clamp01(gap.reentry_score);
+    let coherence_drive = clamp01(
+        memory
+            .routing_stability_score
+            .max(reasoning.coordinated_event_score)
+            .max(closure_drive),
+    );
+    let ambiguity_drive = clamp01(
+        reasoning
+            .network_instability_score
+            .max(tension.unresolved_pressure)
+            * (1.0 - closure_drive * 0.35),
+    );
+    let activation_drive = clamp01(
+        tension_drive
+            .max(aperture_drive)
+            .max(residue_drive * 0.75)
+            .max(reentry_drive)
+            .max(vocal_drive),
+    );
+    let regulation_gain = clamp01(
+        1.0 - probe.suppression.clamp(0.0, 1.0) * 0.55
+            - tension_drive * 0.16
+            - closure_drive * 0.08
+            - ambiguity_drive * 0.08
+            + coherence_drive * 0.04,
+    );
+    let regulated_activation = clamp01(activation_drive * regulation_gain);
+
+    SurfaceOrganDrive {
+        activation_drive,
+        regulated_activation,
+        tension_drive,
+        coherence_drive,
+        ambiguity_drive,
+        aperture_drive,
+        residue_drive,
+        closure_drive,
+        reentry_drive,
+        vocal_drive: clamp01(vocal_drive),
+        regulation_gain,
     }
 }
 
@@ -177,4 +285,12 @@ fn compute_endogenous_hints(slot: &SnapshotSlot) -> (f64, f64, f64) {
     }
 
     (err_hint, surprise_hint, attention_bias_hint)
+}
+
+fn clamp01(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }

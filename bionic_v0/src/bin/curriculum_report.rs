@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use bionic_v0::curriculum::{
     run_active_surface_aperture_echo_curriculum, run_active_text_probe_closure_curriculum,
     run_auditory_visual_predictability_expression_curriculum,
@@ -21,9 +23,14 @@ use bionic_v0::curriculum_governor::{
 use bionic_v0::curriculum_material::{
     default_external_curriculum_training_plan, review_external_curriculum_training_plan,
 };
+use bionic_v0::live_human_nursery::{
+    sample_live_human_nursery_snapshots, summarize_live_human_nursery,
+};
+use bionic_v0::snapshot::read_snapshot;
 
 fn parse_args() -> (
     u32,
+    bool,
     bool,
     bool,
     bool,
@@ -81,6 +88,7 @@ fn parse_args() -> (
     let mut cross_channel_disturbance_coupling = false;
     let mut external_curriculum_plan = false;
     let mut persistent_curriculum_governor = false;
+    let mut live_human_nursery = false;
     while let Some(arg) = args.next() {
         if arg == "--episodes" {
             if let Some(value) = args.next().and_then(|s| s.parse::<u32>().ok()) {
@@ -140,6 +148,8 @@ fn parse_args() -> (
             external_curriculum_plan = true;
         } else if arg == "--persistent-curriculum-governor" {
             persistent_curriculum_governor = true;
+        } else if arg == "--live-human-nursery" {
+            live_human_nursery = true;
         }
     }
     (
@@ -171,7 +181,23 @@ fn parse_args() -> (
         cross_channel_disturbance_coupling,
         external_curriculum_plan,
         persistent_curriculum_governor,
+        live_human_nursery,
     )
+}
+
+fn live_human_nursery_runtime_dir_arg() -> Option<PathBuf> {
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        if arg == "--live-human-nursery" {
+            if let Some(next) = args.peek() {
+                if !next.starts_with("--") {
+                    return args.next().map(PathBuf::from);
+                }
+            }
+            return None;
+        }
+    }
+    None
 }
 
 fn main() -> std::io::Result<()> {
@@ -204,6 +230,7 @@ fn main() -> std::io::Result<()> {
         cross_channel_disturbance_coupling,
         external_curriculum_plan,
         persistent_curriculum_governor,
+        live_human_nursery,
     ) = parse_args();
 
     println!("curriculum_report_v0");
@@ -1075,6 +1102,59 @@ fn main() -> std::io::Result<()> {
             evidence.reentry_cold_avg_strength
         );
         println!("time_window_strength={:.6}", evidence.time_window_strength);
+    } else if live_human_nursery {
+        let runtime_dir_arg = live_human_nursery_runtime_dir_arg();
+        let deterministic_fixture = if runtime_dir_arg.is_some() { 0 } else { 1 };
+        let runtime_snapshot_read = if runtime_dir_arg.is_some() { 1 } else { 0 };
+        let snapshots = if let Some(runtime_dir) = runtime_dir_arg {
+            vec![read_snapshot(&runtime_dir.join("snapshot.bin"))?]
+        } else {
+            sample_live_human_nursery_snapshots()
+        };
+        let evidence = summarize_live_human_nursery(snapshots.iter());
+        println!("mode=live_human_nursery");
+        println!("deterministic_fixture={deterministic_fixture}");
+        println!("runtime_snapshot_read={runtime_snapshot_read}");
+        println!("snapshots_seen={}", evidence.snapshots_seen);
+        println!("phot_health_observed={}", evidence.phot_health_observed);
+        println!("phot_fault_observed={}", evidence.phot_fault_observed);
+        println!("vib_activity_observed={}", evidence.vib_activity_observed);
+        println!(
+            "phot_structure_observed={}",
+            evidence.phot_structure_observed
+        );
+        println!(
+            "vocal_activity_observed={}",
+            evidence.vocal_activity_observed
+        );
+        println!(
+            "body_write_out_observed={}",
+            evidence.body_write_out_observed
+        );
+        println!("vocal_write_epochs={}", evidence.vocal_write_epochs);
+        println!("return_windows={}", evidence.return_windows);
+        println!(
+            "temporal_pairing_observed={}",
+            evidence.temporal_pairing_observed
+        );
+        println!(
+            "pairing_or_unpaired_boundary_observed={}",
+            evidence.pairing_or_unpaired_boundary_observed
+        );
+        println!(
+            "closure_or_reentry_observed={}",
+            evidence.closure_or_reentry_observed
+        );
+        println!(
+            "organic_surface_nonblank={}",
+            evidence.organic_surface_nonblank
+        );
+        println!("teacher_phase_count={}", evidence.teacher_phase_count);
+        println!(
+            "communication_candidate={}",
+            evidence.communication_candidate
+        );
+        println!("principle_guard_pass={}", evidence.principle_guard_pass);
     } else if product_cognition_baseline {
         let evidence = run_product_cognition_baseline_curriculum(CurriculumConfig::default())?;
         println!("mode=product_cognition_baseline");

@@ -1,5 +1,11 @@
 # Predictive Visual Surface Implementation Plan
 
+> **DEPRECATED / SUPERSEDED 2026-05-18**:
+> This plan implemented the first observer-side visual surface. It is no longer
+> the plan authority for new surface-expression work. Use
+> [2026-05-18-organic-surface-expression-substrate.md](./2026-05-18-organic-surface-expression-substrate.md)
+> for organ-like, regulated pixel expression.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the first observer-side native visual surface for `bionic_v0` so current object slots, spatial extent, focus bias, and short trajectory history render as a coarse real-time pixel field without changing `body` responsibilities or adding any body-side display channel.
