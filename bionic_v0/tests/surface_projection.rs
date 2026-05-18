@@ -5,6 +5,7 @@ use bionic_v0::evidence_tension::EvidenceTensionState;
 use bionic_v0::language_binding::LanguageBindingState;
 use bionic_v0::learned_bias::LearnedBiasSummary;
 use bionic_v0::object_high_layer::ObjectHighLayerState;
+use bionic_v0::self_development::SelfDevelopmentState;
 use bionic_v0::snapshot::{
     SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub, SnapshotData,
     SnapshotFramedByteEgress, SnapshotLastClaim, SnapshotProbeLaw, SnapshotSlot, SnapshotSpatial,
@@ -68,6 +69,7 @@ fn make_empty_snapshot() -> SnapshotData {
         evidence_tension: EvidenceTensionState::default(),
         framed_byte_egress: SnapshotFramedByteEgress::default(),
         active_reasoning_gap: ActiveReasoningGapState::default(),
+        self_development: SelfDevelopmentState::default(),
     }
 }
 

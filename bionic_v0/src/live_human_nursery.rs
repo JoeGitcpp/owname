@@ -5,6 +5,7 @@ use crate::evidence_tension::EvidenceTensionState;
 use crate::language_binding::LanguageBindingState;
 use crate::learned_bias::LearnedBiasSummary;
 use crate::live_io_evidence::summarize_live_io_evidence;
+use crate::self_development::SelfDevelopmentState;
 use crate::snapshot::{
     SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub, SnapshotConsequencePair,
     SnapshotConsequenceWindow, SnapshotData, SnapshotFramedByteEgress, SnapshotLastClaim,
@@ -273,6 +274,7 @@ fn empty_snapshot() -> SnapshotData {
         evidence_tension: EvidenceTensionState::default(),
         framed_byte_egress: SnapshotFramedByteEgress::default(),
         active_reasoning_gap: ActiveReasoningGapState::default(),
+        self_development: SelfDevelopmentState::default(),
     }
 }
 

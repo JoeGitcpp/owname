@@ -43,6 +43,7 @@ fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u
     vp.tick_auditory_visual_from_pairs(t);
     vp.tick_auditory_visual_from_fusion(t);
     vp.tick_auditory_visual_expression(t);
+    vp.tick_self_development_from_substrate(t);
     vp.refresh_probe_law(t);
     vp.tick_probe_output_from_law(t);
     if write_snapshot(vp, paths).is_err() {

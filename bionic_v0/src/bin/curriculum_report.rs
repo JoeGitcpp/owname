@@ -58,6 +58,7 @@ fn parse_args() -> (
     bool,
     bool,
     bool,
+    bool,
 ) {
     let mut args = std::env::args().skip(1);
     let mut episodes = 3;
@@ -89,6 +90,7 @@ fn parse_args() -> (
     let mut external_curriculum_plan = false;
     let mut persistent_curriculum_governor = false;
     let mut live_human_nursery = false;
+    let mut self_development_life_loop = false;
     while let Some(arg) = args.next() {
         if arg == "--episodes" {
             if let Some(value) = args.next().and_then(|s| s.parse::<u32>().ok()) {
@@ -150,6 +152,8 @@ fn parse_args() -> (
             persistent_curriculum_governor = true;
         } else if arg == "--live-human-nursery" {
             live_human_nursery = true;
+        } else if arg == "--self-development-life-loop" {
+            self_development_life_loop = true;
         }
     }
     (
@@ -182,6 +186,7 @@ fn parse_args() -> (
         external_curriculum_plan,
         persistent_curriculum_governor,
         live_human_nursery,
+        self_development_life_loop,
     )
 }
 
@@ -189,6 +194,21 @@ fn live_human_nursery_runtime_dir_arg() -> Option<PathBuf> {
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         if arg == "--live-human-nursery" {
+            if let Some(next) = args.peek() {
+                if !next.starts_with("--") {
+                    return args.next().map(PathBuf::from);
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn self_development_life_loop_runtime_dir_arg() -> Option<PathBuf> {
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        if arg == "--self-development-life-loop" {
             if let Some(next) = args.peek() {
                 if !next.starts_with("--") {
                     return args.next().map(PathBuf::from);
@@ -231,6 +251,7 @@ fn main() -> std::io::Result<()> {
         external_curriculum_plan,
         persistent_curriculum_governor,
         live_human_nursery,
+        self_development_life_loop,
     ) = parse_args();
 
     println!("curriculum_report_v0");
@@ -1102,6 +1123,44 @@ fn main() -> std::io::Result<()> {
             evidence.reentry_cold_avg_strength
         );
         println!("time_window_strength={:.6}", evidence.time_window_strength);
+    } else if self_development_life_loop {
+        let runtime_dir_arg = self_development_life_loop_runtime_dir_arg();
+        let runtime_snapshot_read = if runtime_dir_arg.is_some() { 1 } else { 0 };
+        let state = if let Some(runtime_dir) = runtime_dir_arg {
+            read_snapshot(&runtime_dir.join("snapshot.bin"))?.self_development
+        } else {
+            bionic_v0::self_development::SelfDevelopmentState::default()
+        };
+        let principle_guard_pass = u8::from(
+            state.prediction_gap.is_finite()
+                && state.prediction_improvement.is_finite()
+                && state.stable_recurrence.is_finite()
+                && state.familiarity_pressure.is_finite()
+                && state.repetition_pressure.is_finite()
+                && state.exploratory_pressure.is_finite()
+                && state.output_suppression.is_finite()
+                && (0.0..=1.0).contains(&state.prediction_gap)
+                && (0.0..=1.0).contains(&state.prediction_improvement)
+                && (0.0..=1.0).contains(&state.stable_recurrence)
+                && (0.0..=1.0).contains(&state.familiarity_pressure)
+                && (0.0..=1.0).contains(&state.repetition_pressure)
+                && (0.0..=1.0).contains(&state.exploratory_pressure)
+                && (0.0..=1.0).contains(&state.output_suppression),
+        );
+        println!("mode=self_development_life_loop");
+        println!("runtime_snapshot_read={runtime_snapshot_read}");
+        println!("prediction_gap={:.6}", state.prediction_gap);
+        println!("prediction_improvement={:.6}", state.prediction_improvement);
+        println!("stable_recurrence={:.6}", state.stable_recurrence);
+        println!("familiarity_pressure={:.6}", state.familiarity_pressure);
+        println!("repetition_pressure={:.6}", state.repetition_pressure);
+        println!("exploratory_pressure={:.6}", state.exploratory_pressure);
+        println!("output_suppression={:.6}", state.output_suppression);
+        println!("total_updates={}", state.total_updates);
+        println!("suppression_events={}", state.suppression_events);
+        println!("stable_reentry_count={}", state.stable_reentry_count);
+        println!("last_update_t_us={}", state.last_update_t_us);
+        println!("principle_guard_pass={principle_guard_pass}");
     } else if live_human_nursery {
         let runtime_dir_arg = live_human_nursery_runtime_dir_arg();
         let deterministic_fixture = if runtime_dir_arg.is_some() { 0 } else { 1 };

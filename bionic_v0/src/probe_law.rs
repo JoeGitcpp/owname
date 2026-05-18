@@ -111,7 +111,7 @@ impl Viewport {
             } else {
                 0.0
             };
-        let drive = novelty
+        let raw_drive = novelty
             .max(evidence_pressure)
             .max(surprise_pressure)
             .max(relation_pressure)
@@ -119,6 +119,8 @@ impl Viewport {
             .max(field_pressure)
             .max(slot_switch_pressure)
             .clamp(0.0, 1.0);
+        let output_suppression = self.read_self_development().output_suppression;
+        let drive = (raw_drive * (1.0 - 0.75 * output_suppression)).clamp(0.0, 1.0);
 
         st.intensity = (1.0 - PROBE_INTENSITY_ALPHA) * st.intensity + PROBE_INTENSITY_ALPHA * drive;
         st.suppression = (1.0 - PROBE_SUPPRESSION_ALPHA) * st.suppression

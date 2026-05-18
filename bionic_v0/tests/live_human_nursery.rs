@@ -5,6 +5,7 @@ use bionic_v0::evidence_tension::EvidenceTensionState;
 use bionic_v0::language_binding::LanguageBindingState;
 use bionic_v0::learned_bias::LearnedBiasSummary;
 use bionic_v0::live_human_nursery::summarize_live_human_nursery;
+use bionic_v0::self_development::SelfDevelopmentState;
 use bionic_v0::snapshot::{
     SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub, SnapshotConsequencePair,
     SnapshotConsequenceWindow, SnapshotData, SnapshotFramedByteEgress, SnapshotLastClaim,
@@ -68,6 +69,7 @@ fn make_empty_snapshot() -> SnapshotData {
         evidence_tension: EvidenceTensionState::default(),
         framed_byte_egress: SnapshotFramedByteEgress::default(),
         active_reasoning_gap: ActiveReasoningGapState::default(),
+        self_development: SelfDevelopmentState::default(),
     }
 }
 

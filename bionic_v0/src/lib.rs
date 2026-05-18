@@ -29,6 +29,7 @@ pub mod post_effect;
 pub mod prediction_pressure_field;
 pub mod predictor;
 pub mod probe_law;
+pub mod self_development;
 pub mod snapshot;
 pub mod source;
 pub mod substrate_pressure;
@@ -330,7 +331,8 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v45: cumulative closure counters added for long-run observer traces, split by
 //      return modality.
 // v46: active reasoning gap observer trace added.
-pub const SNAPSHOT_VERSION: u64 = 46;
+// v47: self-development predictive life-loop observer trace added.
+pub const SNAPSHOT_VERSION: u64 = 47;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

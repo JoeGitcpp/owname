@@ -19,6 +19,7 @@ use crate::language_binding::{
 use crate::learned_bias::LearnedBiasSummary;
 use crate::object_high_layer::ObjectHighLayerState;
 use crate::probe_law::ProbeLawState;
+use crate::self_development::SelfDevelopmentState;
 use crate::viewport::{
     AmbientModalitySnapshot, AxisRing, BandFamilyState, CrossModalFusionState,
     GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,
@@ -213,6 +214,9 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
 
     // v46: active reasoning gap observer trace.
     write_active_reasoning_gap(&mut buf, &vp.read_active_reasoning_gap());
+
+    // v47: self-development predictive life-loop observer trace.
+    write_self_development(&mut buf, &vp.read_self_development());
 
     // Rejected v21/v22 naming sections were removed by cleanup spec
     // 2026-04-20. Snapshot terminates at the reasoning memory summary
@@ -460,6 +464,8 @@ pub struct SnapshotData {
     pub framed_byte_egress: SnapshotFramedByteEgress,
     // v46: active reasoning gap observer trace.
     pub active_reasoning_gap: ActiveReasoningGapState,
+    // v47: self-development predictive life-loop observer trace.
+    pub self_development: SelfDevelopmentState,
 }
 
 impl SnapshotData {
@@ -914,6 +920,12 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         ActiveReasoningGapState::default()
     };
 
+    let self_development = if version >= 47 {
+        read_self_development_snapshot(&bytes, &mut cur)
+    } else {
+        SelfDevelopmentState::default()
+    };
+
     // Rejected v21/v22 naming sections removed by cleanup spec 2026-04-20.
     // Older snapshot files containing those bytes are no longer readable;
     // v23+ omits them entirely.
@@ -966,6 +978,7 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         evidence_tension,
         framed_byte_egress,
         active_reasoning_gap,
+        self_development,
     })
 }
 
@@ -2573,6 +2586,51 @@ fn read_active_reasoning_gap_snapshot(bytes: &[u8], cur: &mut usize) -> ActiveRe
         history_head,
         total_samples,
         history,
+    }
+}
+
+// ─── v47: self-development predictive life-loop observer trace ──────────────
+
+fn write_self_development(buf: &mut Vec<u8>, s: &SelfDevelopmentState) {
+    buf.extend_from_slice(&s.prediction_gap.to_le_bytes());
+    buf.extend_from_slice(&s.prediction_improvement.to_le_bytes());
+    buf.extend_from_slice(&s.stable_recurrence.to_le_bytes());
+    buf.extend_from_slice(&s.familiarity_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.repetition_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.exploratory_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.output_suppression.to_le_bytes());
+    buf.extend_from_slice(&s.total_updates.to_le_bytes());
+    buf.extend_from_slice(&(s.suppression_events as u64).to_le_bytes());
+    buf.extend_from_slice(&(s.stable_reentry_count as u64).to_le_bytes());
+    buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_self_development_snapshot(bytes: &[u8], cur: &mut usize) -> SelfDevelopmentState {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+
+    SelfDevelopmentState {
+        prediction_gap: rd_f64(bytes, cur),
+        prediction_improvement: rd_f64(bytes, cur),
+        stable_recurrence: rd_f64(bytes, cur),
+        familiarity_pressure: rd_f64(bytes, cur),
+        repetition_pressure: rd_f64(bytes, cur),
+        exploratory_pressure: rd_f64(bytes, cur),
+        output_suppression: rd_f64(bytes, cur),
+        total_updates: rd_u64(bytes, cur),
+        suppression_events: rd_u64(bytes, cur) as u32,
+        stable_reentry_count: rd_u64(bytes, cur) as u32,
+        last_update_t_us: rd_u64(bytes, cur),
     }
 }
 

@@ -21,6 +21,7 @@ use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::{PhotSlotPredictor, VPC_FAMILY_PHOT};
 use crate::prediction_pressure_field::PredictionPressureFieldState;
 use crate::probe_law::ProbeLawState;
+use crate::self_development::SelfDevelopmentState;
 use crate::substrate_pressure::{compute_pressure, PressureSample};
 use crate::vocal_imitation::VocalImitationState;
 use crate::vocal_memory::VocalMemoryState;
@@ -1114,6 +1115,10 @@ pub struct Viewport {
     /// one dominant focus may feed active probe pressure.
     pub prediction_pressure_field: RwLock<PredictionPressureFieldState>,
 
+    /// Body-side self-development substrate. Numeric growth evidence only;
+    /// no fixed world content or observer interpretation.
+    pub self_development: RwLock<SelfDevelopmentState>,
+
     /// Parallel focus traces with one active aperture and one bounded echo.
     pub active_surface: RwLock<ActiveSurfaceState>,
 
@@ -1243,6 +1248,7 @@ impl Viewport {
             global_reasoning_memory_summary: RwLock::new(GlobalReasoningMemorySummary::default()),
             active_reasoning_gap: RwLock::new(ActiveReasoningGapState::default()),
             prediction_pressure_field: RwLock::new(PredictionPressureFieldState::default()),
+            self_development: RwLock::new(SelfDevelopmentState::default()),
             active_surface: RwLock::new(ActiveSurfaceState::default()),
             language_binding: RwLock::new(LanguageBindingState::default()),
             code_ingress: RwLock::new(CodeIngressState::default()),
