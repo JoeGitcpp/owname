@@ -1,6 +1,9 @@
 # Pre-Language Solitary Growth v0 Design
 
-> **Status:** DESIGN CANDIDATE
+> **Status:** FROZEN CANDIDATE
+> **Implementation status (2026-05-19):** v0 body-side solitary-growth
+> evidence, reentry advantage, snapshot v48, report gate, and TDD guardrails
+> are implemented on `codex/self-development-predictive-life-loop-v0`.
 > **Purpose:** define the hard gate before language training: the body must
 > continue growing while alone, without a teacher, prompt, curriculum, or
 > explicit human feedback.

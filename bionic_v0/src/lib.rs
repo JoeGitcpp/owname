@@ -332,7 +332,8 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 //      return modality.
 // v46: active reasoning gap observer trace added.
 // v47: self-development predictive life-loop observer trace added.
-pub const SNAPSHOT_VERSION: u64 = 47;
+// v48: pre-language solitary growth fields added to self-development trace.
+pub const SNAPSHOT_VERSION: u64 = 48;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

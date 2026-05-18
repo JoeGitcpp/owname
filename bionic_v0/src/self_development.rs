@@ -10,6 +10,12 @@ pub struct SelfDevelopmentState {
     pub repetition_pressure: f64,
     pub exploratory_pressure: f64,
     pub output_suppression: f64,
+    pub solitary_stability: f64,
+    pub quiet_replay_pressure: f64,
+    pub room_familiarity: f64,
+    pub solitary_reentry_score: f64,
+    pub solitary_growth_score: f64,
+    pub solitary_growth_gate_pass: u8,
     pub total_updates: u64,
     pub suppression_events: u32,
     pub stable_reentry_count: u32,
@@ -52,7 +58,7 @@ impl SelfDevelopmentState {
                 .max(self.prediction_improvement),
         );
         let familiarity_input =
-            unit(recurrence * (0.55 + 0.45 * closure_support) * (1.0 - 0.45 * gap));
+            unit(recurrence * (0.62 + 0.38 * closure_support) * (1.0 - 0.45 * gap));
         self.familiarity_pressure = ema(self.familiarity_pressure, familiarity_input, 0.18);
 
         let loop_load = sample
@@ -71,6 +77,42 @@ impl SelfDevelopmentState {
             gap.max(sample.field_pressure)
                 * (1.0 - 0.75 * self.output_suppression)
                 * (1.0 - 0.20 * self.familiarity_pressure),
+        );
+
+        let quiet_load = unit(1.0 - loop_load);
+        let quiet_gap = unit(1.0 - gap);
+        let solitary_input = unit(recurrence * quiet_gap * quiet_load);
+        self.solitary_stability = ema(self.solitary_stability, solitary_input, 0.16);
+
+        let quiet_replay_input = unit(
+            self.solitary_stability
+                * memory_like(sample.pattern_recurrence, sample.focus_persistence)
+                * (1.0 - self.repetition_pressure),
+        );
+        self.quiet_replay_pressure = ema(self.quiet_replay_pressure, quiet_replay_input, 0.14);
+
+        let room_input = unit(
+            self.familiarity_pressure
+                .max(self.solitary_stability)
+                .max(self.quiet_replay_pressure * 0.85),
+        );
+        self.room_familiarity = ema(self.room_familiarity, room_input, 0.18);
+
+        let reentry_input = unit(sample.reentry_score * self.room_familiarity.max(0.05));
+        self.solitary_reentry_score = unit((self.solitary_reentry_score * 0.82).max(reentry_input));
+
+        self.solitary_growth_score = unit(
+            self.solitary_stability * 0.34
+                + self.quiet_replay_pressure * 0.22
+                + self.room_familiarity * 0.24
+                + self.familiarity_pressure * 0.20
+                - self.repetition_pressure * 0.35,
+        );
+        self.solitary_growth_gate_pass = u8::from(
+            self.solitary_growth_score > 0.35
+                && self.room_familiarity > 0.30
+                && self.repetition_pressure < 0.35
+                && self.output_suppression < 0.45,
         );
 
         if self.output_suppression > 0.50 {
@@ -156,6 +198,10 @@ fn ratio(value: u32, cap: usize) -> f64 {
 
 fn ema(previous: f64, next: f64, alpha: f64) -> f64 {
     unit((1.0 - alpha) * previous + alpha * next)
+}
+
+fn memory_like(recurrence: f64, focus_persistence: f64) -> f64 {
+    unit((unit(recurrence) + unit(focus_persistence)) * 0.5)
 }
 
 fn unit(value: f64) -> f64 {

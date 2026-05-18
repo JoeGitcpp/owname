@@ -2599,6 +2599,12 @@ fn write_self_development(buf: &mut Vec<u8>, s: &SelfDevelopmentState) {
     buf.extend_from_slice(&s.repetition_pressure.to_le_bytes());
     buf.extend_from_slice(&s.exploratory_pressure.to_le_bytes());
     buf.extend_from_slice(&s.output_suppression.to_le_bytes());
+    buf.extend_from_slice(&s.solitary_stability.to_le_bytes());
+    buf.extend_from_slice(&s.quiet_replay_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.room_familiarity.to_le_bytes());
+    buf.extend_from_slice(&s.solitary_reentry_score.to_le_bytes());
+    buf.extend_from_slice(&s.solitary_growth_score.to_le_bytes());
+    buf.extend_from_slice(&(s.solitary_growth_gate_pass as u64).to_le_bytes());
     buf.extend_from_slice(&s.total_updates.to_le_bytes());
     buf.extend_from_slice(&(s.suppression_events as u64).to_le_bytes());
     buf.extend_from_slice(&(s.stable_reentry_count as u64).to_le_bytes());
@@ -2627,6 +2633,12 @@ fn read_self_development_snapshot(bytes: &[u8], cur: &mut usize) -> SelfDevelopm
         repetition_pressure: rd_f64(bytes, cur),
         exploratory_pressure: rd_f64(bytes, cur),
         output_suppression: rd_f64(bytes, cur),
+        solitary_stability: rd_f64(bytes, cur),
+        quiet_replay_pressure: rd_f64(bytes, cur),
+        room_familiarity: rd_f64(bytes, cur),
+        solitary_reentry_score: rd_f64(bytes, cur),
+        solitary_growth_score: rd_f64(bytes, cur),
+        solitary_growth_gate_pass: rd_u64(bytes, cur) as u8,
         total_updates: rd_u64(bytes, cur),
         suppression_events: rd_u64(bytes, cur) as u32,
         stable_reentry_count: rd_u64(bytes, cur) as u32,

@@ -43,6 +43,26 @@ fn stable_recurrence_sediments_without_external_curriculum_gate() {
     assert!(state.output_suppression < 0.20);
 }
 
+#[test]
+fn solitary_low_change_runtime_builds_room_familiarity_without_teacher() {
+    let vp = Viewport::new();
+    for step in 0..24 {
+        let t_us = 5_000_000 + step * 50_000;
+        seed_stable_recurrence(&vp, t_us);
+        vp.tick_self_development_from_substrate(t_us);
+    }
+
+    let state = vp.read_self_development();
+    assert!(state.stable_recurrence > 0.55);
+    assert!(state.familiarity_pressure > 0.35);
+    assert!(state.solitary_stability > 0.45);
+    assert!(state.quiet_replay_pressure > 0.20);
+    assert!(state.room_familiarity > 0.30);
+    assert!(state.solitary_growth_score > 0.35);
+    assert_eq!(state.solitary_growth_gate_pass, 1);
+    assert!(state.repetition_pressure < 0.20);
+}
+
 fn seed_saturated_low_similarity_loop(vp: &Viewport) {
     {
         let mut output = vp.action_output.write().unwrap();
@@ -110,6 +130,30 @@ fn seed_probe_pressure(vp: &Viewport, t_us: u64, pressure: f64) {
     }
 }
 
+fn seed_reentry_disturbance(vp: &Viewport, t_us: u64) {
+    {
+        let mut reasoning = vp.global_reasoning.write().unwrap();
+        reasoning.global_surprise_load = 0.24;
+        reasoning.routing_focus_slot_ids[0] = 1;
+        reasoning.last_update_t_us = t_us;
+    }
+    {
+        let mut memory = vp.global_reasoning_memory_summary.write().unwrap();
+        memory.pattern_recurrence_score = 0.62;
+        memory.routing_stability_score = 0.74;
+        memory.dominant_focus_persistence = 0.76;
+        memory.persistence_score = 0.70;
+        memory.last_update_t_us = t_us;
+    }
+    {
+        let mut gap = vp.active_reasoning_gap.write().unwrap();
+        gap.gap_pressure = 0.24;
+        gap.reentry_score = 0.72;
+        gap.closure_score = 0.12;
+        gap.last_update_t_us = t_us;
+    }
+}
+
 #[test]
 fn repetitive_write_return_loop_raises_suppression_when_prediction_does_not_improve() {
     let vp = Viewport::new();
@@ -151,6 +195,27 @@ fn self_development_suppression_dampens_probe_output_without_disabling_probe_law
 }
 
 #[test]
+fn familiar_room_reentry_outperforms_cold_baseline_after_disturbance() {
+    let familiar = Viewport::new();
+    for step in 0..24 {
+        let t_us = 6_000_000 + step * 50_000;
+        seed_stable_recurrence(&familiar, t_us);
+        familiar.tick_self_development_from_substrate(t_us);
+    }
+    seed_reentry_disturbance(&familiar, 7_500_000);
+    familiar.tick_self_development_from_substrate(7_500_000);
+
+    let cold = Viewport::new();
+    seed_reentry_disturbance(&cold, 7_500_000);
+    cold.tick_self_development_from_substrate(7_500_000);
+
+    let familiar_state = familiar.read_self_development();
+    let cold_state = cold.read_self_development();
+    assert!(familiar_state.solitary_reentry_score > cold_state.solitary_reentry_score + 0.20);
+    assert!(familiar_state.room_familiarity > cold_state.room_familiarity + 0.20);
+}
+
+#[test]
 fn body_runtime_orders_self_development_before_probe_law() {
     let body_source = include_str!("../src/bin/body.rs");
     let self_development_pos = body_source
@@ -180,6 +245,10 @@ fn snapshot_roundtrip_preserves_self_development_evidence() {
     let snap = bionic_v0::snapshot::read_snapshot(&paths.final_path).unwrap();
 
     assert!(snap.self_development.familiarity_pressure > 0.0);
+    assert!(snap.self_development.solitary_stability > 0.0);
+    assert!(snap.self_development.quiet_replay_pressure > 0.0);
+    assert!(snap.self_development.room_familiarity > 0.0);
+    assert!(snap.self_development.solitary_growth_score > 0.0);
     assert_eq!(snap.self_development.total_updates, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -208,6 +277,8 @@ fn self_development_sources_stay_numeric_and_guarded() {
         "voice_label",
         "prompt_answer",
         "source_identity",
+        "person_id",
+        "identity_id",
         "owner",
         "ethics",
         "personality",

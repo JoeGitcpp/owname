@@ -26,10 +26,13 @@ use bionic_v0::curriculum_material::{
 use bionic_v0::live_human_nursery::{
     sample_live_human_nursery_snapshots, summarize_live_human_nursery,
 };
+use bionic_v0::self_development::SelfDevelopmentState;
 use bionic_v0::snapshot::read_snapshot;
+use bionic_v0::viewport::Viewport;
 
 fn parse_args() -> (
     u32,
+    bool,
     bool,
     bool,
     bool,
@@ -91,6 +94,7 @@ fn parse_args() -> (
     let mut persistent_curriculum_governor = false;
     let mut live_human_nursery = false;
     let mut self_development_life_loop = false;
+    let mut pre_language_solitary_growth = false;
     while let Some(arg) = args.next() {
         if arg == "--episodes" {
             if let Some(value) = args.next().and_then(|s| s.parse::<u32>().ok()) {
@@ -154,6 +158,8 @@ fn parse_args() -> (
             live_human_nursery = true;
         } else if arg == "--self-development-life-loop" {
             self_development_life_loop = true;
+        } else if arg == "--pre-language-solitary-growth" {
+            pre_language_solitary_growth = true;
         }
     }
     (
@@ -187,6 +193,7 @@ fn parse_args() -> (
         persistent_curriculum_governor,
         live_human_nursery,
         self_development_life_loop,
+        pre_language_solitary_growth,
     )
 }
 
@@ -218,6 +225,45 @@ fn self_development_life_loop_runtime_dir_arg() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn pre_language_solitary_growth_runtime_dir_arg() -> Option<PathBuf> {
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        if arg == "--pre-language-solitary-growth" {
+            if let Some(next) = args.peek() {
+                if !next.starts_with("--") {
+                    return args.next().map(PathBuf::from);
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn sample_pre_language_solitary_growth_state() -> SelfDevelopmentState {
+    let vp = Viewport::new();
+    for step in 0..24 {
+        let t_us = 8_000_000 + step * 50_000;
+        {
+            let mut reasoning = vp.global_reasoning.write().unwrap();
+            reasoning.global_surprise_load = 0.08;
+            reasoning.routing_focus_slot_ids[0] = 1;
+            reasoning.last_update_t_us = t_us;
+        }
+        {
+            let mut memory = vp.global_reasoning_memory_summary.write().unwrap();
+            memory.pattern_recurrence_score = 0.82;
+            memory.routing_stability_score = 0.88;
+            memory.dominant_focus_persistence = 0.90;
+            memory.persistence_score = 0.76;
+            memory.history_fill_ratio = 0.80;
+            memory.last_update_t_us = t_us;
+        }
+        vp.tick_self_development_from_substrate(t_us);
+    }
+    vp.read_self_development()
 }
 
 fn main() -> std::io::Result<()> {
@@ -252,6 +298,7 @@ fn main() -> std::io::Result<()> {
         persistent_curriculum_governor,
         live_human_nursery,
         self_development_life_loop,
+        pre_language_solitary_growth,
     ) = parse_args();
 
     println!("curriculum_report_v0");
@@ -1123,6 +1170,69 @@ fn main() -> std::io::Result<()> {
             evidence.reentry_cold_avg_strength
         );
         println!("time_window_strength={:.6}", evidence.time_window_strength);
+    } else if pre_language_solitary_growth {
+        let runtime_dir_arg = pre_language_solitary_growth_runtime_dir_arg();
+        let deterministic_fixture = if runtime_dir_arg.is_some() { 0 } else { 1 };
+        let runtime_snapshot_read = if runtime_dir_arg.is_some() { 1 } else { 0 };
+        let state = if let Some(runtime_dir) = runtime_dir_arg {
+            read_snapshot(&runtime_dir.join("snapshot.bin"))?.self_development
+        } else {
+            sample_pre_language_solitary_growth_state()
+        };
+        let bounded = state.prediction_gap.is_finite()
+            && state.prediction_improvement.is_finite()
+            && state.stable_recurrence.is_finite()
+            && state.familiarity_pressure.is_finite()
+            && state.repetition_pressure.is_finite()
+            && state.exploratory_pressure.is_finite()
+            && state.output_suppression.is_finite()
+            && state.solitary_stability.is_finite()
+            && state.quiet_replay_pressure.is_finite()
+            && state.room_familiarity.is_finite()
+            && state.solitary_reentry_score.is_finite()
+            && state.solitary_growth_score.is_finite()
+            && (0.0..=1.0).contains(&state.prediction_gap)
+            && (0.0..=1.0).contains(&state.prediction_improvement)
+            && (0.0..=1.0).contains(&state.stable_recurrence)
+            && (0.0..=1.0).contains(&state.familiarity_pressure)
+            && (0.0..=1.0).contains(&state.repetition_pressure)
+            && (0.0..=1.0).contains(&state.exploratory_pressure)
+            && (0.0..=1.0).contains(&state.output_suppression)
+            && (0.0..=1.0).contains(&state.solitary_stability)
+            && (0.0..=1.0).contains(&state.quiet_replay_pressure)
+            && (0.0..=1.0).contains(&state.room_familiarity)
+            && (0.0..=1.0).contains(&state.solitary_reentry_score)
+            && (0.0..=1.0).contains(&state.solitary_growth_score);
+        let quiet_not_saturated =
+            state.repetition_pressure < 0.35 && state.output_suppression < 0.50;
+        let prelingual_growth_gate_pass =
+            u8::from(state.solitary_growth_gate_pass == 1 && quiet_not_saturated && bounded);
+        let principle_guard_pass = u8::from(bounded);
+        println!("mode=pre_language_solitary_growth");
+        println!("deterministic_fixture={deterministic_fixture}");
+        println!("runtime_snapshot_read={runtime_snapshot_read}");
+        println!("prediction_gap={:.6}", state.prediction_gap);
+        println!("prediction_improvement={:.6}", state.prediction_improvement);
+        println!("stable_recurrence={:.6}", state.stable_recurrence);
+        println!("familiarity_pressure={:.6}", state.familiarity_pressure);
+        println!("repetition_pressure={:.6}", state.repetition_pressure);
+        println!("exploratory_pressure={:.6}", state.exploratory_pressure);
+        println!("output_suppression={:.6}", state.output_suppression);
+        println!("solitary_stability={:.6}", state.solitary_stability);
+        println!("quiet_replay_pressure={:.6}", state.quiet_replay_pressure);
+        println!("room_familiarity={:.6}", state.room_familiarity);
+        println!("solitary_reentry_score={:.6}", state.solitary_reentry_score);
+        println!("solitary_growth_score={:.6}", state.solitary_growth_score);
+        println!(
+            "solitary_growth_gate_pass={}",
+            state.solitary_growth_gate_pass
+        );
+        println!("prelingual_growth_gate_pass={prelingual_growth_gate_pass}");
+        println!("total_updates={}", state.total_updates);
+        println!("suppression_events={}", state.suppression_events);
+        println!("stable_reentry_count={}", state.stable_reentry_count);
+        println!("last_update_t_us={}", state.last_update_t_us);
+        println!("principle_guard_pass={principle_guard_pass}");
     } else if self_development_life_loop {
         let runtime_dir_arg = self_development_life_loop_runtime_dir_arg();
         let runtime_snapshot_read = if runtime_dir_arg.is_some() { 1 } else { 0 };
