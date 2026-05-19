@@ -8,9 +8,8 @@ use bionic_v0::learned_bias::LearnedBiasSummary;
 use bionic_v0::live_human_nursery::sample_live_human_nursery_snapshots;
 use bionic_v0::self_development::SelfDevelopmentState;
 use bionic_v0::snapshot::{
-    SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub,
+    SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub, SnapshotData,
     SnapshotFramedByteEgress, SnapshotLastClaim, SnapshotProbeLaw, SnapshotVocalMemory,
-    SnapshotData,
 };
 use bionic_v0::viewport::{
     GlobalAttentionState, GlobalReasoningMemorySummary, GlobalReasoningState, GlobalRelationState,

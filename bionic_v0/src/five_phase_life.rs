@@ -70,8 +70,7 @@ pub fn summarize_five_phase_life<'a>(
             && live.closure_or_reentry_observed == 1,
     );
     evidence.wood_fire_non_suppression = u8::from(
-        evidence.metal_balance < 0.92
-            || evidence.wood_balance.max(evidence.fire_balance) >= 0.20,
+        evidence.metal_balance < 0.92 || evidence.wood_balance.max(evidence.fire_balance) >= 0.20,
     );
     evidence.principle_guard_pass = u8::from(all_bounded(&evidence));
     evidence
@@ -92,7 +91,10 @@ fn fire_score(snap: &SnapshotData) -> f64 {
         snap.vocal_target
             .active_energy
             .max(snap.vocal_organ.breath_drive)
-            .max(ratio(snap.action_output.n_write_epochs, WRITE_EPOCH_HISTORY_CAP))
+            .max(ratio(
+                snap.action_output.n_write_epochs,
+                WRITE_EPOCH_HISTORY_CAP,
+            ))
             .max(snap.framed_byte_egress.output_pressure)
             .max(snap.probe_law.output_intensity),
     )
