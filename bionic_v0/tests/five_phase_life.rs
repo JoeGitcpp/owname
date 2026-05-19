@@ -94,3 +94,51 @@ fn five_phase_life_scores_are_bounded_and_observer_side() {
     assert!((0.0..=1.0).contains(&evidence.water_balance));
     assert_eq!(evidence.principle_guard_pass, 1);
 }
+
+#[test]
+fn fire_is_insufficient_when_pressure_has_no_manifestation() {
+    let mut snap = empty_snapshot();
+    snap.active_reasoning_gap.gap_pressure = 0.80;
+    snap.global_reasoning_memory.novelty_score = 0.50;
+    snap.self_development.exploratory_pressure = 0.52;
+
+    let evidence = summarize_five_phase_life([snap].iter(), 1, 0);
+
+    assert!(evidence.wood_balance > 0.40);
+    assert_eq!(evidence.fire_insufficient, 1);
+    assert_eq!(evidence.fire_live_closure_gate_pass, 0);
+}
+
+#[test]
+fn metal_excess_flags_when_suppression_blocks_wood_and_fire() {
+    let mut snap = empty_snapshot();
+    snap.probe_law.suppression = 0.96;
+    snap.self_development.output_suppression = 0.94;
+
+    let evidence = summarize_five_phase_life([snap].iter(), 1, 0);
+
+    assert_eq!(evidence.metal_excess, 1);
+    assert_eq!(evidence.wood_fire_non_suppression, 0);
+}
+
+#[test]
+fn five_phase_life_sources_do_not_introduce_body_ontology() {
+    let src = include_str!("../src/five_phase_life.rs");
+    for forbidden in [
+        "semantic_readiness",
+        "concept_id",
+        "token_id",
+        "object_name",
+        "meaning",
+        "personality",
+        "identity",
+        "owner",
+        "println!",
+        "eprintln!",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "five phase life evidence must not contain `{forbidden}`"
+        );
+    }
+}
