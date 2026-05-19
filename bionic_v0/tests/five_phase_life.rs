@@ -5,6 +5,7 @@ use bionic_v0::evidence_tension::EvidenceTensionState;
 use bionic_v0::five_phase_life::summarize_five_phase_life;
 use bionic_v0::language_binding::LanguageBindingState;
 use bionic_v0::learned_bias::LearnedBiasSummary;
+use bionic_v0::live_human_nursery::sample_live_human_nursery_snapshots;
 use bionic_v0::self_development::SelfDevelopmentState;
 use bionic_v0::snapshot::{
     SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub,
@@ -141,4 +142,23 @@ fn five_phase_life_sources_do_not_introduce_body_ontology() {
             "five phase life evidence must not contain `{forbidden}`"
         );
     }
+}
+
+#[test]
+fn fire_live_closure_refuses_deterministic_fixture_even_when_closure_exists() {
+    let snapshots = sample_live_human_nursery_snapshots();
+    let evidence = summarize_five_phase_life(snapshots.iter(), 1, 0);
+
+    assert!(evidence.fire_balance > 0.0);
+    assert_eq!(evidence.fire_live_closure_gate_pass, 0);
+}
+
+#[test]
+fn fire_live_closure_accepts_runtime_snapshot_with_write_return_and_closure() {
+    let snapshots = sample_live_human_nursery_snapshots();
+    let evidence = summarize_five_phase_life(snapshots.iter(), 0, 1);
+
+    assert!(evidence.fire_balance > 0.0);
+    assert_eq!(evidence.fire_live_closure_gate_pass, 1);
+    assert_eq!(evidence.principle_guard_pass, 1);
 }
