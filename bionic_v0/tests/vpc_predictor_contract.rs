@@ -4,10 +4,13 @@ use bionic_v0::predictor::Ar2Predictor;
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::vpc::{
-    ErrAlignmentKind, HorizonKind, ObservationDomainKind, PredictorLifecycleState,
-    PublicationStatus, VpcContractState,
+    ErrAlignmentKind, HorizonKind, ObservationDomainKind, ObservationDomainRef, PredictionHorizon,
+    PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
 };
-use bionic_v0::{MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, PHOT_BANDS, VIB_BANDS};
+use bionic_v0::{
+    MOD_PHOT, MOD_VIB, N_OBJECT_SLOTS, PHOT_BANDS, VIB_BANDS, VPC_OPEN_PREDICTION_CAP,
+    VPC_PREDICTOR_TRACE_CAP, VPC_PUBLICATION_TRACE_CAP,
+};
 
 const VPC_FAMILY_AR2: u8 = 1;
 const VPC_FAMILY_PHOT: u8 = 2;
@@ -54,6 +57,107 @@ fn predictor_family_contract_state_starts_empty_and_engineering_only() {
     assert!(st.predictor_traces.is_empty());
     assert!(!format!("{:?}", st).contains("semantic"));
     assert!(!format!("{:?}", st).contains("concept"));
+}
+
+#[test]
+fn predictor_contract_retains_bounded_trace_history_under_long_runs() {
+    let mut st = VpcContractState::default();
+    let domain = ObservationDomainRef {
+        kind: ObservationDomainKind::Axis,
+        primary: 0,
+        secondary: 0,
+        tertiary: 0,
+    };
+
+    for i in 0..(VPC_PREDICTOR_TRACE_CAP + VPC_PUBLICATION_TRACE_CAP + 512) {
+        let publish_t_us = i as u64 * 10_000;
+        let horizon = PredictionHorizon {
+            kind: HorizonKind::Point,
+            publish_t_us,
+            target_start_t_us: publish_t_us + 10_000,
+            target_end_t_us: publish_t_us + 10_000,
+        };
+        st.record_predictor_trace(
+            VPC_FAMILY_AR2,
+            domain,
+            horizon,
+            PredictorLifecycleState::OpenPublication,
+        );
+        st.record_resolved_publication(PredictionPublicationTrace {
+            predictor_family: VPC_FAMILY_AR2,
+            domain,
+            horizon,
+            alignment: ErrAlignmentKind::PointExact,
+            status: PublicationStatus::Resolved,
+        });
+    }
+
+    assert!(
+        st.predictor_traces.len() <= VPC_PREDICTOR_TRACE_CAP,
+        "predictor traces must stay bounded for overnight runs; len={}",
+        st.predictor_traces.len()
+    );
+    assert!(
+        st.publications.len() <= VPC_PUBLICATION_TRACE_CAP,
+        "publication traces must stay bounded for overnight runs; len={}",
+        st.publications.len()
+    );
+}
+
+#[test]
+fn predictor_contract_retains_bounded_open_predictions_and_resolves_recent_indices() {
+    let mut st = VpcContractState::default();
+    let domain = ObservationDomainRef {
+        kind: ObservationDomainKind::Axis,
+        primary: 0,
+        secondary: 0,
+        tertiary: 0,
+    };
+
+    let mut recent_target_t_us = 0;
+    for i in 0..(VPC_OPEN_PREDICTION_CAP + VPC_PUBLICATION_TRACE_CAP + 32) {
+        let publish_t_us = i as u64 * 10_000;
+        recent_target_t_us = publish_t_us + 10_000;
+        let horizon = PredictionHorizon {
+            kind: HorizonKind::Point,
+            publish_t_us,
+            target_start_t_us: recent_target_t_us,
+            target_end_t_us: recent_target_t_us,
+        };
+        st.record_open_publication(
+            PredictionPublicationTrace {
+                predictor_family: VPC_FAMILY_AR2,
+                domain,
+                horizon,
+                alignment: ErrAlignmentKind::PointExact,
+                status: PublicationStatus::Open,
+            },
+            VPC_FAMILY_AR2,
+            domain,
+            horizon,
+            ErrAlignmentKind::PointExact,
+        );
+    }
+
+    assert!(
+        st.open_predictions.len() <= VPC_OPEN_PREDICTION_CAP,
+        "open predictions must stay bounded; len={}",
+        st.open_predictions.len()
+    );
+    assert!(
+        st.publications.len() <= VPC_PUBLICATION_TRACE_CAP,
+        "publication backing records must stay bounded; len={}",
+        st.publications.len()
+    );
+    assert!(
+        st.resolve_open_publication(
+            VPC_FAMILY_AR2,
+            domain,
+            recent_target_t_us,
+            recent_target_t_us,
+        ),
+        "most recent open prediction should still resolve after cap eviction"
+    );
 }
 
 #[test]
@@ -223,7 +327,7 @@ fn predictor_contract_snapshot_roundtrips_family_traces_without_semantics() {
     let observer_src =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/observer.rs"))
             .expect("read observer.rs");
-    assert!(observer_src.contains("tr["));
+    assert!(observer_src.contains("tr_recent["));
     assert!(!observer_src.contains("meaning"));
     assert!(!observer_src.contains("identity"));
 }

@@ -18,6 +18,8 @@ use bionic_v0::{
     HEALTH_QUIET, HEALTH_STALE,
 };
 
+const OBSERVER_VPC_RECENT_LIMIT: usize = 8;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let runtime_dir = args
@@ -488,6 +490,11 @@ fn print_row(snap: &SnapshotData) {
     } else {
         vpc.predictor_traces
             .iter()
+            .skip(
+                vpc.predictor_traces
+                    .len()
+                    .saturating_sub(OBSERVER_VPC_RECENT_LIMIT),
+            )
             .map(|trace| {
                 format!(
                     "pf{}:{}|{}->{}|{}",
@@ -506,6 +513,11 @@ fn print_row(snap: &SnapshotData) {
     } else {
         vpc.publications
             .iter()
+            .skip(
+                vpc.publications
+                    .len()
+                    .saturating_sub(OBSERVER_VPC_RECENT_LIMIT),
+            )
             .map(|trace| {
                 format!(
                     "pf{}:{}|{}->{}|{}",
@@ -524,6 +536,11 @@ fn print_row(snap: &SnapshotData) {
     } else {
         vpc.open_predictions
             .iter()
+            .skip(
+                vpc.open_predictions
+                    .len()
+                    .saturating_sub(OBSERVER_VPC_RECENT_LIMIT),
+            )
             .map(|trace| {
                 format!(
                     "pf{}:{}|{}->{}|pi{}",
@@ -538,10 +555,13 @@ fn print_row(snap: &SnapshotData) {
             .join(";")
     };
     row.push_str(&format!(
-        "\tvpc:n{}|tr[{}]|pub[{}]|open[{}]",
+        "\tvpc:n{}|tr{}|tr_recent[{}]|pub{}|pub_recent[{}]|open{}|open_recent[{}]",
         vpc.publications.len(),
+        vpc.predictor_traces.len(),
         trace_str,
+        vpc.publications.len(),
         pub_str,
+        vpc.open_predictions.len(),
         open_str
     ));
 

@@ -20,7 +20,15 @@ pub fn spawn_master_clock(
     vp: Arc<Viewport>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) -> JoinHandle<()> {
-    let period = Duration::from_micros(1_000);
+    spawn_master_clock_hz(vp, stop, 1_000)
+}
+
+pub fn spawn_master_clock_hz(
+    vp: Arc<Viewport>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    rate_hz: u32,
+) -> JoinHandle<()> {
+    let period = Duration::from_micros(1_000_000u64 / rate_hz.max(1) as u64);
     thread::spawn(move || {
         let start_wall = now_us();
         vp.start_us.store(start_wall, Ordering::Relaxed);
@@ -35,8 +43,10 @@ pub fn spawn_master_clock(
             let now = Instant::now();
             if next > now {
                 thread::sleep(next - now);
+                next += period;
+            } else {
+                next = now + period;
             }
-            next += period;
         }
     })
 }
@@ -60,8 +70,10 @@ where
             let now = Instant::now();
             if next > now {
                 thread::sleep(next - now);
+                next += period;
+            } else {
+                next = now + period;
             }
-            next += period;
         }
     })
 }

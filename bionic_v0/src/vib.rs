@@ -211,3 +211,49 @@ fn make_stream(
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn band_filter_emits_only_after_configured_window_and_resets() {
+        let mut filter = BandFilter::new(100, 3);
+
+        assert!(filter.push(0.0).is_none());
+        assert!(filter.push(0.0).is_none());
+
+        let out = filter.push(0.0);
+        assert!(out.is_some());
+        let out = out.unwrap();
+        assert!(out.iter().all(|band| band.abs() < 1e-12));
+
+        assert!(
+            filter.push(0.0).is_none(),
+            "filter must reset its sample count after emitting a frame"
+        );
+    }
+
+    #[test]
+    fn band_filter_outputs_finite_non_negative_band_energy() {
+        let mut filter = BandFilter::new(48_000, 4);
+
+        assert!(filter.push(1.0).is_none());
+        assert!(filter.push(-1.0).is_none());
+        assert!(filter.push(0.5).is_none());
+        let out = filter.push(-0.25);
+        assert!(out.is_some());
+        let out = out.unwrap();
+
+        assert_eq!(out.len(), VIB_BANDS);
+        assert!(
+            out.iter().all(|band| band.is_finite() && *band >= 0.0),
+            "RMS bands must stay finite and non-negative: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|band| *band > 0.0),
+            "non-zero waveform must produce at least one non-zero band"
+        );
+    }
+}

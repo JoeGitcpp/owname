@@ -1,3 +1,5 @@
+use crate::{VPC_OPEN_PREDICTION_CAP, VPC_PREDICTOR_TRACE_CAP, VPC_PUBLICATION_TRACE_CAP};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservationDomainKind {
     Axis,
@@ -96,6 +98,7 @@ impl VpcContractState {
             horizon,
             lifecycle,
         });
+        trim_front_to_cap(&mut self.predictor_traces, VPC_PREDICTOR_TRACE_CAP);
     }
 
     pub fn record_open_publication(
@@ -121,6 +124,7 @@ impl VpcContractState {
             alignment,
             publication_index: idx,
         });
+        self.trim_publications_and_open_predictions();
         idx
     }
 
@@ -133,6 +137,7 @@ impl VpcContractState {
             PredictorLifecycleState::ResolvedPublication,
         );
         self.publications.push(publication);
+        self.trim_publications_and_open_predictions();
         idx
     }
 
@@ -163,5 +168,35 @@ impl VpcContractState {
             PredictorLifecycleState::ResolvedPublication,
         );
         true
+    }
+
+    fn trim_publications_and_open_predictions(&mut self) {
+        trim_front_to_cap(&mut self.open_predictions, VPC_OPEN_PREDICTION_CAP);
+
+        if self.publications.len() <= VPC_PUBLICATION_TRACE_CAP {
+            return;
+        }
+
+        let evict_n = self.publications.len() - VPC_PUBLICATION_TRACE_CAP;
+        self.publications.drain(0..evict_n);
+        self.open_predictions.retain_mut(|open| {
+            let idx = open.publication_index as usize;
+            if idx < evict_n {
+                return false;
+            }
+            open.publication_index = (idx - evict_n) as u32;
+            true
+        });
+    }
+}
+
+fn trim_front_to_cap<T>(items: &mut Vec<T>, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() > cap {
+        let evict_n = items.len() - cap;
+        items.drain(0..evict_n);
     }
 }

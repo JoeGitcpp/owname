@@ -44,3 +44,29 @@ fn body_owned_sources_contain_no_human_readable_diagnostics() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn body_exposes_solitary_low_power_runtime_profile_without_text_diagnostics() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let body_path = std::path::Path::new(manifest_dir).join("src/bin/body.rs");
+    let clock_path = std::path::Path::new(manifest_dir).join("src/clock.rs");
+    let body = std::fs::read_to_string(&body_path).unwrap_or_else(|err| {
+        panic!("failed to read {}: {err}", body_path.display());
+    });
+    let clock = std::fs::read_to_string(&clock_path).unwrap_or_else(|err| {
+        panic!("failed to read {}: {err}", clock_path.display());
+    });
+
+    assert!(
+        body.contains("--solitary-low-power"),
+        "body must accept an explicit long-run low-power launch flag"
+    );
+    assert!(
+        body.contains("BodyRuntimeProfile"),
+        "body low-power behavior should be centralized in one runtime profile"
+    );
+    assert!(
+        clock.contains("spawn_master_clock_hz"),
+        "master clock rate must be configurable for low-power runs"
+    );
+}

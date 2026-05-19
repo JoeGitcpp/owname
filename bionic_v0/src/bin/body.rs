@@ -7,7 +7,7 @@ use bionic_v0::action_consequence::tick_all_ingress_accumulation;
 use bionic_v0::adapter::{
     spawn_registry_driver, AdapterRegistry, ModalityAdapter, RealPhotAdapter, VibAdapter,
 };
-use bionic_v0::clock::{now_us, spawn_master_clock, spawn_ticker};
+use bionic_v0::clock::{now_us, spawn_master_clock_hz, spawn_ticker};
 use bionic_v0::highlevel::HighLevelPredictor;
 use bionic_v0::learned_bias::{
     read_learned_bias_checkpoint, write_learned_bias_checkpoint, LearnedBiasCheckpointPaths,
@@ -21,6 +21,87 @@ use bionic_v0::viewport::Viewport;
 use bionic_v0::vocal_adapter::spawn_vocal_output;
 use bionic_v0::VIB_BANDS;
 use bionic_v0::{BINDING_REFRESH_HZ, PHOT_CONSEQUENCE_QUIESCENCE_US};
+
+#[derive(Clone, Copy)]
+struct BodyRuntimeProfile {
+    master_clock_hz: u32,
+    live_byte_closure_hz: u32,
+    predictor_hz: u32,
+    high_level_hz: u32,
+    health_hz: u32,
+    ingress_hz: u32,
+    binding_hz: u32,
+    endogenous_hz: u32,
+    vocal_hz: u32,
+    checkpoint_hz: u32,
+    orchestrator_hz: u32,
+}
+
+impl BodyRuntimeProfile {
+    fn normal() -> Self {
+        Self {
+            master_clock_hz: 1_000,
+            live_byte_closure_hz: 20,
+            predictor_hz: 100,
+            high_level_hz: 20,
+            health_hz: 50,
+            ingress_hz: 10,
+            binding_hz: BINDING_REFRESH_HZ,
+            endogenous_hz: 10,
+            vocal_hz: 50,
+            checkpoint_hz: 1,
+            orchestrator_hz: 30,
+        }
+    }
+
+    fn solitary_low_power() -> Self {
+        Self {
+            master_clock_hz: 100,
+            live_byte_closure_hz: 2,
+            predictor_hz: 20,
+            high_level_hz: 5,
+            health_hz: 5,
+            ingress_hz: 2,
+            binding_hz: 1,
+            endogenous_hz: 2,
+            vocal_hz: 5,
+            checkpoint_hz: 1,
+            orchestrator_hz: 2,
+        }
+    }
+}
+
+struct BodyArgs {
+    runtime_dir: PathBuf,
+    duration_secs: u64,
+    profile: BodyRuntimeProfile,
+}
+
+fn parse_body_args(args: &[String]) -> BodyArgs {
+    let mut runtime_dir: Option<PathBuf> = None;
+    let mut duration_secs: Option<u64> = None;
+    let mut low_power = false;
+
+    for arg in args.iter().skip(1) {
+        if arg == "--solitary-low-power" {
+            low_power = true;
+        } else if runtime_dir.is_none() {
+            runtime_dir = Some(PathBuf::from(arg));
+        } else if duration_secs.is_none() {
+            duration_secs = arg.parse::<u64>().ok();
+        }
+    }
+
+    BodyArgs {
+        runtime_dir: runtime_dir.unwrap_or_else(|| PathBuf::from("runtime")),
+        duration_secs: duration_secs.unwrap_or(0),
+        profile: if low_power {
+            BodyRuntimeProfile::solitary_low_power()
+        } else {
+            BodyRuntimeProfile::normal()
+        },
+    }
+}
 
 // Serial global refresh cycle carries numeric pressure through probe output
 // before snapshot observation.
@@ -59,13 +140,11 @@ fn register_or_abort(reg: &mut AdapterRegistry, adapter: Box<dyn ModalityAdapter
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let runtime_dir = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| String::from("runtime"));
-    let duration_secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let body_args = parse_body_args(&args);
+    let runtime_dir = body_args.runtime_dir;
+    let duration_secs = body_args.duration_secs;
+    let profile = body_args.profile;
 
-    let runtime_dir = PathBuf::from(runtime_dir);
     std::fs::create_dir_all(&runtime_dir).ok();
     let paths = Arc::new(SnapshotPaths::new(&runtime_dir));
     let learned_bias_paths = Arc::new(LearnedBiasCheckpointPaths::new(&runtime_dir));
@@ -76,7 +155,7 @@ fn main() {
     }
     let stop = Arc::new(AtomicBool::new(false));
 
-    let h_master = spawn_master_clock(vp.clone(), stop.clone());
+    let h_master = spawn_master_clock_hz(vp.clone(), stop.clone(), profile.master_clock_hz);
     let h_live_byte = spawn_live_byte_ingress(
         vp.clone(),
         stop.clone(),
@@ -89,7 +168,7 @@ fn main() {
             runtime_dir.join("live_bytes").join("out.frames"),
         )));
         let live_byte_closure_ref = live_byte_closure.clone();
-        spawn_ticker(20, stop.clone(), move |_| {
+        spawn_ticker(profile.live_byte_closure_hz, stop.clone(), move |_| {
             let _ = live_byte_closure_ref
                 .lock()
                 .unwrap()
@@ -135,7 +214,7 @@ fn main() {
         Arc::new(Mutex::new((0..VIB_BANDS).map(Ar2Predictor::new).collect()));
     let vp_pred = vp.clone();
     let pred_ref = predictors.clone();
-    let h_pred = spawn_ticker(100, stop.clone(), move |_| {
+    let h_pred = spawn_ticker(profile.predictor_hz, stop.clone(), move |_| {
         let mut ps = pred_ref.lock().unwrap();
         for p in ps.iter_mut() {
             p.tick(&vp_pred);
@@ -147,14 +226,14 @@ fn main() {
     let hl = Arc::new(Mutex::new(HighLevelPredictor::new()));
     let vp_hl = vp.clone();
     let hl_ref = hl.clone();
-    let h_hl = spawn_ticker(20, stop.clone(), move |_| {
+    let h_hl = spawn_ticker(profile.high_level_hz, stop.clone(), move |_| {
         let mut hlp = hl_ref.lock().unwrap();
         hlp.tick(&vp_hl);
     });
 
     // Viewport health recompute, 50 Hz — observer only renders this value.
     let vp_health = vp.clone();
-    let h_health = spawn_ticker(50, stop.clone(), move |_| {
+    let h_health = spawn_ticker(profile.health_hz, stop.clone(), move |_| {
         vp_health.update_health_state(now_us());
     });
 
@@ -163,13 +242,13 @@ fn main() {
     // auto-pairing for newly closed windows. Single authoritative path for
     // quiescence-based window closure.
     let vp_ingress = vp.clone();
-    let h_ingress = spawn_ticker(10, stop.clone(), move |_| {
+    let h_ingress = spawn_ticker(profile.ingress_hz, stop.clone(), move |_| {
         tick_all_ingress_accumulation(&vp_ingress, now_us(), PHOT_CONSEQUENCE_QUIESCENCE_US);
     });
 
     // Binding maintenance refresh ticker, 5 Hz by default.
     let vp_binding = vp.clone();
-    let h_binding = spawn_ticker(BINDING_REFRESH_HZ, stop.clone(), move |_| {
+    let h_binding = spawn_ticker(profile.binding_hz, stop.clone(), move |_| {
         let t = now_us();
         vp_binding.tick_binding_maintenance(t);
         vp_binding.tick_binding_resonance(t);
@@ -180,7 +259,7 @@ fn main() {
     // quiet-period history replay (endogenous activity law §2.1).
     // Both are substrate-level mechanisms — no world content or meaning.
     let vp_endo = vp.clone();
-    let h_endogenous = spawn_ticker(10, stop.clone(), move |_| {
+    let h_endogenous = spawn_ticker(profile.endogenous_hz, stop.clone(), move |_| {
         let t = now_us();
         vp_endo.tick_err_driven_attention(t);
         vp_endo.tick_quiet_history_replay(t);
@@ -191,7 +270,7 @@ fn main() {
     // Vocal substrate ticker, 50 Hz. Body-side execution only: learned vocal
     // curves update continuously without text, TTS, or request/response logic.
     let vp_vocal = vp.clone();
-    let h_vocal = spawn_ticker(50, stop.clone(), move |_| {
+    let h_vocal = spawn_ticker(profile.vocal_hz, stop.clone(), move |_| {
         let t = now_us();
         vp_vocal.tick_vocal_reflex_from_pressure(t);
         vp_vocal.tick_vocal_target_from_vib(t);
@@ -204,7 +283,7 @@ fn main() {
     let h_learned_bias_checkpoint = {
         let vp_checkpoint = vp.clone();
         let paths_checkpoint = learned_bias_paths.clone();
-        spawn_ticker(1, stop.clone(), move |_| {
+        spawn_ticker(profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
             let _ = write_learned_bias_checkpoint(&state, &paths_checkpoint);
         })
@@ -217,7 +296,7 @@ fn main() {
     // the snapshot always captures post-refresh state.
     let vp_orch = vp.clone();
     let paths_orch = paths.clone();
-    let h_orchestrator = spawn_ticker(30, stop.clone(), move |_| {
+    let h_orchestrator = spawn_ticker(profile.orchestrator_hz, stop.clone(), move |_| {
         run_global_refresh_cycle(&vp_orch, &paths_orch, now_us());
     });
 

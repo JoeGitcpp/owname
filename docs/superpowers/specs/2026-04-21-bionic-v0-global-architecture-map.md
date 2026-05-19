@@ -28,7 +28,7 @@ ordinary ingress
   -> ordinary ingress consequence windows
   -> action-consequence pairs
   -> language binding events only when pair evidence is strong enough
-  -> snapshot v46
+  -> snapshot v48
   -> observer
 
 computer-native byte ingress
@@ -63,7 +63,8 @@ turn observations into body ontology.
 | Adaptive route dynamics | Contracted to numeric route traces only | `adaptive_stability.rs`, snapshot / observer | adaptive-stability and contraction tests pass |
 | Pattern binding events | Complete as pair-evidence binding event path | `language_binding.rs`, action-consequence pair evidence | language binding runtime tests pass |
 | Active gap observer evidence | Complete as numeric observer trace | `active_reasoning.rs`, snapshot / observer session rows | active-gap observer tests pass |
-| Snapshot / observer | Complete for integrated v46 layout | `snapshot.rs`, `observer.rs` | full cargo test passes |
+| Self-development loop | Complete as numeric predictive life substrate | `self_development.rs`, `viewport.rs`, `body.rs`, snapshot / observer | self-development and pre-language growth tests pass |
+| Snapshot / observer | Complete for integrated v48 layout | `snapshot.rs`, `observer.rs` | full cargo test passes |
 
 ## 3. Relationship Notes
 
@@ -95,7 +96,7 @@ Base birth sensitivity remains separate from learned sediment.
 recovery, and compression pressures for a route without rewriting neighboring
 routes or restoring an artificial template.
 
-`snapshot` v46 appends the newer substrates after earlier sections. The current
+`snapshot` v48 appends the newer substrates after earlier sections. The current
 layout keeps the already-integrated v37 code ingress, v38 learned-bias summary,
 v39 adaptive stability, v40 evidence tension, v41 framed-byte egress, v42
 action-consequence pair sequence order, and v43 long-run cumulative closure
@@ -103,7 +104,10 @@ counters. v44 records write epoch start magnitude for closed action-consequence
 evidence. v45 splits cumulative pair counts by consequence-return modality so
 long-run byte-closure training can be read without conflating unrelated return
 paths. v46 appends active-gap pressure, closure, re-entry, cycle count, and
-trace samples for observer-side long-run curves.
+trace samples for observer-side long-run curves. v47 appends
+self-development predictive-loop evidence. v48 appends pre-language solitary
+growth evidence so observer-side reports can distinguish useful recurrence
+from mechanical repetition.
 
 ## 4. Remaining Hardening Items
 

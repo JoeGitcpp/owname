@@ -5,6 +5,8 @@ pub mod active_surface;
 pub mod adapter;
 pub mod adaptive_stability;
 pub mod auditory_visual;
+pub mod binary_character_ear;
+pub mod binary_character_mouth;
 pub mod clock;
 pub mod code_ingress;
 pub mod code_ingress_adapter;
@@ -294,6 +296,26 @@ pub const CODE_INGRESS_FRAME_HISTORY_CAP: usize = 64;
 pub const CODE_INGRESS_PROJECTION_HISTORY_CAP: usize = 128;
 pub const CODE_INGRESS_SEQUENCE_WINDOW_CAP: usize = 32;
 pub const CODE_INGRESS_BYTE_SAMPLE_CAP: usize = 32;
+
+/// Engineering cap for retained VPC predictor-family traces.
+///
+/// This is not a theory-level memory boundary and does not decide what the
+/// body can learn. It only prevents observer evidence traces from becoming an
+/// unbounded snapshot payload during long-running body sessions.
+pub const VPC_PREDICTOR_TRACE_CAP: usize = 512;
+
+/// Engineering cap for retained VPC publication traces.
+///
+/// Publications are numeric/time evidence for observer review. Long-run
+/// learning state must live in the substrate, not in an append-only observer
+/// ledger.
+pub const VPC_PUBLICATION_TRACE_CAP: usize = 512;
+
+/// Engineering cap for retained VPC open-prediction trace handles.
+///
+/// Recent open predictions are kept for resolution evidence; older unresolved
+/// handles may be evicted as stale observer evidence.
+pub const VPC_OPEN_PREDICTION_CAP: usize = 64;
 
 /// Short history ring length for evidence-tension pressure traces.
 pub const EVIDENCE_TENSION_HISTORY_CAP: usize = 16;
