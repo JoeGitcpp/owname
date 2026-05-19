@@ -62,6 +62,8 @@ fn parse_args() -> (
     bool,
     bool,
     bool,
+    bool,
+    bool,
 ) {
     let mut args = std::env::args().skip(1);
     let mut episodes = 3;
@@ -95,6 +97,8 @@ fn parse_args() -> (
     let mut live_human_nursery = false;
     let mut self_development_life_loop = false;
     let mut pre_language_solitary_growth = false;
+    let mut five_phase_life = false;
+    let mut fire_live_closure = false;
     while let Some(arg) = args.next() {
         if arg == "--episodes" {
             if let Some(value) = args.next().and_then(|s| s.parse::<u32>().ok()) {
@@ -160,6 +164,10 @@ fn parse_args() -> (
             self_development_life_loop = true;
         } else if arg == "--pre-language-solitary-growth" {
             pre_language_solitary_growth = true;
+        } else if arg == "--five-phase-life" {
+            five_phase_life = true;
+        } else if arg == "--fire-live-closure" {
+            fire_live_closure = true;
         }
     }
     (
@@ -194,6 +202,8 @@ fn parse_args() -> (
         live_human_nursery,
         self_development_life_loop,
         pre_language_solitary_growth,
+        five_phase_life,
+        fire_live_closure,
     )
 }
 
@@ -242,6 +252,21 @@ fn pre_language_solitary_growth_runtime_dir_arg() -> Option<PathBuf> {
     None
 }
 
+fn five_phase_runtime_dir_arg(flag: &str) -> Option<PathBuf> {
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        if arg == flag {
+            if let Some(next) = args.peek() {
+                if !next.starts_with("--") {
+                    return args.next().map(PathBuf::from);
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
 fn sample_pre_language_solitary_growth_state() -> SelfDevelopmentState {
     let vp = Viewport::new();
     for step in 0..24 {
@@ -264,6 +289,51 @@ fn sample_pre_language_solitary_growth_state() -> SelfDevelopmentState {
         vp.tick_self_development_from_substrate(t_us);
     }
     vp.read_self_development()
+}
+
+fn print_five_phase_life(mode: &str, runtime_dir_arg: Option<PathBuf>) -> std::io::Result<()> {
+    let deterministic_fixture = if runtime_dir_arg.is_some() { 0 } else { 1 };
+    let runtime_snapshot_read = if runtime_dir_arg.is_some() { 1 } else { 0 };
+    let snapshots = if let Some(runtime_dir) = runtime_dir_arg {
+        vec![read_snapshot(&runtime_dir.join("snapshot.bin"))?]
+    } else {
+        sample_live_human_nursery_snapshots()
+    };
+    let evidence = bionic_v0::five_phase_life::summarize_five_phase_life(
+        snapshots.iter(),
+        deterministic_fixture,
+        runtime_snapshot_read,
+    );
+
+    println!("mode={mode}");
+    println!("deterministic_fixture={}", evidence.deterministic_fixture);
+    println!("runtime_snapshot_read={}", evidence.runtime_snapshot_read);
+    println!("snapshots_seen={}", evidence.snapshots_seen);
+    println!("wood_balance={:.6}", evidence.wood_balance);
+    println!("fire_balance={:.6}", evidence.fire_balance);
+    println!("earth_balance={:.6}", evidence.earth_balance);
+    println!("metal_balance={:.6}", evidence.metal_balance);
+    println!("water_balance={:.6}", evidence.water_balance);
+    println!("wood_insufficient={}", evidence.wood_insufficient);
+    println!("fire_insufficient={}", evidence.fire_insufficient);
+    println!("earth_insufficient={}", evidence.earth_insufficient);
+    println!("metal_insufficient={}", evidence.metal_insufficient);
+    println!("water_insufficient={}", evidence.water_insufficient);
+    println!("wood_excess={}", evidence.wood_excess);
+    println!("fire_excess={}", evidence.fire_excess);
+    println!("earth_excess={}", evidence.earth_excess);
+    println!("metal_excess={}", evidence.metal_excess);
+    println!("water_excess={}", evidence.water_excess);
+    println!(
+        "fire_live_closure_gate_pass={}",
+        evidence.fire_live_closure_gate_pass
+    );
+    println!(
+        "wood_fire_non_suppression={}",
+        evidence.wood_fire_non_suppression
+    );
+    println!("principle_guard_pass={}", evidence.principle_guard_pass);
+    Ok(())
 }
 
 fn main() -> std::io::Result<()> {
@@ -299,6 +369,8 @@ fn main() -> std::io::Result<()> {
         live_human_nursery,
         self_development_life_loop,
         pre_language_solitary_growth,
+        five_phase_life,
+        fire_live_closure,
     ) = parse_args();
 
     println!("curriculum_report_v0");
@@ -1271,6 +1343,16 @@ fn main() -> std::io::Result<()> {
         println!("stable_reentry_count={}", state.stable_reentry_count);
         println!("last_update_t_us={}", state.last_update_t_us);
         println!("principle_guard_pass={principle_guard_pass}");
+    } else if five_phase_life {
+        print_five_phase_life(
+            "five_phase_life",
+            five_phase_runtime_dir_arg("--five-phase-life"),
+        )?;
+    } else if fire_live_closure {
+        print_five_phase_life(
+            "fire_live_closure",
+            five_phase_runtime_dir_arg("--fire-live-closure"),
+        )?;
     } else if live_human_nursery {
         let runtime_dir_arg = live_human_nursery_runtime_dir_arg();
         let deterministic_fixture = if runtime_dir_arg.is_some() { 0 } else { 1 };

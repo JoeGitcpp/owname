@@ -223,6 +223,57 @@ fn live_human_nursery_report_emits_numeric_evidence() {
 }
 
 #[test]
+fn five_phase_life_report_emits_balance_evidence() {
+    let output = Command::new(env!("CARGO_BIN_EXE_curriculum_report"))
+        .arg("--five-phase-life")
+        .output()
+        .expect("run curriculum_report five phase life");
+
+    assert!(
+        output.status.success(),
+        "five phase life report should exit successfully: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("curriculum_report_v0"));
+    assert!(stdout.contains("mode=five_phase_life"));
+    assert!(stdout.contains("deterministic_fixture=1"));
+    assert!(stdout.contains("runtime_snapshot_read=0"));
+    assert!(stdout.contains("wood_balance="));
+    assert!(stdout.contains("fire_balance="));
+    assert!(stdout.contains("earth_balance="));
+    assert!(stdout.contains("metal_balance="));
+    assert!(stdout.contains("water_balance="));
+    assert!(stdout.contains("fire_live_closure_gate_pass=0"));
+    assert!(stdout.contains("principle_guard_pass="));
+}
+
+#[test]
+fn fire_live_closure_report_refuses_fixture_as_live_pass() {
+    let output = Command::new(env!("CARGO_BIN_EXE_curriculum_report"))
+        .arg("--fire-live-closure")
+        .output()
+        .expect("run curriculum_report fire live closure");
+
+    assert!(
+        output.status.success(),
+        "fire live closure report should exit successfully: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("curriculum_report_v0"));
+    assert!(stdout.contains("mode=fire_live_closure"));
+    assert!(stdout.contains("deterministic_fixture=1"));
+    assert!(stdout.contains("runtime_snapshot_read=0"));
+    assert!(stdout.contains("fire_balance="));
+    assert!(stdout.contains("fire_live_closure_gate_pass=0"));
+}
+
+#[test]
 fn self_development_life_loop_report_emits_numeric_evidence() {
     let output = Command::new(env!("CARGO_BIN_EXE_curriculum_report"))
         .arg("--self-development-life-loop")
