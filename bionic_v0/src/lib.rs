@@ -15,6 +15,7 @@ pub mod curriculum_governor;
 pub mod curriculum_material;
 pub mod evidence_tension;
 pub mod evolution_priors;
+pub mod five_phase_life;
 pub mod framed_byte_carrier;
 pub mod framed_byte_egress;
 pub mod highlevel;
