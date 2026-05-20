@@ -274,6 +274,37 @@ fn fire_live_closure_report_refuses_fixture_as_live_pass() {
 }
 
 #[test]
+fn allostatic_stability_report_emits_numeric_evidence() {
+    let output = Command::new(env!("CARGO_BIN_EXE_curriculum_report"))
+        .arg("--allostatic-stability")
+        .output()
+        .expect("run curriculum_report allostatic stability");
+
+    assert!(
+        output.status.success(),
+        "allostatic stability report should exit successfully: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("curriculum_report_v0"));
+    assert!(stdout.contains("mode=allostatic_stability"));
+    assert!(stdout.contains("deterministic_fixture=1"));
+    assert!(stdout.contains("runtime_snapshot_read=0"));
+    assert!(stdout.contains("arousal_load="));
+    assert!(stdout.contains("reserve_level="));
+    assert!(stdout.contains("recovery_debt="));
+    assert!(stdout.contains("bearing_capacity="));
+    assert!(stdout.contains("exploration_allowance="));
+    assert!(stdout.contains("expression_gain="));
+    assert!(stdout.contains("protective_limit="));
+    assert!(stdout.contains("overdrive_window="));
+    assert!(stdout.contains("downshift_pressure="));
+    assert!(stdout.contains("principle_guard_pass="));
+}
+
+#[test]
 fn self_development_life_loop_report_emits_numeric_evidence() {
     let output = Command::new(env!("CARGO_BIN_EXE_curriculum_report"))
         .arg("--self-development-life-loop")

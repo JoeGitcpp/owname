@@ -4,6 +4,7 @@ pub mod active_reasoning;
 pub mod active_surface;
 pub mod adapter;
 pub mod adaptive_stability;
+pub mod allostatic_stability;
 pub mod auditory_visual;
 pub mod binary_character_ear;
 pub mod binary_character_mouth;

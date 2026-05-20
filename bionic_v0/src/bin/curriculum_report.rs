@@ -267,6 +267,25 @@ fn five_phase_runtime_dir_arg(flag: &str) -> Option<PathBuf> {
     None
 }
 
+fn report_flag_present(flag: &str) -> bool {
+    std::env::args().skip(1).any(|arg| arg == flag)
+}
+
+fn report_runtime_dir_arg(flag: &str) -> Option<PathBuf> {
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        if arg == flag {
+            if let Some(next) = args.peek() {
+                if !next.starts_with("--") {
+                    return args.next().map(PathBuf::from);
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
 fn sample_pre_language_solitary_growth_state() -> SelfDevelopmentState {
     let vp = Viewport::new();
     for step in 0..24 {
@@ -336,6 +355,40 @@ fn print_five_phase_life(mode: &str, runtime_dir_arg: Option<PathBuf>) -> std::i
     Ok(())
 }
 
+fn print_allostatic_stability(runtime_dir_arg: Option<PathBuf>) -> std::io::Result<()> {
+    let deterministic_fixture = if runtime_dir_arg.is_some() { 0 } else { 1 };
+    let runtime_snapshot_read = if runtime_dir_arg.is_some() { 1 } else { 0 };
+    let snapshots = if let Some(runtime_dir) = runtime_dir_arg {
+        vec![read_snapshot(&runtime_dir.join("snapshot.bin"))?]
+    } else {
+        sample_live_human_nursery_snapshots()
+    };
+    let evidence = bionic_v0::allostatic_stability::summarize_allostatic_stability(
+        snapshots.iter(),
+        deterministic_fixture,
+        runtime_snapshot_read,
+    );
+
+    println!("mode=allostatic_stability");
+    println!("deterministic_fixture={}", evidence.deterministic_fixture);
+    println!("runtime_snapshot_read={}", evidence.runtime_snapshot_read);
+    println!("snapshots_seen={}", evidence.snapshots_seen);
+    println!("arousal_load={:.6}", evidence.arousal_load);
+    println!("reserve_level={:.6}", evidence.reserve_level);
+    println!("recovery_debt={:.6}", evidence.recovery_debt);
+    println!("bearing_capacity={:.6}", evidence.bearing_capacity);
+    println!(
+        "exploration_allowance={:.6}",
+        evidence.exploration_allowance
+    );
+    println!("expression_gain={:.6}", evidence.expression_gain);
+    println!("protective_limit={:.6}", evidence.protective_limit);
+    println!("overdrive_window={:.6}", evidence.overdrive_window);
+    println!("downshift_pressure={:.6}", evidence.downshift_pressure);
+    println!("principle_guard_pass={}", evidence.principle_guard_pass);
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
     let (
         episodes,
@@ -372,6 +425,7 @@ fn main() -> std::io::Result<()> {
         five_phase_life,
         fire_live_closure,
     ) = parse_args();
+    let allostatic_stability = report_flag_present("--allostatic-stability");
 
     println!("curriculum_report_v0");
     if persistent_curriculum_governor {
@@ -1353,6 +1407,8 @@ fn main() -> std::io::Result<()> {
             "fire_live_closure",
             five_phase_runtime_dir_arg("--fire-live-closure"),
         )?;
+    } else if allostatic_stability {
+        print_allostatic_stability(report_runtime_dir_arg("--allostatic-stability"))?;
     } else if live_human_nursery {
         let runtime_dir_arg = live_human_nursery_runtime_dir_arg();
         let deterministic_fixture = if runtime_dir_arg.is_some() { 0 } else { 1 };
