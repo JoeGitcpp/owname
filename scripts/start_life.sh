@@ -20,7 +20,7 @@ echo ""
 while [ "$RESTART_COUNT" -lt "$MAX_RESTARTS" ]; do
     echo "[$(date -Iseconds)] Starting body (restart #$RESTART_COUNT)..."
 
-    cargo run --release --manifest-path "$MANIFEST" --bin body -- "$RUNTIME_DIR" &
+    cargo run --release --manifest-path "$MANIFEST" --bin body -- --nursery-bias "$RUNTIME_DIR" &
     BODY_PID=$!
 
     wait $BODY_PID 2>/dev/null || true
