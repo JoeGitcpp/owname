@@ -1,7 +1,7 @@
 use crate::action_consequence::{
     ActionConsequencePair, ActionConsequenceWindow, ConsequenceModalityKind, ConsequencePairStatus,
 };
-use crate::action_output::{OutputChannelKind, WriteEpochRecord};
+use crate::action_output::WriteEpochRecord;
 use crate::viewport::Viewport;
 use crate::{CONSEQUENCE_WINDOW_CAP, PAIR_HISTORY_CAP, WRITE_EPOCH_HISTORY_CAP};
 
