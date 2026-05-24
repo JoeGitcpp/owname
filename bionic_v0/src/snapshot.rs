@@ -2608,6 +2608,9 @@ fn write_self_development(buf: &mut Vec<u8>, s: &SelfDevelopmentState) {
     buf.extend_from_slice(&s.total_updates.to_le_bytes());
     buf.extend_from_slice(&(s.suppression_events as u64).to_le_bytes());
     buf.extend_from_slice(&(s.stable_reentry_count as u64).to_le_bytes());
+    buf.extend_from_slice(&s.self_vocal_correlation.to_le_bytes());
+    buf.extend_from_slice(&s.external_vocal_correlation.to_le_bytes());
+    buf.extend_from_slice(&s.self_other_separation.to_le_bytes());
     buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
 }
 
@@ -2642,6 +2645,9 @@ fn read_self_development_snapshot(bytes: &[u8], cur: &mut usize) -> SelfDevelopm
         total_updates: rd_u64(bytes, cur),
         suppression_events: rd_u64(bytes, cur) as u32,
         stable_reentry_count: rd_u64(bytes, cur) as u32,
+        self_vocal_correlation: rd_f64(bytes, cur),
+        external_vocal_correlation: rd_f64(bytes, cur),
+        self_other_separation: rd_f64(bytes, cur),
         last_update_t_us: rd_u64(bytes, cur),
     }
 }

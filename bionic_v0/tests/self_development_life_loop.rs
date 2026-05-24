@@ -297,3 +297,80 @@ fn self_development_sources_stay_numeric_and_guarded() {
         }
     }
 }
+
+// ── Layer 2: self-model boundary ──
+
+#[test]
+fn self_vocal_correlation_distinguishes_own_voice_from_external_sound() {
+    use bionic_v0::action_consequence::{
+        ActionConsequencePair, ActionConsequenceWindow, ConsequenceModalityKind,
+        ConsequencePairStatus, ConsequenceWindowPhase,
+    };
+    use bionic_v0::action_output::{ActionOutputPhase, OutputChannelKind, WriteEpochRecord};
+
+    let vp = Viewport::new();
+
+    {
+        let mut output = vp.action_output.write().unwrap();
+        output.write_epoch_history.push(WriteEpochRecord {
+            write_seq: 1,
+            channel_kind: OutputChannelKind::GenericWrite,
+            start_magnitude: 0.72,
+            start_t_us: 3_000_000,
+            last_update_t_us: 3_000_500,
+            last_phase: ActionOutputPhase::Active,
+        });
+        output.n_write_epochs = 1;
+    }
+
+    {
+        let mut c = vp.action_consequence.write().unwrap();
+        c.windows.push(ActionConsequenceWindow {
+            window_id: 1,
+            modality_kind: ConsequenceModalityKind::GenericIngress,
+            start_t_us: 3_000_100,
+            end_t_us: 3_000_600,
+            magnitude: 0.68,
+            phase: ConsequenceWindowPhase::Closed,
+            last_update_t_us: 3_000_600,
+        });
+        c.n_windows = 1;
+        c.pairs.push(ActionConsequencePair {
+            pair_seq: 1,
+            write_seq: 1,
+            window_id: 1,
+            delay_us: 500,
+            status: ConsequencePairStatus::Paired,
+            pair_t_us: 3_000_600,
+            curve_similarity: 0.88,
+        });
+        c.n_pairs = 1;
+        c.total_pairs = 1;
+    }
+
+    {
+        let mut r = vp.global_reasoning.write().unwrap();
+        r.global_surprise_load = 0.05;
+        r.last_update_t_us = 3_000_000;
+    }
+    {
+        let mut m = vp.global_reasoning_memory_summary.write().unwrap();
+        m.pattern_recurrence_score = 0.50;
+        m.routing_stability_score = 0.50;
+        m.dominant_focus_persistence = 0.50;
+        m.last_update_t_us = 3_000_000;
+    }
+
+    vp.tick_self_development_from_substrate(3_001_000);
+    let state = vp.read_self_development();
+
+    assert!(
+        state.self_vocal_correlation > 0.0,
+        "self_vocal_correlation should be > 0 when write epoch pairs with ingress return"
+    );
+    assert!(
+        state.self_other_separation > 0.0,
+        "self_other_separation > 0 when own output is distinguishable"
+    );
+    assert!(state.external_vocal_correlation >= 0.0);
+}

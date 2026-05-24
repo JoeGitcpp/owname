@@ -1,3 +1,7 @@
+use crate::action_consequence::{
+    ActionConsequencePair, ActionConsequenceWindow, ConsequenceModalityKind, ConsequencePairStatus,
+};
+use crate::action_output::{OutputChannelKind, WriteEpochRecord};
 use crate::viewport::Viewport;
 use crate::{CONSEQUENCE_WINDOW_CAP, PAIR_HISTORY_CAP, WRITE_EPOCH_HISTORY_CAP};
 
@@ -20,6 +24,10 @@ pub struct SelfDevelopmentState {
     pub suppression_events: u32,
     pub stable_reentry_count: u32,
     pub last_update_t_us: u64,
+    // Layer 1: self-vocal boundary
+    pub self_vocal_correlation: f64,
+    pub external_vocal_correlation: f64,
+    pub self_other_separation: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -35,6 +43,8 @@ struct SelfDevelopmentSample {
     return_window_load: f64,
     pair_load: f64,
     average_pair_similarity: f64,
+    self_vocal_correlation: f64,
+    external_vocal_correlation: f64,
 }
 
 impl SelfDevelopmentState {
@@ -122,9 +132,70 @@ impl SelfDevelopmentState {
             self.stable_reentry_count = self.stable_reentry_count.saturating_add(1);
         }
 
+        // Layer 1: self-vocal boundary
+        self.self_vocal_correlation =
+            ema(self.self_vocal_correlation, sample.self_vocal_correlation, 0.22);
+        self.external_vocal_correlation =
+            ema(self.external_vocal_correlation, sample.external_vocal_correlation, 0.18);
+        let sep = self.self_vocal_correlation + self.external_vocal_correlation;
+        let raw_sep = if sep > 1e-9 {
+            self.self_vocal_correlation / sep
+        } else {
+            0.0
+        };
+        self.self_other_separation = ema(self.self_other_separation, raw_sep, 0.30);
+
         self.total_updates = self.total_updates.saturating_add(1);
         self.last_update_t_us = now_us;
     }
+}
+
+fn compute_vocal_boundary(
+    write_epochs: &[WriteEpochRecord],
+    windows: &[ActionConsequenceWindow],
+    pairs: &[ActionConsequencePair],
+) -> (f64, f64) {
+    let write_seqs: std::collections::BTreeSet<u64> =
+        write_epochs.iter().map(|ep| ep.write_seq).collect();
+
+    let mut self_corr = 0.0_f64;
+    let mut ext_corr = 0.0_f64;
+
+    let paired_window_ids: std::collections::BTreeSet<u64> = pairs
+        .iter()
+        .filter(|p| p.status == ConsequencePairStatus::Paired)
+        .map(|p| p.window_id)
+        .collect();
+
+    for pair in pairs {
+        if pair.status != ConsequencePairStatus::Paired {
+            continue;
+        }
+        let window = match windows.iter().find(|w| w.window_id == pair.window_id) {
+            Some(w) => w,
+            None => continue,
+        };
+        if window.modality_kind != ConsequenceModalityKind::GenericIngress {
+            continue;
+        }
+        if !write_seqs.contains(&pair.write_seq) {
+            continue;
+        }
+
+        let delay_norm = unit(1.0 - (pair.delay_us as f64 / 500_000.0).min(1.0));
+        let score = delay_norm * unit(pair.curve_similarity) * unit(window.magnitude);
+        self_corr = self_corr.max(score);
+    }
+
+    for window in windows {
+        if window.modality_kind == ConsequenceModalityKind::GenericIngress
+            && !paired_window_ids.contains(&window.window_id)
+        {
+            ext_corr = ext_corr.max(unit(window.magnitude));
+        }
+    }
+
+    (unit(self_corr), unit(ext_corr))
 }
 
 impl Viewport {
@@ -136,6 +207,12 @@ impl Viewport {
         let field = self.read_prediction_pressure_field();
         let action_output = self.read_action_output();
         let action_consequence = self.read_action_consequence();
+
+        let (self_vocal_corr, external_vocal_corr) = compute_vocal_boundary(
+            &action_output.write_epoch_history,
+            &action_consequence.windows,
+            &action_consequence.pairs,
+        );
 
         let relation_surprise = self
             .read_global_relations()
@@ -175,6 +252,8 @@ impl Viewport {
             return_window_load: ratio(action_consequence.n_windows, CONSEQUENCE_WINDOW_CAP),
             pair_load: ratio(action_consequence.n_pairs, PAIR_HISTORY_CAP),
             average_pair_similarity,
+            self_vocal_correlation: self_vocal_corr,
+            external_vocal_correlation: external_vocal_corr,
         };
 
         self.self_development
