@@ -374,3 +374,167 @@ fn self_vocal_correlation_distinguishes_own_voice_from_external_sound() {
     );
     assert!(state.external_vocal_correlation >= 0.0);
 }
+
+#[test]
+fn body_state_and_agency_respond_to_health_and_pair_patterns() {
+    use bionic_v0::action_consequence::{
+        ActionConsequencePair, ActionConsequenceWindow, ConsequenceModalityKind,
+        ConsequencePairStatus, ConsequenceWindowPhase,
+    };
+    use bionic_v0::action_output::{ActionOutputPhase, OutputChannelKind, WriteEpochRecord};
+    use bionic_v0::viewport::HealthState;
+
+    let vp = Viewport::new();
+
+    {
+        let mut r = vp.global_reasoning.write().unwrap();
+        r.global_surprise_load = 0.12;
+        r.last_update_t_us = 4_000_000;
+    }
+    {
+        let mut m = vp.global_reasoning_memory_summary.write().unwrap();
+        m.pattern_recurrence_score = 0.35;
+        m.routing_stability_score = 0.35;
+        m.dominant_focus_persistence = 0.35;
+        m.last_update_t_us = 4_000_000;
+    }
+
+    vp.set_phot_health(HealthState::Ok);
+
+    {
+        let mut output = vp.action_output.write().unwrap();
+        output.write_epoch_history.push(WriteEpochRecord {
+            write_seq: 1,
+            channel_kind: OutputChannelKind::GenericWrite,
+            start_magnitude: 0.65,
+            start_t_us: 4_000_000,
+            last_update_t_us: 4_000_400,
+            last_phase: ActionOutputPhase::Active,
+        });
+        output.n_write_epochs = 1;
+    }
+    {
+        let mut c = vp.action_consequence.write().unwrap();
+        c.windows.push(ActionConsequenceWindow {
+            window_id: 1,
+            modality_kind: ConsequenceModalityKind::GenericIngress,
+            start_t_us: 4_000_200,
+            end_t_us: 4_000_800,
+            magnitude: 0.60,
+            phase: ConsequenceWindowPhase::Closed,
+            last_update_t_us: 4_000_800,
+        });
+        c.n_windows = 1;
+        c.pairs.push(ActionConsequencePair {
+            pair_seq: 1,
+            write_seq: 1,
+            window_id: 1,
+            delay_us: 400,
+            status: ConsequencePairStatus::Paired,
+            pair_t_us: 4_000_800,
+            curve_similarity: 0.85,
+        });
+        c.n_pairs = 1;
+        c.total_pairs = 1;
+    }
+
+    vp.tick_self_development_from_substrate(4_001_000);
+    let state = vp.read_self_development();
+
+    assert!(state.body_state_awareness >= 0.0);
+    assert!(state.fatigue_pressure >= 0.0);
+    assert!(state.health_surprise >= 0.0);
+    assert!(state.agency_pressure >= 0.0,
+        "agency_pressure >= 0 when write epochs have paired consequences");
+    assert!(state.self_caused_event_ratio >= 0.0);
+    assert!(state.external_event_ratio >= 0.0);
+}
+
+#[test]
+fn agency_pressure_high_when_most_writes_pair_and_low_when_unpaired() {
+    use bionic_v0::action_consequence::{
+        ActionConsequencePair, ActionConsequenceWindow, ConsequenceModalityKind,
+        ConsequencePairStatus, ConsequenceWindowPhase,
+    };
+    use bionic_v0::action_output::{ActionOutputPhase, OutputChannelKind, WriteEpochRecord};
+
+    let paired = Viewport::new();
+    {
+        let mut r = paired.global_reasoning.write().unwrap();
+        r.global_surprise_load = 0.05; r.last_update_t_us = 5_000_000;
+    }
+    {
+        let mut m = paired.global_reasoning_memory_summary.write().unwrap();
+        m.pattern_recurrence_score = 0.40; m.routing_stability_score = 0.40;
+        m.dominant_focus_persistence = 0.40; m.last_update_t_us = 5_000_000;
+    }
+    {
+        let mut output = paired.action_output.write().unwrap();
+        for idx in 0..3 {
+            output.write_epoch_history.push(WriteEpochRecord {
+                write_seq: idx + 1,
+                channel_kind: OutputChannelKind::GenericWrite,
+                start_magnitude: 0.7,
+                start_t_us: 5_000_000 + idx * 100_000,
+                last_update_t_us: 5_000_500 + idx * 100_000,
+                last_phase: ActionOutputPhase::Active,
+            });
+        }
+        output.n_write_epochs = 3;
+    }
+    {
+        let mut c = paired.action_consequence.write().unwrap();
+        for idx in 0..3 {
+            c.windows.push(ActionConsequenceWindow {
+                window_id: idx + 1,
+                modality_kind: ConsequenceModalityKind::GenericIngress,
+                start_t_us: 5_000_200 + idx * 100_000,
+                end_t_us: 5_000_800 + idx * 100_000,
+                magnitude: 0.55,
+                phase: ConsequenceWindowPhase::Closed,
+                last_update_t_us: 5_000_800 + idx * 100_000,
+            });
+            c.pairs.push(ActionConsequencePair {
+                pair_seq: idx + 1,
+                write_seq: idx + 1,
+                window_id: idx + 1,
+                delay_us: 30_000,
+                status: ConsequencePairStatus::Paired,
+                pair_t_us: 5_000_800 + idx * 100_000,
+                curve_similarity: 0.90,
+            });
+        }
+        c.n_windows = 3; c.n_pairs = 3; c.total_pairs = 3;
+    }
+    paired.tick_self_development_from_substrate(5_500_000);
+    let paired_state = paired.read_self_development();
+
+    let unpaired = Viewport::new();
+    {
+        let mut r = unpaired.global_reasoning.write().unwrap();
+        r.global_surprise_load = 0.05; r.last_update_t_us = 5_000_000;
+    }
+    {
+        let mut m = unpaired.global_reasoning_memory_summary.write().unwrap();
+        m.pattern_recurrence_score = 0.40; m.routing_stability_score = 0.40;
+        m.dominant_focus_persistence = 0.40; m.last_update_t_us = 5_000_000;
+    }
+    {
+        let mut output = unpaired.action_output.write().unwrap();
+        output.write_epoch_history.push(WriteEpochRecord {
+            write_seq: 1,
+            channel_kind: OutputChannelKind::GenericWrite,
+            start_magnitude: 0.7,
+            start_t_us: 5_000_000,
+            last_update_t_us: 5_000_500,
+            last_phase: ActionOutputPhase::Active,
+        });
+        output.n_write_epochs = 1;
+    }
+    unpaired.tick_self_development_from_substrate(5_500_000);
+    let unpaired_state = unpaired.read_self_development();
+
+    assert!(paired_state.agency_pressure > unpaired_state.agency_pressure + 0.05,
+        "high-pair scenario should have higher agency than zero-pair");
+    assert!(paired_state.self_caused_event_ratio > unpaired_state.self_caused_event_ratio);
+}

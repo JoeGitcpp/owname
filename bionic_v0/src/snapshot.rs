@@ -2611,6 +2611,12 @@ fn write_self_development(buf: &mut Vec<u8>, s: &SelfDevelopmentState) {
     buf.extend_from_slice(&s.self_vocal_correlation.to_le_bytes());
     buf.extend_from_slice(&s.external_vocal_correlation.to_le_bytes());
     buf.extend_from_slice(&s.self_other_separation.to_le_bytes());
+    buf.extend_from_slice(&s.body_state_awareness.to_le_bytes());
+    buf.extend_from_slice(&s.fatigue_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.health_surprise.to_le_bytes());
+    buf.extend_from_slice(&s.agency_pressure.to_le_bytes());
+    buf.extend_from_slice(&s.self_caused_event_ratio.to_le_bytes());
+    buf.extend_from_slice(&s.external_event_ratio.to_le_bytes());
     buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
 }
 
@@ -2648,6 +2654,12 @@ fn read_self_development_snapshot(bytes: &[u8], cur: &mut usize) -> SelfDevelopm
         self_vocal_correlation: rd_f64(bytes, cur),
         external_vocal_correlation: rd_f64(bytes, cur),
         self_other_separation: rd_f64(bytes, cur),
+        body_state_awareness: rd_f64(bytes, cur),
+        fatigue_pressure: rd_f64(bytes, cur),
+        health_surprise: rd_f64(bytes, cur),
+        agency_pressure: rd_f64(bytes, cur),
+        self_caused_event_ratio: rd_f64(bytes, cur),
+        external_event_ratio: rd_f64(bytes, cur),
         last_update_t_us: rd_u64(bytes, cur),
     }
 }

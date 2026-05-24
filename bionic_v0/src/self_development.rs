@@ -28,6 +28,14 @@ pub struct SelfDevelopmentState {
     pub self_vocal_correlation: f64,
     pub external_vocal_correlation: f64,
     pub self_other_separation: f64,
+    // Layer 2: body state awareness
+    pub body_state_awareness: f64,
+    pub fatigue_pressure: f64,
+    pub health_surprise: f64,
+    // Layer 3: agency pressure
+    pub agency_pressure: f64,
+    pub self_caused_event_ratio: f64,
+    pub external_event_ratio: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -45,6 +53,9 @@ struct SelfDevelopmentSample {
     average_pair_similarity: f64,
     self_vocal_correlation: f64,
     external_vocal_correlation: f64,
+    phot_health_ok: f64,
+    total_updates: u64,
+    paired_write_ratio: f64,
 }
 
 impl SelfDevelopmentState {
@@ -145,6 +156,41 @@ impl SelfDevelopmentState {
         };
         self.self_other_separation = ema(self.self_other_separation, raw_sep, 0.30);
 
+        // Layer 2: body state awareness
+        let health_now = sample.phot_health_ok;
+        let health_prev = (self.body_state_awareness * 0.5 + 0.5).clamp(0.0, 1.0);
+        self.health_surprise =
+            ema(self.health_surprise, (health_now - health_prev).abs(), 0.40);
+        self.body_state_awareness = ema(
+            self.body_state_awareness,
+            unit(1.0 - health_now + self.health_surprise * 0.6),
+            0.25,
+        );
+        self.fatigue_pressure = ema(
+            self.fatigue_pressure,
+            unit(sample.total_updates as f64 / 10_000.0),
+            0.12,
+        );
+
+        // Layer 3: agency
+        let agency_input =
+            unit(sample.paired_write_ratio * (1.0 - 0.3 * sample.prediction_gap));
+        self.agency_pressure = ema(self.agency_pressure, agency_input, 0.28);
+        let total_events = sample
+            .paired_write_ratio
+            .max(1.0 - sample.paired_write_ratio)
+            .max(1e-9);
+        self.self_caused_event_ratio = ema(
+            self.self_caused_event_ratio,
+            sample.paired_write_ratio / total_events,
+            0.30,
+        );
+        self.external_event_ratio = ema(
+            self.external_event_ratio,
+            unit(1.0 - sample.paired_write_ratio) / total_events,
+            0.30,
+        );
+
         self.total_updates = self.total_updates.saturating_add(1);
         self.last_update_t_us = now_us;
     }
@@ -214,6 +260,22 @@ impl Viewport {
             &action_consequence.pairs,
         );
 
+        let phot_ok = match self.read_phot_health() {
+            crate::viewport::HealthState::Ok => 1.0_f64,
+            crate::viewport::HealthState::Quiet => 0.5_f64,
+            _ => 0.0_f64,
+        };
+
+        let total_writes = action_output.n_write_epochs.max(1) as f64;
+        let paired_writes = action_consequence
+            .pairs
+            .iter()
+            .filter(|p| p.status == ConsequencePairStatus::Paired)
+            .map(|p| p.write_seq)
+            .collect::<std::collections::BTreeSet<u64>>()
+            .len() as f64;
+        let paired_write_ratio = unit(paired_writes / total_writes);
+
         let relation_surprise = self
             .read_global_relations()
             .edges
@@ -254,6 +316,9 @@ impl Viewport {
             average_pair_similarity,
             self_vocal_correlation: self_vocal_corr,
             external_vocal_correlation: external_vocal_corr,
+            phot_health_ok: phot_ok,
+            total_updates: self.read_self_development().total_updates,
+            paired_write_ratio,
         };
 
         self.self_development
