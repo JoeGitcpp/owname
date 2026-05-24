@@ -75,16 +75,20 @@ struct BodyArgs {
     runtime_dir: PathBuf,
     duration_secs: u64,
     profile: BodyRuntimeProfile,
+    nursery_bias: bool,
 }
 
 fn parse_body_args(args: &[String]) -> BodyArgs {
     let mut runtime_dir: Option<PathBuf> = None;
     let mut duration_secs: Option<u64> = None;
     let mut low_power = false;
+    let mut nursery_bias = false;
 
     for arg in args.iter().skip(1) {
         if arg == "--solitary-low-power" {
             low_power = true;
+        } else if arg == "--nursery-bias" {
+            nursery_bias = true;
         } else if runtime_dir.is_none() {
             runtime_dir = Some(PathBuf::from(arg));
         } else if duration_secs.is_none() {
@@ -100,6 +104,7 @@ fn parse_body_args(args: &[String]) -> BodyArgs {
         } else {
             BodyRuntimeProfile::normal()
         },
+        nursery_bias,
     }
 }
 
@@ -149,7 +154,13 @@ fn main() {
     let paths = Arc::new(SnapshotPaths::new(&runtime_dir));
     let learned_bias_paths = Arc::new(LearnedBiasCheckpointPaths::new(&runtime_dir));
 
-    let vp = Arc::new(Viewport::new());
+    let vp = if body_args.nursery_bias {
+        Arc::new(Viewport::with_birth_sensitivity(Arc::new(
+            bionic_v0::evolution_priors::BiasPriors::nursery_newborn(),
+        )))
+    } else {
+        Arc::new(Viewport::new())
+    };
     if let Ok(state) = read_learned_bias_checkpoint(&learned_bias_paths.final_path) {
         *vp.learned_bias.write().unwrap() = state;
     }

@@ -71,6 +71,42 @@ impl Default for BiasPriors {
 }
 
 impl BiasPriors {
+    pub fn nursery_newborn() -> Self {
+        let mut band_sensitivity = [0.5; VIB_BANDS];
+        // Human voice range: boost bands 1-3 (~500 Hz – 3 kHz)
+        for band in 1..=3 {
+            if band < VIB_BANDS {
+                band_sensitivity[band] = 0.85;
+            }
+        }
+
+        Self {
+            band_sensitivity,
+            pressure_weights: PressureWeights {
+                err: 0.30,
+                recurrence: 0.20,
+                ambiguity: 0.15,
+                alignment: 0.15,
+                support: 0.10,
+                deviation: 0.15,
+                temporal_gap: 0.18,
+                cross_channel: 0.12,
+                multiplier: 1.3,
+            },
+            modify_rate_caps: ModifyRateCaps {
+                err_gain: 0.10,
+                recurrence_gain: 0.08,
+                ambiguity_gain: 0.05,
+                alignment_gain: 0.05,
+                support_gain: 0.05,
+                deviation_gain: 0.05,
+                temporal_gap_gain: 0.08,
+                cross_channel_gain: 0.05,
+                pressure_multiplier: 0.001,
+            },
+        }
+    }
+
     pub fn apply_to_claim_config(
         &self,
         time_w: &mut f64,

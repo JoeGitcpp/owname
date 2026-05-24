@@ -209,3 +209,44 @@ fn language_binding_caller_uses_birth_sensitivity_as_update_pressure_not_word_me
         assert!(!src.contains(forbidden), "must not introduce {forbidden}");
     }
 }
+
+#[test]
+fn nursery_newborn_bias_differs_from_default_in_voice_motion_and_turn_taking_axes() {
+    use bionic_v0::evolution_priors::BiasPriors;
+
+    let default = BiasPriors::default();
+    let newborn = BiasPriors::nursery_newborn();
+
+    // Voice sensitivity: bands 1-3 boosted relative to default
+    for band in 1..=3 {
+        assert!(
+            newborn.band_sensitivity[band] > default.band_sensitivity[band],
+            "band {band}: newborn {:.3} > default {:.3}",
+            newborn.band_sensitivity[band],
+            default.band_sensitivity[band],
+        );
+    }
+
+    // Motion/error sensitivity
+    assert!(newborn.pressure_weights.err > default.pressure_weights.err);
+
+    // Recurrence sensitivity
+    assert!(newborn.pressure_weights.recurrence > default.pressure_weights.recurrence);
+
+    // Turn-taking: temporal gap sensitivity
+    assert!(newborn.pressure_weights.temporal_gap > default.pressure_weights.temporal_gap);
+
+    // Cross-channel coupling
+    assert!(newborn.pressure_weights.cross_channel > default.pressure_weights.cross_channel);
+
+    // Overall pressure multiplier
+    assert!(newborn.pressure_weights.multiplier > default.pressure_weights.multiplier);
+
+    // Learning rate caps relaxed
+    assert!(newborn.modify_rate_caps.err_gain > default.modify_rate_caps.err_gain);
+    assert!(newborn.modify_rate_caps.recurrence_gain > default.modify_rate_caps.recurrence_gain);
+    assert!(newborn.modify_rate_caps.temporal_gap_gain > default.modify_rate_caps.temporal_gap_gain);
+
+    // Non-target bands stay at default
+    assert!((newborn.band_sensitivity[0] - default.band_sensitivity[0]).abs() < 0.01);
+}
