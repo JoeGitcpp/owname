@@ -67,7 +67,7 @@ fn main() {
             }
             Ok(_) => {
                 // No body output. Re-seed periodically to keep loop alive.
-                if last_output_us.elapsed() > std::time::Duration::from_secs(30) {
+                if last_output_us.elapsed() > std::time::Duration::from_secs(2) {
                     let val = (last_output_us.elapsed().as_secs() % 255) as u8;
                     let seed = run_vm(&[0x01, val, 0x00, 0x08, 0x00, 0x0F]);
                     // Append to in.frames so body's sequential reader never misses frames
