@@ -41,7 +41,7 @@ impl BodyRuntimeProfile {
     fn normal() -> Self {
         Self {
             master_clock_hz: 1_000,
-            live_byte_closure_hz: 20,
+            live_byte_closure_hz: 200,
             predictor_hz: 100,
             high_level_hz: 20,
             health_hz: 50,
