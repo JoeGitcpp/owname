@@ -45,17 +45,27 @@ fn main() {
     let seed = run_vm(&[0x0F]);
     let _ = fs::write(&in_path, &seed);
 
+    let mut last_output_us = std::time::Instant::now();
+
     loop {
         match fs::read(&out_path) {
             Ok(bytes) if !bytes.is_empty() => {
                 let result = run_vm(&bytes);
                 let _ = fs::write(&in_path, &result);
+                last_output_us = std::time::Instant::now();
                 if once {
                     break;
                 }
                 let _ = fs::write(&out_path, &[]);
             }
             Ok(_) => {
+                // No body output. Re-seed periodically to keep loop alive.
+                if last_output_us.elapsed() > std::time::Duration::from_secs(30) {
+                    let val = (last_output_us.elapsed().as_secs() % 255) as u8;
+                    let seed = run_vm(&[0x01, val, 0x00, 0x08, 0x00, 0x0F]);
+                    let _ = fs::write(&in_path, &seed);
+                    last_output_us = std::time::Instant::now();
+                }
                 if once {
                     break;
                 }
