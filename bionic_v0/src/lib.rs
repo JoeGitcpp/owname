@@ -62,7 +62,7 @@ pub const AXIS_SYNTH: usize = 0; // retained for backward compat
 pub const VIB_BAND_CUTOFFS: [f64; 3] = [500.0, 2000.0, 5000.0];
 
 // --- Phase 2.5: object layer contracts ---
-pub const N_OBJECT_SLOTS: usize = 4;
+pub const N_OBJECT_SLOTS: usize = 8;
 pub const SLOT_IDLE_US: u64 = 200_000; // 200 ms
 
 // Modality bitmap codes (numeric only; never strings inside AI body).
@@ -294,7 +294,7 @@ pub const PROBE_SUPPRESSION_ALPHA: f64 = 0.05;
 pub const PROBE_HISTORY_CAP: usize = 8;
 
 // --- v37: computer-native byte disturbance ingress traces ---
-pub const CODE_INGRESS_FRAME_HISTORY_CAP: usize = 64;
+pub const CODE_INGRESS_FRAME_HISTORY_CAP: usize = 256;
 pub const CODE_INGRESS_PROJECTION_HISTORY_CAP: usize = 128;
 pub const CODE_INGRESS_SEQUENCE_WINDOW_CAP: usize = 32;
 pub const CODE_INGRESS_BYTE_SAMPLE_CAP: usize = 32;
@@ -317,7 +317,7 @@ pub const VPC_PUBLICATION_TRACE_CAP: usize = 512;
 ///
 /// Recent open predictions are kept for resolution evidence; older unresolved
 /// handles may be evicted as stale observer evidence.
-pub const VPC_OPEN_PREDICTION_CAP: usize = 64;
+pub const VPC_OPEN_PREDICTION_CAP: usize = 256;
 
 /// Short history ring length for evidence-tension pressure traces.
 pub const EVIDENCE_TENSION_HISTORY_CAP: usize = 16;
@@ -332,7 +332,7 @@ pub const EVIDENCE_TENSION_DECAY_ALPHA: f64 = 0.25;
 pub const EVIDENCE_TENSION_CLOSURE_ALPHA: f64 = 0.5;
 
 /// Fixed observer trace capacity for active-gap numeric curve samples.
-pub const ACTIVE_REASONING_GAP_TRACE_CAP: usize = 32;
+pub const ACTIVE_REASONING_GAP_TRACE_CAP: usize = 128;
 
 pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v30: probe_law substrate added (intensity, suppression, phase, output_intensity,

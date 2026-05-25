@@ -8,7 +8,7 @@ use crate::learned_bias::BiasLocator;
 use crate::viewport::Viewport;
 
 pub const LIVE_BYTE_EGRESS_STREAM_ID: u64 = 3;
-pub const LIVE_BYTE_EGRESS_FRAME_LEN: usize = 8;
+pub const LIVE_BYTE_EGRESS_FRAME_LEN: usize = 16;
 const MIN_EGRESS_PRESSURE: f64 = 0.0001;
 const REENTRY_GAIN_RECENT_US: u64 = 30_000_000;
 const REENTRY_GAIN_FULL_IDLE_US: u64 = 300_000_000;
