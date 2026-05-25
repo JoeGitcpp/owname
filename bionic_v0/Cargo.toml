@@ -38,6 +38,10 @@ path = "src/bin/post_effect_probe.rs"
 name = "learned_bias_probe"
 path = "src/bin/learned_bias_probe.rs"
 
+[[bin]]
+name = "sandbox_runner"
+path = "src/bin/sandbox_runner.rs"
+
 [dependencies]
 cpal = "0.15"
 nokhwa = { version = "0.10", features = ["input-avfoundation"] }
