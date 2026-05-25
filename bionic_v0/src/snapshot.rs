@@ -867,7 +867,12 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
     };
 
     let vocal_organ = if version >= 36 {
-        read_vocal_organ_snapshot(&bytes, &mut cur)
+        if version >= 48 {
+            read_vocal_organ_snapshot(&bytes, &mut cur)
+        } else {
+            // v1 fields only, v2 formant fields get defaults
+            read_vocal_organ_snapshot_v1(&bytes, &mut cur)
+        }
     } else {
         VocalOrganState::default()
     };
@@ -2200,9 +2205,48 @@ fn write_vocal_organ(buf: &mut Vec<u8>, s: &VocalOrganState) {
     buf.extend_from_slice(&s.pitch_tension.to_le_bytes());
     buf.extend_from_slice(&s.resonance_position.to_le_bytes());
     buf.extend_from_slice(&s.noise_mix.to_le_bytes());
+    buf.extend_from_slice(&s.formant_f1.to_le_bytes());
+    buf.extend_from_slice(&s.formant_f2.to_le_bytes());
+    buf.extend_from_slice(&s.formant_f3.to_le_bytes());
+    buf.extend_from_slice(&s.voiced_ratio.to_le_bytes());
+    buf.extend_from_slice(&s.breath_noise_ratio.to_le_bytes());
+    buf.extend_from_slice(&s.envelope_attack.to_le_bytes());
+    buf.extend_from_slice(&s.envelope_decay.to_le_bytes());
+    buf.extend_from_slice(&s.envelope_sustain.to_le_bytes());
     buf.push(s.phase.as_u8());
     buf.extend_from_slice(&[0u8; 7]);
     buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+}
+
+fn read_vocal_organ_snapshot_v1(bytes: &[u8], cur: &mut usize) -> VocalOrganState {
+    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        u64::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    use crate::vocal_organ::VocalOrganPhase;
+    let breath_drive = rd_f64(bytes, cur);
+    let pitch_tension = rd_f64(bytes, cur);
+    let resonance_position = rd_f64(bytes, cur);
+    let noise_mix = rd_f64(bytes, cur);
+    let phase_byte = bytes[*cur];
+    *cur += 8;
+    let phase = if phase_byte == 1 { VocalOrganPhase::Active } else { VocalOrganPhase::Idle };
+    let last_update_t_us = rd_u64(bytes, cur);
+    VocalOrganState {
+        breath_drive, pitch_tension, resonance_position, noise_mix,
+        formant_f1: 500.0, formant_f2: 1500.0, formant_f3: 2500.0,
+        voiced_ratio: 0.0, breath_noise_ratio: 0.0,
+        envelope_attack: 0.0, envelope_decay: 0.0, envelope_sustain: 0.0,
+        phase, last_update_t_us,
+    }
 }
 
 fn read_vocal_organ_snapshot(bytes: &[u8], cur: &mut usize) -> VocalOrganState {
@@ -2223,6 +2267,14 @@ fn read_vocal_organ_snapshot(bytes: &[u8], cur: &mut usize) -> VocalOrganState {
     let pitch_tension = rd_f64(bytes, cur);
     let resonance_position = rd_f64(bytes, cur);
     let noise_mix = rd_f64(bytes, cur);
+    let formant_f1 = rd_f64(bytes, cur);
+    let formant_f2 = rd_f64(bytes, cur);
+    let formant_f3 = rd_f64(bytes, cur);
+    let voiced_ratio = rd_f64(bytes, cur);
+    let breath_noise_ratio = rd_f64(bytes, cur);
+    let envelope_attack = rd_f64(bytes, cur);
+    let envelope_decay = rd_f64(bytes, cur);
+    let envelope_sustain = rd_f64(bytes, cur);
     let phase_byte = bytes[*cur];
     *cur += 8;
     let phase = if phase_byte == 1 {
@@ -2236,6 +2288,14 @@ fn read_vocal_organ_snapshot(bytes: &[u8], cur: &mut usize) -> VocalOrganState {
         pitch_tension,
         resonance_position,
         noise_mix,
+        formant_f1: rd_f64(bytes, cur),
+        formant_f2: rd_f64(bytes, cur),
+        formant_f3: rd_f64(bytes, cur),
+        voiced_ratio: rd_f64(bytes, cur),
+        breath_noise_ratio: rd_f64(bytes, cur),
+        envelope_attack: rd_f64(bytes, cur),
+        envelope_decay: rd_f64(bytes, cur),
+        envelope_sustain: rd_f64(bytes, cur),
         phase,
         last_update_t_us,
     }

@@ -121,3 +121,16 @@ fn vocal_reflex_sources_do_not_introduce_emotion_or_text_ontology() {
         );
     }
 }
+
+#[test]
+fn vocal_organ_v2_has_formant_and_envelope_parameters() {
+    let state = bionic_v0::vocal_organ::VocalOrganState::default();
+    assert!(state.formant_f1.is_finite());
+    assert!(state.formant_f2.is_finite());
+    assert!(state.formant_f3.is_finite());
+    assert!(state.voiced_ratio.is_finite());
+    assert!(state.breath_noise_ratio.is_finite());
+    assert!(state.envelope_attack.is_finite());
+    assert!(state.envelope_decay.is_finite());
+    assert!(state.envelope_sustain.is_finite());
+}
