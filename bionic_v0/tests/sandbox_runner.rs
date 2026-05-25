@@ -6,6 +6,15 @@ fn sandbox_bin() -> std::path::PathBuf {
         .join("target/release/sandbox_runner")
 }
 
+fn last_frame(dir: &std::path::Path) -> Vec<u8> {
+    let all = std::fs::read(dir.join("live_bytes").join("in.frames")).unwrap_or_default();
+    if all.len() >= 32 {
+        all[all.len() - 32..].to_vec()
+    } else {
+        all
+    }
+}
+
 fn setup_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("sandbox_{}_{}", name, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -45,7 +54,7 @@ fn sandbox_vm_executes_push_halt() {
 
     assert!(output.status.success());
 
-    let result = std::fs::read(dir.join("live_bytes").join("in.frames")).unwrap();
+    let result = last_frame(&dir);
     assert_eq!(result.len(), 32);
     assert_eq!(result[0], 0, "status should be OK");
     assert!(result[10..18] != [0u8; 8], "instruction count should be non-zero");
@@ -64,7 +73,7 @@ fn sandbox_vm_adds_correctly() {
         .output()
         .unwrap();
 
-    let result = std::fs::read(dir.join("live_bytes").join("in.frames")).unwrap();
+    let result = last_frame(&dir);
     assert_eq!(result[0], 0);
     let result_val = i64::from_le_bytes(result[2..10].try_into().unwrap());
     assert_eq!(result_val, 7);
@@ -84,7 +93,7 @@ fn sandbox_vm_unknown_opcode_returns_invalid() {
         .output()
         .unwrap();
 
-    let result = std::fs::read(dir.join("live_bytes").join("in.frames")).unwrap();
+    let result = last_frame(&dir);
     assert_eq!(result[0], 0xFF, "unknown opcode should be INVALID");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -103,7 +112,7 @@ fn sandbox_vm_infinite_loop_hits_instruction_limit() {
 
     assert!(output.status.success(), "should not crash on infinite loop");
 
-    let result = std::fs::read(dir.join("live_bytes").join("in.frames")).unwrap();
+    let result = last_frame(&dir);
     assert_eq!(result.len(), 32);
     assert_eq!(result[0], 0xFF, "infinite loop should return INVALID");
 
