@@ -23,6 +23,10 @@ name = "curriculum_report"
 path = "src/bin/curriculum_report.rs"
 
 [[bin]]
+name = "live_training_runner"
+path = "src/bin/live_training_runner.rs"
+
+[[bin]]
 name = "byte_loopback"
 path = "src/bin/byte_loopback.rs"
 
