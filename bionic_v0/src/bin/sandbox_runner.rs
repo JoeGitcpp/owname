@@ -41,6 +41,10 @@ fn main() {
         once
     );
 
+    // Seed the loop: write an initial frame so body has something to react to.
+    let seed = run_vm(&[0x0F]);
+    let _ = fs::write(&in_path, &seed);
+
     loop {
         match fs::read(&out_path) {
             Ok(bytes) if !bytes.is_empty() => {
