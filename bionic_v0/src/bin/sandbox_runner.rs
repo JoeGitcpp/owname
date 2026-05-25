@@ -76,7 +76,7 @@ fn main() {
         if once {
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 

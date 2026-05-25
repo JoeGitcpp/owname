@@ -55,7 +55,8 @@ impl LiveByteClosureDriver {
         let bytes = derive_output_bytes(&frame, pressure);
         let Ok(mut out) = OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open(&self.out_path)
         else {
             return false;
