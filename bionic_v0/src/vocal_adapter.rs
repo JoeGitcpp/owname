@@ -118,6 +118,16 @@ fn next_wave_sample(vp: &Arc<Viewport>, phase: &mut f64, sample_rate_hz: f64) ->
         return 0.0;
     }
 
+    // Use v2 formant synthesis when formant parameters differ from neutral defaults
+    let use_v2 = (organ.formant_f1 - 500.0).abs() > 1.0
+        || (organ.formant_f2 - 1500.0).abs() > 1.0
+        || (organ.formant_f3 - 2500.0).abs() > 1.0
+        || organ.voiced_ratio > 0.01;
+
+    if use_v2 {
+        return next_wave_sample_v2(&organ, phase, sample_rate_hz);
+    }
+
     let pitch = 100.0 + organ.pitch_tension * 400.0;
     let resonance = organ.resonance_position * 3.0;
     let phase_step = pitch / sample_rate_hz;
@@ -128,6 +138,37 @@ fn next_wave_sample(vp: &Arc<Viewport>, phase: &mut f64, sample_rate_hz: f64) ->
     let harmonic1 = (theta * 2.0).sin() * 0.3;
     let harmonic2 = (theta * 3.0).sin() * 0.1 * resonance;
     let sample = organ.breath_drive * (fundamental + harmonic1 + harmonic2);
+    sample.clamp(-1.0, 1.0) as f32
+}
+
+fn next_wave_sample_v2(organ: &crate::vocal_organ::VocalOrganState, phase: &mut f64, sample_rate_hz: f64) -> f32 {
+    let pitch = 80.0 + organ.pitch_tension * 420.0;
+    let phase_step = pitch / sample_rate_hz;
+    *phase = (*phase + phase_step).fract();
+
+    // Glottal source: pulse + noise
+    let voiced_pulse = if *phase < 0.03 {
+        (*phase / 0.03 * std::f64::consts::PI).sin()
+    } else {
+        0.0
+    };
+    let noise = (*phase * 44.0).sin() * (*phase * 337.0).cos() * 0.3;
+    let source = organ.voiced_ratio * voiced_pulse
+        + (1.0 - organ.voiced_ratio) * organ.breath_noise_ratio * noise;
+
+    // 3 parallel formant resonators
+    let resonance = |freq: f64, q: f64| -> f64 {
+        let w = 2.0 * std::f64::consts::PI * freq / sample_rate_hz;
+        let r = (-w / q).exp();
+        1.0 / (1.0 - 2.0 * r * w.cos() + r * r).sqrt()
+    };
+
+    let f1_gain = resonance(organ.formant_f1.max(100.0), 8.0);
+    let f2_gain = resonance(organ.formant_f2.max(200.0), 12.0);
+    let f3_gain = resonance(organ.formant_f3.max(500.0), 15.0);
+    let filter = (f1_gain * 1.2 + f2_gain * 0.8 + f3_gain * 0.4) / 3.0;
+
+    let sample = organ.breath_drive * source * filter;
     sample.clamp(-1.0, 1.0) as f32
 }
 
