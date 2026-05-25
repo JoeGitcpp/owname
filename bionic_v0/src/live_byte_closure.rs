@@ -40,17 +40,14 @@ impl LiveByteClosureDriver {
     }
 
     fn write_from_fresh_code_pressure(&mut self, vp: &Viewport, now_t_us: u64) -> bool {
-        let pressure = vp
-            .read_evidence_tension()
-            .unresolved_pressure
-            .clamp(0.0, 1.0);
-        if pressure <= MIN_EGRESS_PRESSURE {
-            return false;
-        }
-
         let Some(frame) = self.latest_fresh_code_frame(vp) else {
             return false;
         };
+        let pressure = vp
+            .read_evidence_tension()
+            .unresolved_pressure
+            .clamp(0.0, 1.0)
+            .max(MIN_EGRESS_PRESSURE + 0.01); // always allow exploration
         let pressure = learned_output_pressure(vp, pressure, now_t_us);
         let bytes = derive_output_bytes(&frame, pressure);
         let Ok(mut out) = OpenOptions::new()
