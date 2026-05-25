@@ -1844,3 +1844,15 @@ fn phot_motion_after_write_epoch_forms_live_temporal_pair() {
         "delay_us must be positive (epoch precedes window)"
     );
 }
+
+#[test]
+fn camera_frame_v2_has_320x240_resolution_and_rgb_channels() {
+    use bionic_v0::phot_camera::{CAM_W, CAM_H, CameraFrame};
+    assert_eq!(CAM_W, 320);
+    assert_eq!(CAM_H, 240);
+    let frame = CameraFrame::zeros(0);
+    assert_eq!(frame.luma.len(), 320 * 240);
+    assert_eq!(frame.r.len(), 320 * 240);
+    assert_eq!(frame.g.len(), 320 * 240);
+    assert_eq!(frame.b.len(), 320 * 240);
+}

@@ -27,15 +27,18 @@ use crate::{PHOT_BANDS, PHOT_MAX_EVENTS_PER_FRAME, PHOT_REGION_MIN_PIXELS, PHOT_
 
 /// Fixed resolution of the internal luma grid. We downsample whatever the
 /// source delivers to this, so the rest of the pipeline sees one grid shape.
-pub const CAM_W: usize = 64;
-pub const CAM_H: usize = 48;
+pub const CAM_W: usize = 320;
+pub const CAM_H: usize = 240;
 pub const CAM_PIX: usize = CAM_W * CAM_H;
 
-/// A single grayscale camera frame. Values in `[0.0, 1.0]`.
+/// A single camera frame with grayscale luma and RGB channels. Values in `[0.0, 1.0]`.
 #[derive(Clone, Debug)]
 pub struct CameraFrame {
     pub t_us: u64,
-    pub luma: Vec<f64>, // length CAM_PIX, row-major.
+    pub luma: Vec<f64>, // length CAM_PIX, row-major grayscale
+    pub r: Vec<f64>,    // red channel
+    pub g: Vec<f64>,    // green channel
+    pub b: Vec<f64>,    // blue channel
 }
 
 impl CameraFrame {
@@ -43,6 +46,9 @@ impl CameraFrame {
         Self {
             t_us,
             luma: vec![0.0; CAM_PIX],
+            r: vec![0.0; CAM_PIX],
+            g: vec![0.0; CAM_PIX],
+            b: vec![0.0; CAM_PIX],
         }
     }
 }
@@ -160,45 +166,39 @@ impl SyntheticCameraFrameProvider {
 
     fn render_idle(t_us: u64) -> CameraFrame {
         let mut f = CameraFrame::zeros(t_us);
-        // Low, uniform baseline so the extractor isn't dividing by zero.
-        for v in f.luma.iter_mut() {
-            *v = 0.02;
-        }
+        for v in f.luma.iter_mut() { *v = 0.02; }
+        for v in f.r.iter_mut() { *v = 0.02; }
+        for v in f.g.iter_mut() { *v = 0.02; }
+        for v in f.b.iter_mut() { *v = 0.02; }
         f
     }
 
     fn render_blob(t_us: u64, cx: f64, cy: f64, r: f64, brightness: f64) -> CameraFrame {
         let mut f = CameraFrame::zeros(t_us);
-        let w = CAM_W as f64;
-        let h = CAM_H as f64;
+        let w = CAM_W as f64; let h = CAM_H as f64;
         let cpx = cx.clamp(0.0, 1.0) * (w - 1.0);
         let cpy = cy.clamp(0.0, 1.0) * (h - 1.0);
-        let rpx = (r.max(1e-6)) * w.min(h);
-        let rpx2 = rpx * rpx;
+        let rpx = (r.max(1e-6)) * w.min(h); let rpx2 = rpx * rpx;
         let b = brightness.clamp(0.0, 1.0);
-        for y in 0..CAM_H {
-            for x in 0..CAM_W {
-                let dx = x as f64 - cpx;
-                let dy = y as f64 - cpy;
-                let d2 = dx * dx + dy * dy;
-                let val = if d2 <= rpx2 {
-                    let t = (1.0 - d2 / rpx2).max(0.0);
-                    0.02 + b * t
-                } else {
-                    0.02
-                };
-                f.luma[y * CAM_W + x] = val.clamp(0.0, 1.0);
-            }
-        }
+        for y in 0..CAM_H { for x in 0..CAM_W {
+            let dx = x as f64 - cpx; let dy = y as f64 - cpy;
+            let d2 = dx * dx + dy * dy;
+            let val = if d2 <= rpx2 { 0.02 + b * (1.0 - d2 / rpx2).max(0.0) } else { 0.02 };
+            let idx = y * CAM_W + x;
+            f.luma[idx] = val.clamp(0.0, 1.0);
+            f.r[idx] = val.clamp(0.0, 1.0);
+            f.g[idx] = val.clamp(0.0, 1.0);
+            f.b[idx] = val.clamp(0.0, 1.0);
+        }}
         f
     }
 
     fn render_multi_blob(t_us: u64, blobs: &[BlobSpec]) -> CameraFrame {
         let mut f = CameraFrame::zeros(t_us);
-        // Start with baseline.
-        for v in f.luma.iter_mut() {
-            *v = 0.02;
-        }
+        for v in f.luma.iter_mut() { *v = 0.02; }
+        for v in f.r.iter_mut() { *v = 0.02; }
+        for v in f.g.iter_mut() { *v = 0.02; }
+        for v in f.b.iter_mut() { *v = 0.02; }
         let w = CAM_W as f64;
         let h = CAM_H as f64;
         for blob in blobs {
@@ -215,9 +215,11 @@ impl SyntheticCameraFrameProvider {
                     if d2 <= rpx2 {
                         let t = (1.0 - d2 / rpx2).max(0.0);
                         let v = 0.02 + b * t;
-                        // Take the maximum so overlapping blobs don't cancel.
-                        let cur = f.luma[y * CAM_W + x];
-                        f.luma[y * CAM_W + x] = cur.max(v).clamp(0.0, 1.0);
+                        let idx = y * CAM_W + x;
+                        f.luma[idx] = f.luma[idx].max(v).clamp(0.0, 1.0);
+                        f.r[idx] = f.r[idx].max(v).clamp(0.0, 1.0);
+                        f.g[idx] = f.g[idx].max(v).clamp(0.0, 1.0);
+                        f.b[idx] = f.b[idx].max(v).clamp(0.0, 1.0);
                     }
                 }
             }
@@ -362,11 +364,9 @@ impl RealCameraFrameProvider {
                 let t = crate::clock::now_us();
                 match camera.frame() {
                     Ok(buffer) => {
-                        if let Some(luma) = decode_rgb_to_luma(&buffer) {
-                            // try_send: drops the frame if the channel is full
-                            // rather than blocking. The adapter will see Ok(None)
-                            // and eventually detect staleness if this persists.
-                            let _ = frame_tx.try_send(Ok(CameraFrame { t_us: t, luma }));
+                        if let Some(mut frame) = decode_rgb_to_luma(&buffer) {
+                            frame.t_us = t;
+                            let _ = frame_tx.try_send(Ok(frame));
                         }
                     }
                     Err(_) => {
@@ -422,9 +422,8 @@ impl CameraFrameProvider for RealCameraFrameProvider {
     }
 }
 
-/// Decode a nokhwa `Buffer` (RGB format) into a 64×48 normalised luma grid.
-/// Returns `None` only if the buffer cannot be decoded or has zero dimensions.
-fn decode_rgb_to_luma(buffer: &nokhwa::Buffer) -> Option<Vec<f64>> {
+/// Decode a nokhwa `Buffer` (RGB format) into a 320×240 frame with luma and RGB channels.
+fn decode_rgb_to_luma(buffer: &nokhwa::Buffer) -> Option<CameraFrame> {
     use nokhwa::pixel_format::RgbFormat;
 
     let res = buffer.resolution();
@@ -434,11 +433,17 @@ fn decode_rgb_to_luma(buffer: &nokhwa::Buffer) -> Option<Vec<f64>> {
         return None;
     }
     let img = buffer.decode_image::<RgbFormat>().ok()?;
-    let raw = img.into_raw(); // Vec<u8>, RGB interleaved
+    let raw = img.into_raw();
     if raw.len() != src_w * src_h * 3 {
         return None;
     }
-    let mut luma = vec![0.0f64; CAM_PIX];
+    let mut frame = CameraFrame {
+        t_us: 0,
+        luma: vec![0.0; CAM_PIX],
+        r: vec![0.0; CAM_PIX],
+        g: vec![0.0; CAM_PIX],
+        b: vec![0.0; CAM_PIX],
+    };
     for oy in 0..CAM_H {
         for ox in 0..CAM_W {
             let sx = (ox * src_w / CAM_W).min(src_w - 1);
@@ -446,11 +451,15 @@ fn decode_rgb_to_luma(buffer: &nokhwa::Buffer) -> Option<Vec<f64>> {
             let base = (sy * src_w + sx) * 3;
             let r = raw[base] as f64 / 255.0;
             let g = raw[base + 1] as f64 / 255.0;
-            let b = raw[base + 2] as f64 / 255.0;
-            luma[oy * CAM_W + ox] = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 1.0);
+            let bb = raw[base + 2] as f64 / 255.0;
+            let idx = oy * CAM_W + ox;
+            frame.r[idx] = r.clamp(0.0, 1.0);
+            frame.g[idx] = g.clamp(0.0, 1.0);
+            frame.b[idx] = bb.clamp(0.0, 1.0);
+            frame.luma[idx] = (0.299 * r + 0.587 * g + 0.114 * bb).clamp(0.0, 1.0);
         }
     }
-    Some(luma)
+    Some(frame)
 }
 
 // ---------------------------------------------------------------------------
