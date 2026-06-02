@@ -94,7 +94,13 @@ impl Ar2Predictor {
             return;
         }
 
-        let pred = self.a * x_now + self.b * x_prev;
+        // B1 (VPC mechanism 5): a high (cross-layer) predictor may publish a
+        // prior for this axis. We add it to the prediction as an INPUT only.
+        // It is deliberately NOT folded into used_x0/used_x1, so the a/b
+        // coefficient update below never sees it — that keeps learning local
+        // (no backprop / no cross-layer gradient).
+        let external_prior = vp.read_prior(self.axis);
+        let pred = self.a * x_now + self.b * x_prev + external_prior;
         let target_t_us = t_now + self.horizon_us;
 
         let obs_seq_after = {

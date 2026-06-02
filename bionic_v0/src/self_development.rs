@@ -2,6 +2,7 @@ use crate::action_consequence::{
     ActionConsequencePair, ActionConsequenceWindow, ConsequenceModalityKind, ConsequencePairStatus,
 };
 use crate::action_output::WriteEpochRecord;
+use crate::substrate::{ema, unit};
 use crate::viewport::Viewport;
 use crate::{CONSEQUENCE_WINDOW_CAP, PAIR_HISTORY_CAP, WRITE_EPOCH_HISTORY_CAP};
 
@@ -340,18 +341,6 @@ fn ratio(value: u32, cap: usize) -> f64 {
     }
 }
 
-fn ema(previous: f64, next: f64, alpha: f64) -> f64 {
-    unit((1.0 - alpha) * previous + alpha * next)
-}
-
 fn memory_like(recurrence: f64, focus_persistence: f64) -> f64 {
     unit((unit(recurrence) + unit(focus_persistence)) * 0.5)
-}
-
-fn unit(value: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
 }

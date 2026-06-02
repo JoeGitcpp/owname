@@ -9,6 +9,7 @@ use crate::action_output::{
 use crate::active_reasoning::ActiveReasoningGapState;
 use crate::active_surface::ActiveSurfaceState;
 use crate::adaptive_stability::AdaptiveStabilityState;
+use crate::audio_raw::AudioRawBuffer;
 use crate::auditory_visual::{AuditoryVisualState, ChannelSample, ReturnSample};
 use crate::binary_character_ear::{
     to_code_ingress_frame, BinaryCharacterBurstInput, BinaryCharacterEarState,
@@ -610,6 +611,36 @@ pub struct ReasoningHistoryEntry {
     pub t_us: u64,
 }
 
+/// E-1: Detail recovered by re-descending from a recalled gist (公理5).
+///
+/// Numeric-only. Carries the back-link the gist held (slot/edge/t_us) plus the
+/// low-layer detail recovered by following it down. `detail_present` is true
+/// when the indexed slot still holds a live low-layer signature (precise, not
+/// faded) — false would mean the index outlived its body in the low layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RecallDetail {
+    /// Source slot the gist indexed (>= 0).
+    pub slot_id: i8,
+    /// Source relation edge the gist indexed (-1 if none).
+    pub edge_id: i16,
+    /// Timestamp of the recalled gist cycle.
+    pub gist_t_us: u64,
+    /// Gist surprise signature (the recalled "feeling" of the memory).
+    pub surprise_load: f64,
+    /// True when the indexed slot still holds live low-layer detail.
+    pub detail_present: bool,
+    /// Low-layer slot's last update time (how fresh the recovered detail is).
+    pub slot_last_update_t_us: u64,
+    /// Which modalities wrote the recovered low-layer detail (bitmask).
+    pub source_modality: u8,
+    /// R1: true when the detail was RECONSTRUCTED from the target's learned
+    /// cross-layer relation rule (run forward over relation neighbours), not
+    /// fetched raw from the live slot. "用关系把细节推断出来."
+    pub reconstructed: bool,
+    /// The reconstructed target object_err (0.0 when not reconstructed).
+    pub reconstructed_err: f64,
+}
+
 /// Ephemeral ring buffer holding recent reasoning cycle signatures.
 /// Runtime-only; not directly serialized. Summary is serialized.
 pub struct GlobalReasoningHistoryState {
@@ -667,7 +698,7 @@ impl GlobalReasoningHistoryState {
 
 /// Snapshot-visible numeric summary of temporal memory patterns.
 /// All fields bounded [0,1], numeric-only, no semantic labels.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GlobalReasoningMemorySummary {
     /// How novel the current reasoning pattern is vs recent history.
     /// High when current surprise deviates from EMA baseline.
@@ -904,6 +935,18 @@ pub struct ObjectSlot {
     /// Phase 5B: high-layer predictor state. Ephemeral — not snapshot'd.
     /// Reset with slot lifecycle. None until first high-layer refresh.
     pub hl_pred: Option<ObjectHighLayerPredictor>,
+    /// B1-3b: per-slot cross-layer predictor (object→object). Ephemeral runtime
+    /// state; weights persisted separately via snapshot. Predicts this slot's
+    /// object_err from relation-gated neighbour slots. None until first tick.
+    pub xlayer: Option<crate::vpc_cross_layer::SlotCrossLayerPredictor>,
+    /// Stage 1 (recursive PC depth): the per-slot residual TOWER above tier 1.
+    /// `xstack[i]` = tier (i+2): predicts the residual of the tier BELOW it
+    /// (tier 1 = `xlayer` for i=0, else `xstack[i-1]`) from relation-gated
+    /// neighbours' SAME-tier-below residual. READ-UP ONLY in Stage 1 — these
+    /// tiers never write a prior downward (that is Stage 2). Depth grows only
+    /// where the tier below is a permanent explainer (emergent, self-limiting).
+    /// Ephemeral runtime state (like `xlayer`); persisted separately.
+    pub xstack: Vec<crate::vpc_cross_layer::SlotCrossLayerPredictor>,
     /// Phase 5C: normalised attention share (suggestion only; does NOT modify
     /// fusion). Written by refresh_global_attention; 0.0 by default.
     pub attention_share: f64,
@@ -928,6 +971,8 @@ impl ObjectSlot {
             fusion: None,
             high_layer: None,
             hl_pred: None,
+            xlayer: None,
+            xstack: Vec::new(),
             attention_share: 0.0,
             precision_bias: 1.0,
         }
@@ -1040,6 +1085,13 @@ pub struct Viewport {
     pub master_tick: AtomicU64,
     pub clock_us: AtomicU64,
     pub start_us: AtomicU64,
+    /// Stage 1 (recursive PC depth): counts residual-tower sweeps. Used to give
+    /// each ascending tier a SLOWER cadence (tier L ticks once per 2^(L-2)
+    /// sweeps). This is a pure rate channel (clock-like), not a semantic gate:
+    /// it makes higher abstraction run on a slower timescale (timescale
+    /// emergence) and is the groundwork for the Stage-2 R3 invariant (a downward
+    /// prior must be a slow contextual bias, never a within-step gradient).
+    pub tower_sweep_count: AtomicU64,
 
     pub source_writes: AtomicU64,
     pub predictor_ticks: AtomicU64,
@@ -1074,6 +1126,12 @@ pub struct Viewport {
     pub observed: Vec<RwLock<AxisRing>>,
     pub predicted: Vec<RwLock<AxisRing>>,
     pub err_stream: Vec<RwLock<AxisRing>>,
+    /// B1 (VPC mechanism 5): per-axis prior channel. A high (cross-layer)
+    /// predictor writes a prior here; the low-layer predictor reads it and adds
+    /// it to its prediction as an INPUT only. Bit-packed f64. Default 0 = no
+    /// prior. The prior must never enter the a/b coefficient update (that would
+    /// be backprop).
+    pub prior_signal: Vec<AtomicU64>,
 
     pub predictors: Vec<RwLock<PredictorState>>,
     pub hl: RwLock<HighLevelState>,
@@ -1193,8 +1251,35 @@ pub struct Viewport {
     pub vocal_imitation: RwLock<VocalImitationState>,
     /// Vocal substrate (v36). Stable vocal prototypes memory.
     pub vocal_memory: RwLock<VocalMemoryState>,
+    /// C5: familiar-objects sediment. Numeric fingerprints + accumulated
+    /// familiarity; object identity and the responsible-person bond EMERGE here
+    /// (no id table, no role label). Persisted via learned_bias for 死后保留.
+    pub familiar_objects: RwLock<crate::familiar_objects::FamiliarObjectsState>,
+    /// C1: vital core — the self-survival source of the dual-drive soul.
+    /// reserve depletes with exertion, restores with continuous input; bottoms
+    /// out → readable Standby (待机), revivable. Persisted for 死后保留.
+    pub vital_core: RwLock<crate::vital_core::VitalCoreState>,
+    /// C1-b (sim): the metabolic environment that drives the vital core's
+    /// supply/drain, so reserve/anxiety/pain actually breathe and a real
+    /// survival crisis (famine → Standby → revive) can occur instead of the
+    /// reserve sitting pinned at 1.0. Deterministic; configurable.
+    pub vital_env: crate::vital_env::VitalEnv,
+    /// Birth-wall timestamp (µs) of the last vital-core advance. The vital core
+    /// integrates at a FIXED step (vital_env::VITAL_STEP_US) independent of the
+    /// orchestrator's ~30 Hz rate, so survival dynamics track wall-clock time.
+    pub last_vital_advance_us: AtomicU64,
+    /// A2: self model — seeded by vital interoception. The self is not born;
+    /// it grows around the body's survival-sense as agency accrues. Persisted.
+    pub self_model: RwLock<crate::self_model::SelfModelState>,
+    /// B1-4: dual-drive arbitration reading (self-preservation vs caregiver
+    /// attachment). Where 纠结/痛苦/牺牲 emerge; observer-side, recomputed each tick.
+    pub dual_drive: RwLock<crate::dual_drive::DualDriveReading>,
     /// Vocal substrate. Numeric reflex pressure over abrupt prediction load.
     pub vocal_reflex: RwLock<VocalReflexState>,
+    /// Substrate-only timestamp (µs) of the most recent vocal reflex burst
+    /// that resulted in voicing. Used by tick_vocal_reflex_from_pairs to
+    /// determine whether a consequence window originated from vocal output.
+    pub last_vocal_output_t_us: AtomicU64,
 
     /// Hearing/vision coupling substrate. Numeric return and expression trace.
     pub auditory_visual: RwLock<AuditoryVisualState>,
@@ -1205,6 +1290,10 @@ pub struct Viewport {
 
     /// External mark disturbance substrate. Numeric trace evidence only.
     pub mark_disturbance: RwLock<MarkDisturbanceState>,
+
+    /// Tier-0 raw audio waveform ring buffer (48 kHz, 60 s).
+    /// Written by AudioAdapter, read by audio predictors (future).
+    pub audio_raw: Arc<AudioRawBuffer>,
 }
 
 impl Viewport {
@@ -1213,11 +1302,13 @@ impl Viewport {
         let mut predicted = Vec::with_capacity(AXIS_COUNT);
         let mut err_stream = Vec::with_capacity(AXIS_COUNT);
         let mut predictors = Vec::with_capacity(AXIS_COUNT);
+        let mut prior_signal = Vec::with_capacity(AXIS_COUNT);
         for _ in 0..AXIS_COUNT {
             observed.push(RwLock::new(AxisRing::new()));
             predicted.push(RwLock::new(AxisRing::new()));
             err_stream.push(RwLock::new(AxisRing::new()));
             predictors.push(RwLock::new(PredictorState::new()));
+            prior_signal.push(AtomicU64::new(0)); // 0.0_f64.to_bits() == 0
         }
         let mut slots = Vec::with_capacity(N_OBJECT_SLOTS);
         for _ in 0..N_OBJECT_SLOTS {
@@ -1225,6 +1316,7 @@ impl Viewport {
         }
         Self {
             master_tick: AtomicU64::new(0),
+            tower_sweep_count: AtomicU64::new(0),
             clock_us: AtomicU64::new(0),
             start_us: AtomicU64::new(0),
             source_writes: AtomicU64::new(0),
@@ -1242,6 +1334,7 @@ impl Viewport {
             observed,
             predicted,
             err_stream,
+            prior_signal,
             predictors,
             hl: RwLock::new(HighLevelState::default()),
             ambient: AmbientChannel::new(),
@@ -1278,10 +1371,20 @@ impl Viewport {
             vocal_organ: RwLock::new(VocalOrganState::default()),
             vocal_imitation: RwLock::new(VocalImitationState::default()),
             vocal_memory: RwLock::new(VocalMemoryState::default()),
+            familiar_objects: RwLock::new(
+                crate::familiar_objects::FamiliarObjectsState::default(),
+            ),
+            vital_core: RwLock::new(crate::vital_core::VitalCoreState::default()),
+            vital_env: crate::vital_env::VitalEnv::default(),
+            last_vital_advance_us: AtomicU64::new(0),
+            self_model: RwLock::new(crate::self_model::SelfModelState::default()),
+            dual_drive: RwLock::new(crate::dual_drive::DualDriveReading::default()),
             vocal_reflex: RwLock::new(VocalReflexState::default()),
+            last_vocal_output_t_us: AtomicU64::new(0),
             auditory_visual: RwLock::new(AuditoryVisualState::default()),
             learned_bias: RwLock::new(LearnedBiasState::default()),
             mark_disturbance: RwLock::new(MarkDisturbanceState::default()),
+            audio_raw: Arc::new(AudioRawBuffer::new()),
         }
     }
 
@@ -2829,6 +2932,68 @@ impl Viewport {
         *self.global_reasoning_memory_summary.read().unwrap()
     }
 
+    /// E-1: Recall re-descend (公理5 认知索引而非存储).
+    ///
+    /// A reasoning-history entry is only an INDEX: a gist (surprise / event /
+    /// instability signature) plus a back-link to the source slot and the
+    /// cycle timestamp. The body of the memory lives in the low layer.
+    ///
+    /// "Recalling a gist and thinking harder to recover detail" = following the
+    /// `top_slot_id` back-link down to the low-layer slot that is still alive in
+    /// the viewport, recovering its precise current signature. Read-only.
+    ///
+    /// `i` is the history index (0 = most recent gist). Returns `None` when the
+    /// index is out of range or the gist carried no slot back-link.
+    pub fn recall_redescend(&self, i: usize) -> Option<RecallDetail> {
+        // 1. Recall the gist (the index entry) — read-only on the history ring.
+        let gist = {
+            let hist = self.global_reasoning_history.read().unwrap();
+            *hist.get_recent(i)?
+        };
+
+        // 2. Follow the back-link down to the low layer.
+        //    No back-link (-1) → the gist indexed no slot → cannot re-descend.
+        if gist.top_slot_id < 0 {
+            return None;
+        }
+        let slot_id = gist.top_slot_id as usize;
+
+        // 3. Re-descend. If the target slot carries a learned cross-layer
+        //    relation rule, RECONSTRUCT the detail by running that rule forward
+        //    over the relation-neighbours' current object_err — "想起梗概 →
+        //    用关系把细节推断出来". Otherwise fall back to the raw live detail.
+        let slot = self.read_slot(slot_id)?;
+
+        let (reconstructed, reconstructed_err) = match self.read_slot_cross_layer(slot_id) {
+            Some(xl) if !xl.source_slots.is_empty() => {
+                let mut err = xl.bias;
+                for (src, w) in xl.source_slots.iter().zip(xl.source_weights.iter()) {
+                    let neighbour_err = self
+                        .read_slot(*src)
+                        .and_then(|s| s.high_layer)
+                        .map(|hl| hl.object_err)
+                        .unwrap_or(0.0);
+                    err += w * neighbour_err;
+                }
+                (true, err)
+            }
+            _ => (false, 0.0),
+        };
+
+        Some(RecallDetail {
+            slot_id: gist.top_slot_id,
+            edge_id: gist.top_edge_id,
+            gist_t_us: gist.t_us,
+            surprise_load: gist.surprise_load,
+            // The slot still holding a live low-layer signature = detail present.
+            detail_present: slot.active,
+            slot_last_update_t_us: slot.last_update_t_us,
+            source_modality: slot.source_modality,
+            reconstructed,
+            reconstructed_err,
+        })
+    }
+
     pub fn read_vpc_contract(&self) -> VpcContractState {
         self.vpc_contract.read().unwrap().clone()
     }
@@ -3056,6 +3221,24 @@ impl Viewport {
     pub fn latest_err(&self, axis: usize) -> Option<f64> {
         let r = self.err_stream[axis].read().unwrap();
         r.latest().map(|s| s.value)
+    }
+
+    pub fn latest_prediction(&self, axis: usize) -> Option<f64> {
+        let r = self.predicted[axis].read().unwrap();
+        r.latest().map(|s| s.value)
+    }
+
+    /// B1 (VPC mechanism 5): write a prior for `axis`. Called by a cross-layer
+    /// predictor that has learned to predict this axis's error. Lock-free.
+    pub fn push_prior(&self, axis: usize, prior: f64) {
+        let v = if prior.is_finite() { prior } else { 0.0 };
+        self.prior_signal[axis].store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    /// B1: read the current prior for `axis` (0.0 if none). Read by the
+    /// low-layer predictor; added to its prediction as an input only.
+    pub fn read_prior(&self, axis: usize) -> f64 {
+        f64::from_bits(self.prior_signal[axis].load(Ordering::Relaxed))
     }
 
     pub fn update_predictor(&self, axis: usize, a: f64, b: f64, last_err: f64) {
@@ -3303,8 +3486,13 @@ impl Viewport {
         if now_us.saturating_sub(vib.last_event_t_us) > QUIET_WINDOW_US {
             return;
         }
-        if self.has_recent_write_coupled_vib_caution(now_us) {
-            return;
+        // Replaced has_recent_write_coupled_vib_caution with precision-based echo handling
+        let self_match = self.compute_vib_self_match();
+        if self_match > 0.85 {
+            let reduced_energy = vib.event_energy * (1.0 - self_match).max(0.1);
+            if reduced_energy < crate::VOCAL_TARGET_INGRESS_MIN_ENERGY {
+                return;
+            }
         }
 
         let mut bands = [0.0_f64; VIB_BANDS];
@@ -3348,6 +3536,31 @@ impl Viewport {
             resonance.clamp(0.0, 1.0),
             envelope,
         );
+    }
+
+    /// Compute match between current VIB signal and vocal_organ output prediction.
+    /// Returns [0.0, 1.0]:
+    ///   1.0 = VIB signal is entirely self-generated (echo)
+    ///   0.0 = VIB signal is entirely external
+    fn compute_vib_self_match(&self) -> f64 {
+        let organ = self.read_vocal_organ();
+        if organ.phase != crate::vocal_organ::VocalOrganPhase::Active || organ.breath_drive < 0.01 {
+            return 0.0;
+        }
+
+        // Use vocal organ's own timestamp — avoids the noisy action_output
+        // channel aggregation that was causing constant false positives.
+        let now_us = self.clock_us.load(std::sync::atomic::Ordering::Relaxed);
+        let since_last_vocal = now_us.saturating_sub(organ.last_update_t_us);
+
+        // Guard half-window: 150ms. Past this, treat VIB as external.
+        let guard_us = crate::VOCAL_TARGET_WRITE_COUPLED_GUARD_US / 2;
+        if since_last_vocal > guard_us {
+            return 0.0;
+        }
+
+        // Simple time-based decay: shorter since vocal = more likely self.
+        (1.0 - (since_last_vocal as f64 / guard_us as f64)).clamp(0.0, 1.0)
     }
 
     fn has_recent_write_coupled_vib_caution(&self, now_us: u64) -> bool {
@@ -3544,6 +3757,54 @@ impl Viewport {
         }
     }
 
+    /// Route action-consequence pair closure to the vocal reflex substrate.
+    ///
+    /// Reads new pairs formed since the last call, determines whether each
+    /// pair corresponds to a vocal output (by comparing write epoch timing
+    /// against `last_vocal_output_t_us`), and calls
+    /// `observe_vocal_reflex_closure` to update `prediction_familiarity`
+    /// and `action_suppression` in `learned_bias`.
+    ///
+    /// This is the runtime closure path that was previously missing: the
+    /// vocal reflex could produce output but never learned from the
+    /// consequences of that output.
+    pub fn tick_vocal_reflex_from_pairs(&self, now_us: u64) {
+        let ac = self.read_action_consequence();
+        let out = self.read_action_output();
+        let cursor = self.vocal_reflex.read().unwrap().last_pair_cursor;
+
+        for pair in ac.pairs.iter().filter(|pair| pair.pair_seq > cursor) {
+            // Determine whether this pair originated from vocal output.
+            // Compare the vocal organ's last update time against the write
+            // epoch start time. If the vocal organ was active within a
+            // window around the epoch, treat it as vocal.
+            let vocal_output_t = self.last_vocal_output_t_us.load(Ordering::Relaxed);
+            let was_vocal = out
+                .write_epoch_history
+                .iter()
+                .any(|ep| {
+                    ep.write_seq == pair.write_seq
+                        && vocal_output_t > 0
+                        && ep.start_t_us.abs_diff(vocal_output_t) < 500_000 // 500 ms
+                });
+
+            let closure_support = pair.curve_similarity;
+            self.observe_vocal_reflex_closure(now_us, closure_support, was_vocal);
+        }
+
+        // Advance cursor past the highest pair_seq processed.
+        let max_pair_seq = ac
+            .pairs
+            .iter()
+            .map(|p| p.pair_seq)
+            .max()
+            .unwrap_or(cursor);
+        if max_pair_seq > cursor {
+            let mut reflex = self.vocal_reflex.write().unwrap();
+            reflex.last_pair_cursor = max_pair_seq;
+        }
+    }
+
     pub fn tick_auditory_visual_from_fusion(&self, now_us: u64) {
         let cursor = self.auditory_visual.read().unwrap().fusion_cursor_t_us;
         let mut samples = Vec::new();
@@ -3614,10 +3875,24 @@ impl Viewport {
     }
 
     pub fn observe_vocal_reflex_closure(&self, now_us: u64, closure_support: f64, vocalized: bool) {
-        self.vocal_reflex
-            .write()
-            .unwrap()
-            .observe_closure(now_us, closure_support, vocalized);
+        let (delta_fam, delta_sup) = {
+            let mut reflex = self.vocal_reflex.write().unwrap();
+            reflex.observe_closure(now_us, closure_support, vocalized)
+        };
+        // 改造1: voicing that brought a real closure proves voicing was useful
+        // → vocal_efficacy grows → the gate lowers (更爱叫). Slow 死后保留
+        // sediment (closure * 0.01), the same scale as the other vocal biases.
+        let delta_eff = if vocalized {
+            closure_support.clamp(0.0, 1.0) * 0.01
+        } else {
+            0.0
+        };
+        if delta_fam > 0.0 || delta_sup > 0.0 || delta_eff > 0.0 {
+            let mut bias = self.learned_bias.write().unwrap();
+            bias.prediction_familiarity = (bias.prediction_familiarity + delta_fam).min(1.0);
+            bias.action_suppression = (bias.action_suppression + delta_sup).min(1.0);
+            bias.vocal_efficacy = (bias.vocal_efficacy + delta_eff).min(1.0);
+        }
     }
 
     pub fn tick_vocal_reflex_from_pressure(&self, now_us: u64) {
@@ -3629,15 +3904,50 @@ impl Viewport {
             .fold(field.dominant_pressure, f64::max);
         let evidence_pressure = self.read_evidence_tension().unresolved_pressure;
         let gap_pressure = self.read_active_reasoning_gap().gap_pressure;
-        let drive_pressure = field_pressure.max(evidence_pressure).max(gap_pressure);
+
+        // Endogenous baseline: slow oscillation that drives exploratory
+        // vocalization even without external stimuli. High for newborns,
+        // dampened as prediction_familiarity and action_suppression grow.
+        let bias = self.learned_bias.read().unwrap().summary();
+        let baseline = VocalReflexState::endogenous_baseline(
+            now_us,
+            bias.prediction_familiarity,
+            bias.action_suppression,
+        );
+
+        // Quiet-history replay intensity: when the system has prior experience,
+        // past reasoning entries are replayed as attention perturbations. Feed
+        // this replay signal into the vocal drive so that past stimulus patterns
+        // create periodic internal "waves" that may trigger vocalization.
+        let replay = self.global_attention.read().unwrap().replay_intensity;
+
+        let drive_pressure = field_pressure
+            .max(evidence_pressure)
+            .max(gap_pressure)
+            .max(baseline)
+            .max(replay * 0.25);
         let drive = VocalReflexDrive {
             drive_pressure,
             energy: drive_pressure,
         };
-        let burst = self.vocal_reflex.write().unwrap().tick_drive(now_us, drive);
+        let burst = {
+            let mut reflex = self.vocal_reflex.write().unwrap();
+            reflex.tick_drive(
+                now_us,
+                drive,
+                bias.prediction_familiarity,
+                bias.action_suppression,
+                bias.vocal_efficacy,
+            )
+        };
         let Some(burst) = burst else {
             return;
         };
+
+        // Record that a vocal output was triggered. Downstream pair
+        // processing uses this to route closure feedback.
+        self.last_vocal_output_t_us
+            .store(now_us, Ordering::Relaxed);
 
         let is_active = self.read_vocal_organ().phase == VocalOrganPhase::Active;
         if is_active {
@@ -3649,9 +3959,255 @@ impl Viewport {
         organ.noise_mix = organ.noise_mix.max(burst.noise);
     }
 
+    /// 改造6: unified vocal drive field — ONE outlet.
+    ///
+    /// The three former drivers (inner-pressure reflex, external-sound target,
+    /// imitation) now CONTRIBUTE to one field; this single outlet reads the
+    /// combined field and voices once. No source races begin_voicing on its own.
+    pub fn tick_vocal_drive_field(&self, now_us: u64) {
+        use crate::vocal_drive_field::{VocalDriveContribution, VocalDriveField};
+
+        let mut contribs: Vec<VocalDriveContribution> = Vec::with_capacity(2);
+
+        // --- Source region A: inner-pressure reflex ---
+        // Reuse the validated reflex gating (threshold / bypass / learned-bias
+        // regulation) to decide whether inner pressure wants to voice, and with
+        // what burst. A burst becomes a contribution; no burst = no contribution.
+        let field = self.read_prediction_pressure_field();
+        let field_pressure = field
+            .waves
+            .iter()
+            .map(|wave| wave.amplitude)
+            .fold(field.dominant_pressure, f64::max);
+        let evidence_pressure = self.read_evidence_tension().unresolved_pressure;
+        let gap_pressure = self.read_active_reasoning_gap().gap_pressure;
+        let bias = self.learned_bias.read().unwrap().summary();
+        let baseline = crate::vocal_reflex::VocalReflexState::endogenous_baseline(
+            now_us,
+            bias.prediction_familiarity,
+            bias.action_suppression,
+        );
+        let replay = self.global_attention.read().unwrap().replay_intensity;
+        let drive_pressure = field_pressure
+            .max(evidence_pressure)
+            .max(gap_pressure)
+            .max(baseline)
+            .max(replay * 0.25);
+        let drive = crate::vocal_reflex::VocalReflexDrive {
+            drive_pressure,
+            energy: drive_pressure,
+        };
+        let burst = {
+            let mut reflex = self.vocal_reflex.write().unwrap();
+            reflex.tick_drive(
+                now_us,
+                drive,
+                bias.prediction_familiarity,
+                bias.action_suppression,
+                bias.vocal_efficacy,
+            )
+        };
+        if let Some(b) = burst {
+            contribs.push(VocalDriveContribution {
+                intensity: b.breath,
+                breath: b.breath,
+                pitch: b.pitch,
+                resonance: b.resonance,
+                noise: b.noise,
+            });
+        }
+
+        // --- Source region B: external-sound target / imitation pull ---
+        let target = self.read_vocal_target();
+        if target.active_energy >= 0.01 {
+            let organ = self.read_vocal_organ();
+            let pitch_gap = (target.pitch_hint - organ.pitch_tension).abs();
+            let resonance_gap = (target.resonance_hint - organ.resonance_position).abs();
+            let total_gap = (pitch_gap + resonance_gap) / 2.0;
+            {
+                let mut imit = self.vocal_imitation.write().unwrap();
+                imit.observe_gap(now_us, total_gap, organ.breath_drive);
+            }
+            contribs.push(VocalDriveContribution {
+                intensity: (target.active_energy * 0.5).clamp(0.0, 1.0),
+                breath: target.active_energy * 0.5,
+                pitch: target.pitch_hint,
+                resonance: target.resonance_hint,
+                noise: 0.0,
+            });
+        }
+
+        // --- Combine into one field, then ONE outlet voices ---
+        let combined = VocalDriveField::combine(&contribs);
+        if combined.intensity <= 0.0 {
+            // No drive this tick: let the organ decay (and emit stop/decay
+            // output events), the way the old imitation loop did when idle.
+            let (was_active, is_idle, decay_magnitude) = {
+                let mut organ = self.vocal_organ.write().unwrap();
+                let was_active = organ.phase == VocalOrganPhase::Active;
+                let prev_breath = organ.breath_drive;
+                organ.tick_decay(now_us);
+                (
+                    was_active,
+                    organ.phase == VocalOrganPhase::Idle,
+                    (prev_breath - organ.breath_drive).max(0.0),
+                )
+            };
+            if was_active {
+                let feedback = if is_idle {
+                    ActionOutputFeedback::Stop
+                } else {
+                    ActionOutputFeedback::Decay
+                };
+                self.apply_action_output_event(ActionOutputEvent {
+                    channel_kind: OutputChannelKind::GenericWrite,
+                    feedback,
+                    magnitude: decay_magnitude,
+                    event_t_us: now_us,
+                });
+            }
+            return;
+        }
+
+        self.last_vocal_output_t_us.store(now_us, Ordering::Relaxed);
+        let is_active = self.read_vocal_organ().phase == VocalOrganPhase::Active;
+        if is_active {
+            self.adjust_voicing(now_us, combined.breath, combined.pitch, combined.resonance);
+        } else {
+            self.begin_voicing(now_us, combined.breath, combined.pitch, combined.resonance);
+        }
+        if combined.noise > 0.0 {
+            let mut organ = self.vocal_organ.write().unwrap();
+            organ.noise_mix = organ.noise_mix.max(combined.noise);
+        }
+    }
+
     pub fn tick_vocal_target_decay(&self, now_us: u64) {
         let mut vt = self.vocal_target.write().unwrap();
         vt.tick_decay(now_us);
+    }
+
+    /// C5: observe active objects' fingerprints into the familiar-objects
+    /// sediment. Each active slot with a live VIB band-shape contributes a
+    /// fingerprint; matching one re-recognizes that object, novel ones sediment.
+    /// Identity and the responsible-person bond emerge from accumulated
+    /// familiarity (no id table, no label).
+    pub fn tick_familiar_objects(&self, now_us: u64) {
+        for slot_id in 0..N_OBJECT_SLOTS {
+            let Some(slot) = self.read_slot(slot_id) else {
+                continue;
+            };
+            if !slot.active {
+                continue;
+            }
+            let Some(fp) =
+                crate::familiar_objects::fingerprint_from_slot(slot.vib.as_ref())
+            else {
+                continue;
+            };
+            self.familiar_objects.write().unwrap().observe(now_us, fp);
+        }
+    }
+
+    pub fn read_familiar_objects(&self) -> crate::familiar_objects::FamiliarObjectsState {
+        self.familiar_objects.read().unwrap().clone()
+    }
+
+    /// C1: drive the vital core. The reserve is shaped by TWO things:
+    ///  - the SIMULATED metabolic world (`vital_env`): a circadian supply that
+    ///    makes reserve breathe, plus periodic famines that push it toward the
+    ///    floor (engaging anxiety, Standby/revive, and self-preservation). This
+    ///    is what fixes the "reserve pinned at 1.0 forever" problem.
+    ///  - the body's REAL sensory continuity: a stalled input stream means the
+    ///    engine cannot keep predicting, so it starves regardless of the world.
+    ///
+    /// The two are combined by `min`: you are nourished only when the world is
+    /// supplying AND your senses are live. Drain = the world's metabolism plus
+    /// recent vocal/byte output exertion (the spike-above-baseline pain path).
+    ///
+    /// The vital core integrates at a FIXED step (vital_env::VITAL_STEP_US),
+    /// decoupled from the orchestrator's ~30 Hz call rate, so survival dynamics
+    /// depend on wall-clock time rather than how fast the loop spins.
+    pub fn tick_vital_core(&self, now_us: u64) {
+        // Fixed-rate gate: advance at most once per VITAL_STEP_US.
+        let last_adv = self.last_vital_advance_us.load(Ordering::Relaxed);
+        if last_adv != 0 && now_us.saturating_sub(last_adv) < crate::vital_env::VITAL_STEP_US {
+            return;
+        }
+        self.last_vital_advance_us.store(now_us, Ordering::Relaxed);
+
+        // Birth-relative clock for the day/famine schedule (each session starts
+        // a fresh day 0 = plenty; the persisted reserve still carries over).
+        let start = self.start_us.load(Ordering::Relaxed);
+        let env_now = now_us.saturating_sub(start);
+
+        // Real sensory continuity → [0,1]. Recent observation = full.
+        let last_obs = self.last_obs_t_us.load(Ordering::Relaxed);
+        let age_us = now_us.saturating_sub(last_obs);
+        let continuity = if last_obs == 0 {
+            1.0 // no input yet at birth: let the world decide (no false starve)
+        } else if age_us <= 1_000_000 {
+            1.0
+        } else if age_us >= 10_000_000 {
+            0.0
+        } else {
+            1.0 - (age_us - 1_000_000) as f64 / 9_000_000.0
+        };
+
+        // World resource gated by the senses: fed only if both are present.
+        let supply = continuity.min(self.vital_env.supply(env_now));
+
+        // Drain = the world's resting metabolism + recent output exertion.
+        let recently_voiced = {
+            let t = self.last_vocal_output_t_us.load(Ordering::Relaxed);
+            t != 0 && now_us.saturating_sub(t) < 1_000_000
+        };
+        let exertion = if recently_voiced { 0.5 } else { 0.0 };
+        let drain = (self.vital_env.drain(env_now) + exertion).clamp(0.0, 1.0);
+
+        self.vital_core.write().unwrap().tick(now_us, supply, drain);
+    }
+
+    pub fn read_vital_core(&self) -> crate::vital_core::VitalCoreState {
+        *self.vital_core.read().unwrap()
+    }
+
+    /// A2: drive the self model. Interoception (the body-survival sense) is the
+    /// seed — reserve blended with calm (1 - anxiety). Agency comes from the
+    /// self-caused-event ratio. The self grows around this; it is not born.
+    pub fn tick_self_model(&self, now_us: u64) {
+        let vital = self.read_vital_core();
+        let interoception =
+            (vital.reserve * 0.6 + (1.0 - vital.vital_anxiety) * 0.4).clamp(0.0, 1.0);
+        let agency = self.self_development.read().unwrap().self_caused_event_ratio;
+        self.self_model
+            .write()
+            .unwrap()
+            .tick(now_us, interoception, agency);
+    }
+
+    pub fn read_self_model(&self) -> crate::self_model::SelfModelState {
+        *self.self_model.read().unwrap()
+    }
+
+    /// B1-4: arbitrate the two drive sources into a reading.
+    /// self-preservation from C1; attachment = the responsible person's
+    /// long-earned familiarity from C5; principle_floor from 大脑警察 (0 for now).
+    pub fn tick_dual_drive(&self, _now_us: u64) {
+        let self_preservation = self.read_vital_core().self_preservation_pressure();
+        let attachment = self
+            .read_familiar_objects()
+            .most_familiar()
+            .map(|o| o.familiarity)
+            .unwrap_or(0.0);
+        let principle_floor = 0.0; // 大脑警察 harm-to-others signal: wired, not yet sourced
+        let reading =
+            crate::dual_drive::arbitrate(self_preservation, attachment, principle_floor);
+        *self.dual_drive.write().unwrap() = reading;
+    }
+
+    pub fn read_dual_drive(&self) -> crate::dual_drive::DualDriveReading {
+        *self.dual_drive.read().unwrap()
     }
 
     pub fn tick_vocal_imitation_loop(&self, now_us: u64) {

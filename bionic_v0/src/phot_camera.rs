@@ -756,3 +756,113 @@ fn box_blur_rms(grid: &[f64], w: usize, h: usize, radius: usize) -> f64 {
     }
     (sum_sq / n.max(1) as f64).sqrt()
 }
+
+// ---------------------------------------------------------------------------
+// Unified perception: visual region axes (2026-06-01 redesign)
+// ---------------------------------------------------------------------------
+// Reduce a full camera frame to PHYSICAL-QUANTITY axes over a coarse spatial
+// grid (VIS_GRID_ROWS × VIS_GRID_COLS regions). Per region: mean brightness,
+// mean R, mean G, mean B, and motion (mean |brightness - prev brightness|).
+// NO use is presumed — shape/identity emerge later from inter-region relations.
+//
+// Output is VIS_AXES values laid out region-major, each region a block of
+// VIS_AXES_PER_REGION = [brightness, R, G, B, motion], matching `vis_axis()`.
+// `prev_brightness` is the previous frame's per-region brightness (len
+// VIS_REGIONS); pass [0.0; VIS_REGIONS] on the first frame (motion = signal).
+pub fn region_perception(
+    frame: &CameraFrame,
+    prev_brightness: &[f64; crate::VIS_REGIONS],
+) -> ([f64; crate::VIS_AXES], [f64; crate::VIS_REGIONS]) {
+    use crate::{VIS_AXES, VIS_AXES_PER_REGION, VIS_GRID_COLS, VIS_GRID_ROWS, VIS_REGIONS};
+    let mut axes = [0.0_f64; VIS_AXES];
+    let mut brightness = [0.0_f64; VIS_REGIONS];
+
+    let region_h = CAM_H / VIS_GRID_ROWS;
+    let region_w = CAM_W / VIS_GRID_COLS;
+
+    for gr in 0..VIS_GRID_ROWS {
+        for gc in 0..VIS_GRID_COLS {
+            let region = gr * VIS_GRID_COLS + gc;
+            let (mut sl, mut sr, mut sg, mut sb, mut n) = (0.0, 0.0, 0.0, 0.0, 0usize);
+            let y0 = gr * region_h;
+            let y1 = if gr == VIS_GRID_ROWS - 1 { CAM_H } else { y0 + region_h };
+            let x0 = gc * region_w;
+            let x1 = if gc == VIS_GRID_COLS - 1 { CAM_W } else { x0 + region_w };
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = y * CAM_W + x;
+                    sl += frame.luma[i];
+                    sr += frame.r[i];
+                    sg += frame.g[i];
+                    sb += frame.b[i];
+                    n += 1;
+                }
+            }
+            let inv = 1.0 / n.max(1) as f64;
+            let b_mean = (sl * inv).clamp(0.0, 1.0);
+            brightness[region] = b_mean;
+            let base = region * VIS_AXES_PER_REGION;
+            axes[base + crate::VIS_SUB_BRIGHTNESS] = b_mean;
+            axes[base + crate::VIS_SUB_R] = (sr * inv).clamp(0.0, 1.0);
+            axes[base + crate::VIS_SUB_G] = (sg * inv).clamp(0.0, 1.0);
+            axes[base + crate::VIS_SUB_B] = (sb * inv).clamp(0.0, 1.0);
+            axes[base + crate::VIS_SUB_MOTION] =
+                (b_mean - prev_brightness[region]).abs().clamp(0.0, 1.0);
+        }
+    }
+    (axes, brightness)
+}
+
+#[cfg(test)]
+mod region_perception_tests {
+    use super::*;
+    use crate::{VIS_AXES_PER_REGION, VIS_REGIONS, VIS_SUB_BRIGHTNESS, VIS_SUB_MOTION, VIS_SUB_R};
+
+    // Local index into the VIS_AXES (length-20) array — NOT the global
+    // vis_axis() which includes the AXIS_VIS_BASE offset.
+    fn la(region: usize, sub: usize) -> usize {
+        region * VIS_AXES_PER_REGION + sub
+    }
+
+    fn frame_filled(luma: f64, r: f64) -> CameraFrame {
+        CameraFrame {
+            t_us: 0,
+            luma: vec![luma; CAM_PIX],
+            r: vec![r; CAM_PIX],
+            g: vec![0.0; CAM_PIX],
+            b: vec![0.0; CAM_PIX],
+        }
+    }
+
+    #[test]
+    fn uniform_frame_gives_uniform_region_axes() {
+        let f = frame_filled(0.6, 0.3);
+        let (axes, _) = region_perception(&f, &[0.0; VIS_REGIONS]);
+        for region in 0..VIS_REGIONS {
+            assert!((axes[la(region, VIS_SUB_BRIGHTNESS)] - 0.6).abs() < 1e-9);
+            assert!((axes[la(region, VIS_SUB_R)] - 0.3).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn motion_is_zero_when_brightness_unchanged() {
+        let f = frame_filled(0.5, 0.0);
+        let (_, prev) = region_perception(&f, &[0.0; VIS_REGIONS]);
+        // second identical frame → motion ~0 against prev
+        let (axes2, _) = region_perception(&f, &prev);
+        for region in 0..VIS_REGIONS {
+            assert!(axes2[la(region, VIS_SUB_MOTION)] < 1e-9, "no change → no motion");
+        }
+    }
+
+    #[test]
+    fn brightness_change_produces_motion() {
+        let dark = frame_filled(0.1, 0.0);
+        let (_, prev) = region_perception(&dark, &[0.0; VIS_REGIONS]);
+        let bright = frame_filled(0.9, 0.0);
+        let (axes, _) = region_perception(&bright, &prev);
+        for region in 0..VIS_REGIONS {
+            assert!(axes[la(region, VIS_SUB_MOTION)] > 0.5, "0.1→0.9 is strong motion");
+        }
+    }
+}

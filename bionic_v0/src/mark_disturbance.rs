@@ -1,3 +1,4 @@
+use crate::substrate::unit;
 use crate::language_binding::{BindingEvent, BindingFeedback, BindingTargetRef, PatternKind};
 use crate::viewport::Viewport;
 
@@ -189,10 +190,3 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
-fn unit(x: f64) -> f64 {
-    if x.is_finite() {
-        x.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}

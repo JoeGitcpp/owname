@@ -275,6 +275,10 @@ fn empty_snapshot() -> SnapshotData {
         framed_byte_egress: SnapshotFramedByteEgress::default(),
         active_reasoning_gap: ActiveReasoningGapState::default(),
         self_development: SelfDevelopmentState::default(),
+        audio_raw_total_samples: 0,
+        audio_raw_last_clock_us: 0,
+        slot_xlayers: Vec::new(),
+        slot_towers: Vec::new(),
     }
 }
 

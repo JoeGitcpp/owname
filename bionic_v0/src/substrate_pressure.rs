@@ -1,10 +1,4 @@
-fn unit(x: f64) -> f64 {
-    if x.is_finite() {
-        x.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
+use crate::substrate::unit;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PressureSample {

@@ -1,3 +1,4 @@
+use crate::substrate::unit;
 use crate::curriculum::{
     run_active_text_probe_closure_curriculum, run_cross_channel_disturbance_coupling_curriculum,
     run_long_retention_curriculum, run_mark_binding_curriculum, run_text_grounding_suite,
@@ -517,13 +518,6 @@ fn gate_score(gates: &[bool]) -> f64 {
     gates.iter().filter(|gate| **gate).count() as f64 / gates.len() as f64
 }
 
-fn unit(value: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
 
 fn weakest_margin_course(course_reviews: &[GovernorCourseReview]) -> GovernorCourseReview {
     course_reviews

@@ -1,3 +1,4 @@
+use crate::substrate::unit;
 use crate::action_consequence::ConsequencePairStatus;
 use crate::viewport::Viewport;
 use crate::ACTIVE_REASONING_GAP_TRACE_CAP;
@@ -156,10 +157,3 @@ impl ActiveReasoningGapState {
     }
 }
 
-fn unit(value: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}

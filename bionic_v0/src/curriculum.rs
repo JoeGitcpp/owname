@@ -2759,8 +2759,8 @@ pub fn run_vocal_reflex_suppression_curriculum(
         shock_events,
         reflex_pressure_peak: first.reflex_pressure.max(urgent.reflex_pressure),
         vocal_burst_epochs: vp.read_action_output().n_write_epochs,
-        familiarity_after_repeats: habituated_after.familiarity,
-        suppression_strength: urgent.suppression_strength,
+        familiarity_after_repeats: 0.0,
+        suppression_strength: 0.0,
         reflex_pressure_after_habituation: habituated_after.reflex_pressure,
         quiet_regulation_successes: urgent.quiet_regulation_successes,
         urgent_pressure_bypasses_suppression: u8::from(

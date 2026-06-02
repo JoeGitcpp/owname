@@ -43,10 +43,11 @@ fn main() {
     );
 
     // Initial seed: truncate to clear stale frames. Subsequent writes append.
-    let seed = run_vm(&[0x0F]);
+    let seed = run_vm(&seed_program(0));
     let _ = fs::write(&in_path, &seed);
 
     let mut last_output_us = std::time::Instant::now();
+    let mut seed_idx: u64 = 1;
 
     loop {
         match fs::read(&out_path) {
@@ -68,8 +69,7 @@ fn main() {
             Ok(_) => {
                 // No body output. Re-seed periodically to keep loop alive.
                 if last_output_us.elapsed() > std::time::Duration::from_secs(2) {
-                    let val = (last_output_us.elapsed().as_secs() % 255) as u8;
-                    let seed = run_vm(&[0x01, val, 0x00, 0x08, 0x00, 0x0F]);
+                    let seed = run_vm(&seed_program(seed_idx));
                     // Append to in.frames so body's sequential reader never misses frames
                     let mut f = std::fs::OpenOptions::new()
                         .create(true)
@@ -78,6 +78,7 @@ fn main() {
                         .unwrap();
                     let _ = f.write_all(&seed);
                     drop(f);
+                    seed_idx = seed_idx.wrapping_add(1);
                     last_output_us = std::time::Instant::now();
                 }
                 if once {
@@ -91,6 +92,36 @@ fn main() {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Generate a seed program that varies across calls, producing different
+/// instruction counts and results so body observes a gradient.
+fn seed_program(idx: u64) -> Vec<u8> {
+    let t = idx.wrapping_mul(37).wrapping_add(13);
+    let a = (t & 0xFF) as u8;
+    let b = ((t >> 8) & 0xFF) as u8;
+    let pattern = (t >> 16) % 8;
+
+    match pattern {
+        0 => vec![0x01, a, b, 0x01, 0x01, 0x00, 0x03, 0x0F],
+        // PUSH a,b  PUSH 1  ADD  HALT → result = (b<<8|a)+1, instrs=4
+        1 => vec![0x01, a, b, 0x01, 0x07, 0x00, 0x05, 0x0F],
+        // PUSH a,b  PUSH 7  MUL  HALT
+        2 => vec![0x01, a, b, 0x01, a, b, 0x04, 0x0F],
+        // PUSH a,b  PUSH a,b  SUB  HALT → result = 0, instrs=4
+        3 => vec![0x01, a, b, 0x08, 0x00, 0x07, 0x00, 0x01, 0x01, 0x00, 0x03, 0x0F],
+        // PUSH a,b  STORE r0  LOAD r0  PUSH 1  ADD  HALT → result = (b<<8|a)+1, instrs=6
+        4 => vec![0x01, a, 0x00, 0x01, b, 0x00, 0x09, 0x0F],
+        // PUSH a  PUSH b  CMP  HALT → result = 0 or 1, instrs=4
+        5 => vec![0x01, a, b, 0x01, 0x02, 0x00, 0x05, 0x0F],
+        // PUSH a,b  PUSH 2  MUL  HALT
+        6 => vec![0x01, a, b, 0x02, 0x01, 0x03, 0x00, 0x06, 0x0F],
+        // PUSH a,b  POP  PUSH 3  DIV  HALT
+        7 => vec![0x01, a, 0x00, 0x01, 0x0A, 0x00, 0x06, 0x0F],
+        // PUSH a  PUSH 10  DIV  HALT
+        _ => vec![0x01, a, 0x00, 0x08, 0x00, 0x0F],
+        // PUSH a  STORE r0  HALT
     }
 }
 

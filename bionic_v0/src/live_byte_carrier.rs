@@ -10,7 +10,7 @@ use crate::clock::{now_us, spawn_ticker};
 use crate::code_ingress_adapter::{CarrierFrame, CodeIngressAdapter, FramedByteCarrier};
 use crate::viewport::Viewport;
 
-pub const LIVE_BYTE_FRAME_LEN: usize = 8;
+pub const LIVE_BYTE_FRAME_LEN: usize = 32;
 pub const LIVE_BYTE_STREAM_ID: u64 = 2;
 pub const LIVE_BYTE_INGRESS_HZ: u32 = 20;
 

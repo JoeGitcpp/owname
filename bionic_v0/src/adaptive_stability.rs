@@ -107,7 +107,12 @@ impl AdaptiveRouteTrace {
             self.degradation_score *= 0.72;
             self.bypass_weight *= 0.55;
             self.relearn_pressure *= 0.55;
-            if self.stable_run >= 4 {
+            // 改造2: self-paced promotion. Required confirmations scale with
+            // THIS route's own noise floor (err_ema): a calm route is trusted
+            // sooner, a noisy one must prove itself longer. Replaces the fixed
+            // magic "4". err_ema≈0 → 2 cycles; high noise → up to 8.
+            let required_runs = (2.0 + self.err_ema * 6.0).round().clamp(2.0, 8.0) as u32;
+            if self.stable_run >= required_runs {
                 self.fast_path_strength = (self.fast_path_strength + 0.12).min(1.0);
             }
             self.phase_code = if self.fast_path_strength > 0.35 {

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use bionic_v0::live_byte_carrier::LIVE_BYTE_FRAME_LEN;
+use bionic_v0::live_byte_closure::LIVE_BYTE_EGRESS_FRAME_LEN;
 use bionic_v0::live_byte_loopback::LoopbackFileBridge;
 
 fn main() {
@@ -19,7 +19,7 @@ fn main() {
     let mut bridge = LoopbackFileBridge::new(
         live_dir.join("out.frames"),
         live_dir.join("in.frames"),
-        LIVE_BYTE_FRAME_LEN,
+        LIVE_BYTE_EGRESS_FRAME_LEN,
     );
 
     if duration_secs > 0 {

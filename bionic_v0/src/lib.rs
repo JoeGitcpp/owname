@@ -1,9 +1,18 @@
 pub mod action_consequence;
 pub mod action_output;
 pub mod active_reasoning;
+pub mod audio_adapter;
+pub mod audio_raw;
 pub mod active_surface;
 pub mod adapter;
 pub mod adaptive_stability;
+pub mod substrate;
+pub mod familiar_objects;
+pub mod vital_core;
+pub mod vital_env;
+pub mod self_model;
+pub mod dual_drive;
+pub mod vocal_drive_field;
 pub mod allostatic_stability;
 pub mod auditory_visual;
 pub mod binary_character_ear;
@@ -51,13 +60,49 @@ pub mod vocal_organ;
 pub mod vocal_reflex;
 pub mod vocal_target;
 pub mod vpc;
+pub mod vpc_cross_layer;
 
 pub const HISTORY_CAP: usize = 1024;
 
 pub const VIB_BANDS: usize = 4;
-pub const AXIS_COUNT: usize = VIB_BANDS;
+
+// --- Unified perception axes (2026-06-01 redesign) ---
+// Vision is no longer a per-slot shadow: it becomes shared perception axes that
+// flow through the SAME substrate (observed/predicted/err/predictor/prior) as
+// hearing, into the SAME abstraction engine and memory. Axes are PHYSICAL
+// quantities over a coarse spatial grid — NOT "face/object/use" features.
+// Shape/position/identity emerge later from inter-region relations; this layer
+// presets no use.
+//
+// Coarse spatial grid: the frame is split into VIS_REGIONS cells. Each cell
+// carries VIS_AXES_PER_REGION physical-quantity axes: brightness, R, G, B,
+// motion. Region layout is row-major (VIS_GRID_ROWS × VIS_GRID_COLS).
+pub const VIS_GRID_ROWS: usize = 2;
+pub const VIS_GRID_COLS: usize = 2;
+pub const VIS_REGIONS: usize = VIS_GRID_ROWS * VIS_GRID_COLS; // 4
+pub const VIS_AXES_PER_REGION: usize = 5; // brightness, R, G, B, motion
+pub const VIS_AXES: usize = VIS_REGIONS * VIS_AXES_PER_REGION; // 20
+
+// Axis layout in the shared coordinate system:
+//   [0 .. VIB_BANDS)              = hearing (frequency bands)
+//   [VIB_BANDS .. VIB_BANDS+VIS_AXES) = vision (region × physical quantity)
+pub const AXIS_VIS_BASE: usize = VIB_BANDS; // 4
+pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES; // 24
 pub const AXIS_VIB: usize = 0;
 pub const AXIS_SYNTH: usize = 0; // retained for backward compat
+
+/// Per-region visual sub-axis offsets (within a region's VIS_AXES_PER_REGION block).
+pub const VIS_SUB_BRIGHTNESS: usize = 0;
+pub const VIS_SUB_R: usize = 1;
+pub const VIS_SUB_G: usize = 2;
+pub const VIS_SUB_B: usize = 3;
+pub const VIS_SUB_MOTION: usize = 4;
+
+/// Global axis index for a given visual region's sub-axis.
+#[inline]
+pub const fn vis_axis(region: usize, sub: usize) -> usize {
+    AXIS_VIS_BASE + region * VIS_AXES_PER_REGION + sub
+}
 
 pub const VIB_BAND_CUTOFFS: [f64; 3] = [500.0, 2000.0, 5000.0];
 
@@ -146,6 +191,13 @@ pub const QUIET_ENERGY_THRESHOLD: f64 = 0.002;
 /// candidate. Derived from `QUIET_ENERGY_THRESHOLD` so a single quiet-scale
 /// band cannot by itself cross into event territory.
 pub const EVENT_NOMINATION_THRESHOLD: f64 = QUIET_ENERGY_THRESHOLD * QUIET_ENERGY_THRESHOLD;
+
+/// audio_raw ring buffer: 48,000 Hz × 60 seconds
+pub const AUDIO_RAW_CAPACITY: usize = 48_000 * 60;
+
+/// Batch write every 10ms: 48,000 × 0.01 = 480 samples
+pub const AUDIO_RAW_BATCH_SAMPLES: usize = 480;
+pub const AUDIO_RAW_BATCH_INTERVAL_US: u64 = 10_000;
 
 // Numeric-only health state. Observers render the number; they never
 // recompute thresholds.
@@ -357,7 +409,11 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v46: active reasoning gap observer trace added.
 // v47: self-development predictive life-loop observer trace added.
 // v48: pre-language solitary growth fields added to self-development trace.
-pub const SNAPSHOT_VERSION: u64 = 48;
+// v49: audio_raw tier-0 waveform buffer added to viewport and snapshot.
+// v50: per-slot cross-layer (B1 tier-1) learned relation weights.
+/// v51: per-slot residual TOWER (recursive PC depth, tiers ≥2) — observer-
+/// visible so emergent abstraction depth can be seen in a live run.
+pub const SNAPSHOT_VERSION: u64 = 51;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

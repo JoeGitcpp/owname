@@ -132,7 +132,7 @@ fn derive_output_bytes(frame: &CodeIngressFrameTrace, pressure: f64) -> Vec<u8> 
             .wrapping_add((i as u64) + 1);
         let base = (seed >> ((i % 8) * 8)) as u8;
         let observed = sample.get(i % sample.len().max(1)).copied().unwrap_or(0);
-        out.push(base.rotate_left(1) ^ observed ^ 0xa5);
+        out.push((base.rotate_left(1) ^ observed ^ 0xa5) & 0x0F);
     }
 
     out

@@ -474,6 +474,10 @@ pub struct RealPhotAdapter {
     /// Stable ID of the active consequence window (0 = none).
     /// Used to explicitly close the window when motion quiesces.
     consequence_window_id: u64,
+    /// Previous frame's per-region brightness, for the motion sub-axis of the
+    /// unified visual perception (region_perception). [0.0; VIS_REGIONS] until
+    /// the first frame.
+    prev_region_brightness: [f64; crate::VIS_REGIONS],
 }
 
 impl RealPhotAdapter {
@@ -498,6 +502,7 @@ impl RealPhotAdapter {
             last_frame_t_us: 0,
             _tick_hz: 30,
             consequence_window_id: 0,
+            prev_region_brightness: [0.0; crate::VIS_REGIONS],
         }
     }
 
@@ -568,6 +573,20 @@ impl ModalityAdapter for RealPhotAdapter {
                 f
             }
         };
+
+        // Unified perception (2026-06-01 redesign): push this frame's visual
+        // physical-quantity axes (per coarse region: brightness/R/G/B/motion)
+        // into the SHARED observation axes — the SAME substrate hearing uses,
+        // feeding the SAME abstraction engine and memory. Vision is no longer a
+        // per-slot shadow. No use is presumed here; shape/identity emerge later.
+        {
+            let (vis_axes, new_brightness) =
+                crate::phot_camera::region_perception(&frame, &self.prev_region_brightness);
+            for (i, &v) in vis_axes.iter().enumerate() {
+                vp.push_observation(crate::AXIS_VIS_BASE + i, now_us, v);
+            }
+            self.prev_region_brightness = new_brightness;
+        }
 
         // Multi-region extraction. The first frame returns an empty Vec (no
         // diff target yet).

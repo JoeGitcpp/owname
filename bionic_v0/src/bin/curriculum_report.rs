@@ -1461,6 +1461,10 @@ fn main() -> std::io::Result<()> {
             "communication_candidate={}",
             evidence.communication_candidate
         );
+        for (i, snap) in snapshots.iter().enumerate() {
+            println!("snapshot_{i}_audio_raw_total_samples={}", snap.audio_raw_total_samples);
+            println!("snapshot_{i}_audio_raw_last_clock_us={}", snap.audio_raw_last_clock_us);
+        }
         println!("principle_guard_pass={}", evidence.principle_guard_pass);
     } else if product_cognition_baseline {
         let evidence = run_product_cognition_baseline_curriculum(CurriculumConfig::default())?;

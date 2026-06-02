@@ -1,7 +1,7 @@
 use bionic_v0::snapshot::SnapshotData;
 
 pub fn compact_header() -> &'static str {
-    "seq,clock_s,health,phot_h,src_w,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,egress_pressure,egress_deviation,pair_similarity,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,gap_p,gap_c,gap_r,gap_cycles,gap_samples,gap_slot,gap_edge,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or"
+    "seq,clock_s,health,phot_h,src_w,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,egress_pressure,egress_deviation,pair_similarity,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,gap_p,gap_c,gap_r,gap_cycles,gap_samples,gap_slot,gap_edge,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or,learn_fam,learn_sup"
 }
 
 pub fn compact_row(snap: &SnapshotData) -> String {
@@ -13,7 +13,7 @@ pub fn compact_row(snap: &SnapshotData) -> String {
         .map(|pair| pair.curve_similarity)
         .unwrap_or(0.0);
     format!(
-        "{},{:.3},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+        "{},{:.3},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4}",
         snap.seq,
         clock_s,
         snap.health_state,
@@ -49,5 +49,7 @@ pub fn compact_row(snap: &SnapshotData) -> String {
         snap.vocal_organ.breath_drive,
         snap.vocal_organ.pitch_tension,
         snap.vocal_organ.resonance_position,
+        snap.learned_bias.prediction_familiarity,
+        snap.learned_bias.action_suppression,
     )
 }

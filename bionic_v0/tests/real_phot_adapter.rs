@@ -884,7 +884,7 @@ fn multi_event_extraction_two_blobs_yield_two_regions() {
     let r_px = 4usize;
 
     // Left blob centre ~ (16, 12) in pixel coords
-    let (lcx, lcy) = (16usize, 12usize);
+    let (lcx, lcy) = (80usize, 60usize);
     for y in 0..CAM_H {
         for x in 0..CAM_W {
             let dx = x as isize - lcx as isize;
@@ -896,7 +896,7 @@ fn multi_event_extraction_two_blobs_yield_two_regions() {
     }
 
     // Right blob centre ~ (48, 36) in pixel coords
-    let (rcx, rcy) = (48usize, 36usize);
+    let (rcx, rcy) = (240usize, 180usize);
     for y in 0..CAM_H {
         for x in 0..CAM_W {
             let dx = x as isize - rcx as isize;
@@ -944,7 +944,7 @@ fn multi_event_extraction_regions_sorted_deterministically() {
     let r_px = 4usize;
 
     // Stronger blob on the right.
-    let (rcx, rcy) = (52usize, 24usize);
+    let (rcx, rcy) = (240usize, 120usize);
     for y in 0..CAM_H {
         for x in 0..CAM_W {
             let dx = x as isize - rcx as isize;
@@ -955,7 +955,7 @@ fn multi_event_extraction_regions_sorted_deterministically() {
         }
     }
     // Weaker blob on the left.
-    let (lcx, lcy) = (12usize, 24usize);
+    let (lcx, lcy) = (80usize, 120usize);
     for y in 0..CAM_H {
         for x in 0..CAM_W {
             let dx = x as isize - lcx as isize;
@@ -981,7 +981,7 @@ fn multi_event_extraction_single_blob_still_works() {
     use bionic_v0::phot_camera::{CAM_H, CAM_PIX, CAM_W};
 
     let mut motion = vec![0.0f64; CAM_PIX];
-    let (cx, cy, r_px) = (32usize, 24usize, 6usize);
+    let (cx, cy, r_px) = (160usize, 120usize, 12usize);
     for y in 0..CAM_H {
         for x in 0..CAM_W {
             let dx = x as isize - cx as isize;
@@ -1046,9 +1046,9 @@ fn multi_event_claim_two_blobs_fill_two_slots() {
                 for v in f.luma.iter_mut() {
                     *v = 0.02;
                 }
-                let r_px = 5usize;
+                let r_px = 12usize;
                 // Left blob
-                let (lcx, lcy) = (10usize, 20usize);
+                let (lcx, lcy) = (64usize, 96usize);
                 for y in 0..CAM_H {
                     for x in 0..CAM_W {
                         let dx = x as isize - lcx as isize;
@@ -1059,7 +1059,7 @@ fn multi_event_claim_two_blobs_fill_two_slots() {
                     }
                 }
                 // Right blob
-                let (rcx, rcy) = (54usize, 30usize);
+                let (rcx, rcy) = (256usize, 144usize);
                 for y in 0..CAM_H {
                     for x in 0..CAM_W {
                         let dx = x as isize - rcx as isize;
@@ -1126,9 +1126,9 @@ fn multi_event_claim_two_far_blobs_in_different_slots() {
                 for v in f.luma.iter_mut() {
                     *v = 0.02;
                 }
-                let r_px = 5usize;
-                let (lcx, lcy) = (8usize, 8usize);
-                let (rcx, rcy) = (56usize, 40usize);
+                let r_px = 12usize;
+                let (lcx, lcy) = (48usize, 48usize);
+                let (rcx, rcy) = (272usize, 192usize);
                 for y in 0..CAM_H {
                     for x in 0..CAM_W {
                         let dx = x as isize - lcx as isize;

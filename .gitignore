@@ -8,3 +8,20 @@ runtime_solitary_v0/
 .worktrees/
 runtime_nursery/
 runtime_life/
+.codewhale/
+.deepseek/
+
+# Root-level runtime artifacts & run outputs (regenerated each run — never source)
+/runtime/
+/runtime_full30/
+/runtime_silent30/
+/logs/
+
+# Accidental dirs from misdirected output redirection (e.g. `... > --help`)
+/--help/
+bionic_v0/--help/
+
+# Agent/session state and bundled external apps (not project source)
+/.claude/
+/site/
+/sillytavern/

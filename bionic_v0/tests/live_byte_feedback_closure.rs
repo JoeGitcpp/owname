@@ -516,3 +516,47 @@ fn snapshot_and_session_split_pair_totals_by_return_modality() {
     assert!(session_src.contains("pair_framed_byte_total"));
     assert!(session_src.contains("pair_other_total"));
 }
+
+#[test]
+fn egress_bytes_are_constrained_to_valid_vm_opcode_range() {
+    use bionic_v0::code_ingress::CodeIngressFrameInput;
+    use bionic_v0::live_byte_closure::LiveByteClosureDriver;
+    use bionic_v0::viewport::Viewport;
+
+    let dir = std::env::temp_dir().join(format!(
+        "bionic_v0_egress_opcode_range_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("live_bytes")).unwrap();
+    let out_path = dir.join("live_bytes").join("out.frames");
+
+    let vp = Viewport::new();
+    let mut driver = LiveByteClosureDriver::new(out_path.clone());
+
+    // Feed ingress frames so live byte closure has material to derive egress from.
+    for i in 0..16_u64 {
+        let t = 1_000 + i * 100;
+        let bytes: Vec<u8> = (0..8).map(|b| (b as u8).wrapping_add(i as u8)).collect();
+        vp.observe_code_ingress_frame(CodeIngressFrameInput {
+            stream_context_id: 2,
+            t_start_us: t,
+            t_end_us: t,
+            bytes: &bytes,
+            framing_validity: 1.0,
+        });
+        vp.tick_evidence_tension_from_code_ingress(t + 10);
+        driver.tick(&vp, t + 20);
+    }
+
+    let written = std::fs::read(&out_path).expect("out.frames should exist");
+    assert!(!written.is_empty(), "egress must write at least one frame");
+
+    for (idx, &byte) in written.iter().enumerate() {
+        assert!(
+            byte <= 0x0F,
+            "egress byte {idx} value 0x{byte:02x} exceeds valid opcode range 0x00-0x0F"
+        );
+    }
+}
+

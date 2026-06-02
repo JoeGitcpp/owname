@@ -28,7 +28,7 @@ ordinary ingress
   -> ordinary ingress consequence windows
   -> action-consequence pairs
   -> language binding events only when pair evidence is strong enough
-  -> snapshot v48
+  -> snapshot v51
   -> observer
 
 computer-native byte ingress

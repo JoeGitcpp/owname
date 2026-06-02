@@ -46,6 +46,8 @@ fn repeated_similar_shock_raises_familiarity_and_lowers_reflex_pressure() {
 
     drive_prediction_shock(&vp, 2_000_000, 0.98);
     let first = vp.read_vocal_reflex();
+    // familiarity / suppression migrated to learned_bias (死后保留的底层偏置).
+    let first_bias = vp.read_learned_bias();
     vp.observe_vocal_reflex_closure(2_020_000, 0.70, true);
 
     for idx in 0..5 {
@@ -55,10 +57,11 @@ fn repeated_similar_shock_raises_familiarity_and_lowers_reflex_pressure() {
     }
     drive_prediction_shock(&vp, 3_700_000, 0.92);
     let later = vp.read_vocal_reflex();
+    let later_bias = vp.read_learned_bias();
 
-    assert!(later.familiarity > first.familiarity);
+    assert!(later_bias.prediction_familiarity > first_bias.prediction_familiarity);
     assert!(later.reflex_pressure < first.reflex_pressure);
-    assert!(later.suppression_strength > 0.0);
+    assert!(later_bias.action_suppression > 0.0);
 }
 
 #[test]
@@ -70,9 +73,17 @@ fn quiet_regulation_sediments_suppression_without_erasing_reflex_path() {
     vp.observe_vocal_reflex_closure(4_250_000, 0.90, false);
     vp.observe_vocal_reflex_closure(4_450_000, 0.90, false);
     let reflex = vp.read_vocal_reflex();
+    let bias = vp.read_learned_bias();
 
     assert!(reflex.quiet_regulation_successes >= 3);
-    assert!(reflex.suppression_strength > 0.40);
+    // suppression_strength migrated to learned_bias.action_suppression.
+    // Refactor (plan 2026-05-28 Step2) lowered per-event delta to ≤0.01 so this
+    // bias is a slow, 死后保留 sediment: 3 closures at 0.90 ≈ 0.027, not >0.40.
+    assert!(
+        bias.action_suppression > 0.02,
+        "3 quiet closures should sediment some suppression: {}",
+        bias.action_suppression
+    );
     assert!(reflex.fast_gain >= 0.0);
 }
 
@@ -85,7 +96,13 @@ fn high_unresolved_pressure_can_bypass_learned_suppression() {
         vp.observe_vocal_reflex_closure(5_020_000 + idx * 50_000, 0.95, false);
     }
     let suppressed = vp.read_vocal_reflex();
-    assert!(suppressed.suppression_strength > 0.50);
+    let suppressed_bias = vp.read_learned_bias();
+    // Refactor lowered per-event delta to ≤0.01: 6 closures at 0.95 ≈ 0.057.
+    assert!(
+        suppressed_bias.action_suppression > 0.05,
+        "6 quiet closures should sediment suppression bias: {}",
+        suppressed_bias.action_suppression
+    );
 
     drive_prediction_shock(&vp, 6_000_000, 1.0);
     let bypassed = vp.read_vocal_reflex();

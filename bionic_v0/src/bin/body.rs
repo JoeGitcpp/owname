@@ -116,6 +116,27 @@ fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u
     vp.refresh_global_attention(t);
     vp.refresh_global_relations(t);
     vp.refresh_global_relation_predictor(t);
+    // B1-3b: drive each active slot's cross-layer predictor AFTER the relation
+    // graph is refreshed (its sources are relation-gated). object_err is kept
+    // fresh by the sensory adapters' refresh_slot_high_layer.
+    for slot_id in 0..bionic_v0::N_OBJECT_SLOTS {
+        vp.tick_slot_cross_layer(slot_id, t);
+    }
+    // Stage 1 (recursive PC depth): grow + tick the residual tower above tier 1,
+    // level by level, AFTER all tier-1 errors are fresh. READ-UP ONLY — these
+    // tiers never write a prior downward (that is Stage 2). Depth emerges only
+    // where the tier below is a permanent explainer, and self-limits on noise.
+    vp.tick_cross_layer_tower_sweep(t);
+    // C5: re-recognize active objects into the familiar-objects sediment;
+    // object identity and the responsible-person bond emerge from familiarity.
+    vp.tick_familiar_objects(t);
+    // C1: drive the vital core (reserve depletes with exertion, restores with
+    // input continuity; bottoms out → Standby). The self-survival drive source.
+    vp.tick_vital_core(t);
+    // A2: grow the self model around the interoceptive (vital) seed + agency.
+    vp.tick_self_model(t);
+    // B1-4: arbitrate self-preservation vs caregiver attachment (纠结/牺牲).
+    vp.tick_dual_drive(t);
     vp.refresh_global_reasoning(t);
     vp.refresh_global_reasoning_history(t);
     vp.tick_evidence_tension_from_pairs(t);
@@ -127,6 +148,7 @@ fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u
     vp.tick_active_surface_probe_chain(t);
     vp.tick_active_surface_chain_memory(t);
     vp.tick_auditory_visual_from_pairs(t);
+    vp.tick_vocal_reflex_from_pairs(t);
     vp.tick_auditory_visual_from_fusion(t);
     vp.tick_auditory_visual_expression(t);
     vp.tick_self_development_from_substrate(t);
@@ -163,6 +185,30 @@ fn main() {
     };
     if let Ok(state) = read_learned_bias_checkpoint(&learned_bias_paths.final_path) {
         *vp.learned_bias.write().unwrap() = state;
+    }
+    // C5: restore familiar objects so the responsible-person bond is
+    // re-recognized after restart (死后保留).
+    let familiar_paths =
+        bionic_v0::familiar_objects::FamiliarObjectsCheckpointPaths::new(&runtime_dir);
+    if let Ok(state) =
+        bionic_v0::familiar_objects::read_familiar_objects_checkpoint(&familiar_paths.final_path)
+    {
+        *vp.familiar_objects.write().unwrap() = state;
+    }
+    // C1: restore the survival reserve (a body that was running low comes back
+    // still tired, not magically reset).
+    let vital_paths = bionic_v0::vital_core::VitalCoreCheckpointPaths::new(&runtime_dir);
+    if let Ok(state) =
+        bionic_v0::vital_core::read_vital_core_checkpoint(&vital_paths.final_path)
+    {
+        *vp.vital_core.write().unwrap() = state;
+    }
+    // A2: restore the self model (a body that grew a self comes back as itself).
+    let self_model_paths = bionic_v0::self_model::SelfModelCheckpointPaths::new(&runtime_dir);
+    if let Ok(state) =
+        bionic_v0::self_model::read_self_model_checkpoint(&self_model_paths.final_path)
+    {
+        *vp.self_model.write().unwrap() = state;
     }
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -283,20 +329,56 @@ fn main() {
     let vp_vocal = vp.clone();
     let h_vocal = spawn_ticker(profile.vocal_hz, stop.clone(), move |_| {
         let t = now_us();
-        vp_vocal.tick_vocal_reflex_from_pressure(t);
+        // 改造6: external sound is observed into the target (no voicing here),
+        // then ONE unified outlet combines all drive sources and voices once.
         vp_vocal.tick_vocal_target_from_vib(t);
-        vp_vocal.tick_vocal_imitation_loop(t);
+        vp_vocal.tick_vocal_drive_field(t);
         vp_vocal.tick_vocal_memory(t);
     });
 
     let h_vocal_output = spawn_vocal_output(vp.clone(), stop.clone());
 
+    // AudioAdapter: raw waveform capture (tier-0 audio)
+    let h_audio = {
+        let vp_audio = vp.clone();
+        let audio_buf = vp_audio.audio_raw.clone();
+        let stop_audio = stop.clone();
+        let h_audio = std::thread::spawn(move || {
+            let _adapter = bionic_v0::audio_adapter::AudioAdapter::new(audio_buf);
+            // Keep the cpal stream alive — it runs in its own callback thread
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if stop_audio.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        });
+        h_audio
+    };
+
     let h_learned_bias_checkpoint = {
         let vp_checkpoint = vp.clone();
         let paths_checkpoint = learned_bias_paths.clone();
+        // Life-state checkpoints written periodically too, so the living
+        // process can be observed over time (not only at exit).
+        let fam_cp = bionic_v0::familiar_objects::FamiliarObjectsCheckpointPaths::new(&runtime_dir);
+        let vital_cp = bionic_v0::vital_core::VitalCoreCheckpointPaths::new(&runtime_dir);
+        let self_cp = bionic_v0::self_model::SelfModelCheckpointPaths::new(&runtime_dir);
         spawn_ticker(profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
             let _ = write_learned_bias_checkpoint(&state, &paths_checkpoint);
+            let _ = bionic_v0::familiar_objects::write_familiar_objects_checkpoint(
+                &vp_checkpoint.read_familiar_objects(),
+                &fam_cp,
+            );
+            let _ = bionic_v0::vital_core::write_vital_core_checkpoint(
+                &vp_checkpoint.read_vital_core(),
+                &vital_cp,
+            );
+            let _ = bionic_v0::self_model::write_self_model_checkpoint(
+                &vp_checkpoint.read_self_model(),
+                &self_cp,
+            );
         })
     };
 
@@ -332,6 +414,7 @@ fn main() {
     let _ = h_endogenous.join();
     let _ = h_vocal.join();
     let _ = h_vocal_output.join();
+    let _ = h_audio.join();
     let _ = h_learned_bias_checkpoint.join();
     let _ = h_orchestrator.join();
     let _ = h_live_byte.join();
@@ -340,6 +423,21 @@ fn main() {
 
     let state = vp.read_learned_bias();
     let _ = write_learned_bias_checkpoint(&state, &learned_bias_paths);
+    // C5: persist familiar objects (死后保留).
+    let _ = bionic_v0::familiar_objects::write_familiar_objects_checkpoint(
+        &vp.read_familiar_objects(),
+        &familiar_paths,
+    );
+    // C1: persist the survival reserve (死后保留).
+    let _ = bionic_v0::vital_core::write_vital_core_checkpoint(
+        &vp.read_vital_core(),
+        &vital_paths,
+    );
+    // A2: persist the self model (死后保留).
+    let _ = bionic_v0::self_model::write_self_model_checkpoint(
+        &vp.read_self_model(),
+        &self_model_paths,
+    );
 
     std::process::exit(0);
 }

@@ -1,10 +1,11 @@
+use crate::substrate::unit;
 use crate::evolution_priors::{BiasAxis, BiasPriors};
 use std::fs::File;
 use std::io::{Error, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 pub const LEARNED_BIAS_MAGIC: u64 = 0xB10B10_0000_0042;
-pub const LEARNED_BIAS_VERSION: u64 = 3;
+pub const LEARNED_BIAS_VERSION: u64 = 4;
 pub const LEARNED_BIAS_CURVE_CAP: usize = 128;
 pub const LEARNED_BIAS_EVENT_CAP: usize = 256;
 
@@ -61,6 +62,13 @@ pub struct LearnedBiasState {
     pub n_recent_events: u32,
     pub total_events: u64,
     pub last_update_t_us: u64,
+    pub prediction_familiarity: f64,
+    pub action_suppression: f64,
+    /// 改造1: voicing effectiveness — accumulated when voicing brought real
+    /// external closure. RAISES the urge to voice (lowers the gate): "voicing
+    /// proved useful → 爱叫". Independent of prediction_familiarity, which damps
+    /// self-excitation. Newborn 0.0; 死后保留 (serialized v4+).
+    pub vocal_efficacy: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -72,6 +80,20 @@ pub struct LearnedBiasSummary {
     pub protected_axis_curves: u32,
     pub ordinary_axis_curves: u32,
     pub last_update_t_us: u64,
+
+    /// 预测熟悉度。VPC 低层 predictor 在 closure 事件中缓慢积累。
+    /// 高 = 对行为后果有稳定预期，反射抑制增强。
+    /// 初始值 0.0（新生儿），死后保留。
+    pub prediction_familiarity: f64,
+
+    /// 行动抑制强度。VPC 低层 predictor 在"安静+观察到闭环"中积累。
+    /// 高 = 更倾向于等待，需要更高的内部压力才触发行动。
+    /// 初始值 0.0（新生儿），死后保留。
+    pub action_suppression: f64,
+
+    /// 改造1: 发声有效性。发声带来真实外部闭环时积累。
+    /// 高 = 发声证明有用 → 降低发声门槛(更爱叫)。初始 0.0,死后保留。
+    pub vocal_efficacy: f64,
 }
 
 pub struct LearnedBiasCheckpointPaths {
@@ -191,17 +213,13 @@ impl LearnedBiasState {
             protected_axis_curves,
             ordinary_axis_curves,
             last_update_t_us: self.last_update_t_us,
+            prediction_familiarity: self.prediction_familiarity,
+            action_suppression: self.action_suppression,
+            vocal_efficacy: self.vocal_efficacy,
         }
     }
 }
 
-fn unit(x: f64) -> f64 {
-    if !x.is_finite() {
-        0.0
-    } else {
-        x.clamp(0.0, 1.0)
-    }
-}
 
 fn update_stability(current: f64, support: f64, deviation: f64) -> f64 {
     (current + support * 0.1 - deviation * 0.15).clamp(0.0, 1.0)
@@ -235,6 +253,11 @@ pub fn write_learned_bias_checkpoint(
     }
     write_u64(&mut buf, state.total_events);
     write_u64(&mut buf, state.last_update_t_us);
+    // v4: vocal biases now actually persist (死后保留). Before v4 these were
+    // dropped on save and reset to 0 on load — a refactor gap, fixed here.
+    write_f64(&mut buf, state.prediction_familiarity);
+    write_f64(&mut buf, state.action_suppression);
+    write_f64(&mut buf, state.vocal_efficacy);
 
     {
         let mut f = File::create(&paths.tmp_path)?;
@@ -277,6 +300,10 @@ pub fn read_learned_bias_checkpoint(path: &Path) -> std::io::Result<LearnedBiasS
 
     let total_events = read_u64(&bytes, &mut cur)?;
     let last_update_t_us = read_u64(&bytes, &mut cur)?;
+    // v4: vocal biases persist. (version gate already enforced == 4 above.)
+    let prediction_familiarity = read_f64(&bytes, &mut cur)?;
+    let action_suppression = read_f64(&bytes, &mut cur)?;
+    let vocal_efficacy = read_f64(&bytes, &mut cur)?;
 
     Ok(LearnedBiasState {
         n_curves: curves.len() as u32,
@@ -285,6 +312,9 @@ pub fn read_learned_bias_checkpoint(path: &Path) -> std::io::Result<LearnedBiasS
         curves,
         recent_events,
         last_update_t_us,
+        prediction_familiarity,
+        action_suppression,
+        vocal_efficacy,
     })
 }
 

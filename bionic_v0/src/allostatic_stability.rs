@@ -1,3 +1,4 @@
+use crate::substrate::unit;
 use crate::snapshot::SnapshotData;
 use crate::{CONSEQUENCE_WINDOW_CAP, PAIR_HISTORY_CAP, WRITE_EPOCH_HISTORY_CAP};
 
@@ -206,10 +207,3 @@ fn all_bounded(evidence: &AllostaticStabilityEvidence) -> bool {
     .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
 }
 
-fn unit(value: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}

@@ -1,3 +1,4 @@
+use crate::substrate::unit;
 use crate::viewport::Viewport;
 
 pub const PREDICTION_WAVE_GAP: u8 = 1;
@@ -400,10 +401,3 @@ impl Viewport {
     }
 }
 
-fn unit(value: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}

@@ -218,6 +218,51 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
     // v47: self-development predictive life-loop observer trace.
     write_self_development(&mut buf, &vp.read_self_development());
 
+    // v49: audio_raw tier-0 waveform summary
+    buf.extend_from_slice(&vp.audio_raw.total_samples().to_le_bytes());
+    buf.extend_from_slice(&vp.audio_raw.last_sample_clock_us().to_le_bytes());
+
+    // v50: per-slot cross-layer (B1) learned weights — the "relation rules"
+    // that must survive death (死后保留). Written as an independent block (not
+    // inside SnapshotSlot) to keep the slot struct stable. Per slot:
+    //   present:u8, [ n_sources:u16, (src_slot:u16, weight:f64)*n,
+    //                 bias:f64, err_pred_mse:f64 ] if present
+    for slot_id in 0..N_OBJECT_SLOTS {
+        match vp.read_slot_cross_layer(slot_id) {
+            Some(st) => {
+                buf.push(1u8);
+                buf.extend_from_slice(&(st.source_slots.len() as u16).to_le_bytes());
+                for (s, w) in st.source_slots.iter().zip(st.source_weights.iter()) {
+                    buf.extend_from_slice(&(*s as u16).to_le_bytes());
+                    buf.extend_from_slice(&w.to_le_bytes());
+                }
+                buf.extend_from_slice(&st.bias.to_le_bytes());
+                buf.extend_from_slice(&st.err_pred_mse.to_le_bytes());
+            }
+            None => buf.push(0u8),
+        }
+    }
+
+    // v51: per-slot residual TOWER (recursive PC depth, tiers ≥2). Observer-
+    // visible so emergent abstraction depth shows up in a live run. Per slot:
+    //   n_tiers:u16, then per tier (bottom-up):
+    //     n_sources:u16, (src_slot:u16, weight:f64)*n,
+    //     bias:f64, err_pred_mse:f64, explained_fraction:f64
+    for slot_id in 0..N_OBJECT_SLOTS {
+        let tower = vp.read_slot_tower(slot_id);
+        buf.extend_from_slice(&(tower.len() as u16).to_le_bytes());
+        for st in &tower {
+            buf.extend_from_slice(&(st.source_slots.len() as u16).to_le_bytes());
+            for (s, w) in st.source_slots.iter().zip(st.source_weights.iter()) {
+                buf.extend_from_slice(&(*s as u16).to_le_bytes());
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
+            buf.extend_from_slice(&st.bias.to_le_bytes());
+            buf.extend_from_slice(&st.err_pred_mse.to_le_bytes());
+            buf.extend_from_slice(&st.explained_fraction.to_le_bytes());
+        }
+    }
+
     // Rejected v21/v22 naming sections were removed by cleanup spec
     // 2026-04-20. Snapshot terminates at the reasoning memory summary
     // plus language-binding traces.
@@ -466,6 +511,16 @@ pub struct SnapshotData {
     pub active_reasoning_gap: ActiveReasoningGapState,
     // v47: self-development predictive life-loop observer trace.
     pub self_development: SelfDevelopmentState,
+    // v49: audio_raw tier-0 waveform summary
+    pub audio_raw_total_samples: u64,
+    pub audio_raw_last_clock_us: u64,
+    /// v50: per-slot cross-layer (B1) learned relation rules. One entry per
+    /// object slot; None where that slot had no cross-layer predictor.
+    pub slot_xlayers: Vec<Option<crate::vpc_cross_layer::SlotCrossLayerState>>,
+    /// v51: per-slot residual TOWER (recursive PC depth, tiers ≥2), bottom-up.
+    /// One Vec per object slot (empty where no tier above tier 1 was born).
+    /// Observer-visible so emergent abstraction depth shows up in a live run.
+    pub slot_towers: Vec<Vec<crate::vpc_cross_layer::SlotCrossLayerState>>,
 }
 
 impl SnapshotData {
@@ -931,6 +986,95 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         SelfDevelopmentState::default()
     };
 
+    let audio_raw_total_samples = if version >= 49 { rd_u64(&bytes, &mut cur) } else { 0 };
+    let audio_raw_last_clock_us = if version >= 49 { rd_u64(&bytes, &mut cur) } else { 0 };
+
+    // v50: per-slot cross-layer (B1) learned relation rules.
+    let mut slot_xlayers: Vec<Option<crate::vpc_cross_layer::SlotCrossLayerState>> = Vec::new();
+    if version >= 50 {
+        for _ in 0..N_OBJECT_SLOTS {
+            let present = bytes[cur];
+            cur += 1;
+            if present == 0 {
+                slot_xlayers.push(None);
+                continue;
+            }
+            let n = {
+                let mut a = [0u8; 2];
+                a.copy_from_slice(&bytes[cur..cur + 2]);
+                cur += 2;
+                u16::from_le_bytes(a) as usize
+            };
+            let mut source_slots = Vec::with_capacity(n);
+            let mut source_weights = Vec::with_capacity(n);
+            for _ in 0..n {
+                let mut sa = [0u8; 2];
+                sa.copy_from_slice(&bytes[cur..cur + 2]);
+                cur += 2;
+                source_slots.push(u16::from_le_bytes(sa) as usize);
+                source_weights.push(rd_f64(&bytes, &mut cur));
+            }
+            let bias = rd_f64(&bytes, &mut cur);
+            let err_pred_mse = rd_f64(&bytes, &mut cur);
+            slot_xlayers.push(Some(crate::vpc_cross_layer::SlotCrossLayerState {
+                source_slots,
+                source_weights,
+                bias,
+                err_pred_mse,
+                learning_progress: 0.0,
+                n_updates: 0,
+                // Runtime-derived (recomputed within a few ticks); not in v50.
+                residual: 0.0,
+                explained_fraction: 0.0,
+            }));
+        }
+    }
+
+    // v51: per-slot residual TOWER (tiers ≥2). Observer-visible depth.
+    let mut slot_towers: Vec<Vec<crate::vpc_cross_layer::SlotCrossLayerState>> = Vec::new();
+    if version >= 51 {
+        for _ in 0..N_OBJECT_SLOTS {
+            let n_tiers = {
+                let mut a = [0u8; 2];
+                a.copy_from_slice(&bytes[cur..cur + 2]);
+                cur += 2;
+                u16::from_le_bytes(a) as usize
+            };
+            let mut tower = Vec::with_capacity(n_tiers);
+            for _ in 0..n_tiers {
+                let n = {
+                    let mut a = [0u8; 2];
+                    a.copy_from_slice(&bytes[cur..cur + 2]);
+                    cur += 2;
+                    u16::from_le_bytes(a) as usize
+                };
+                let mut source_slots = Vec::with_capacity(n);
+                let mut source_weights = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let mut sa = [0u8; 2];
+                    sa.copy_from_slice(&bytes[cur..cur + 2]);
+                    cur += 2;
+                    source_slots.push(u16::from_le_bytes(sa) as usize);
+                    source_weights.push(rd_f64(&bytes, &mut cur));
+                }
+                let bias = rd_f64(&bytes, &mut cur);
+                let err_pred_mse = rd_f64(&bytes, &mut cur);
+                let explained_fraction = rd_f64(&bytes, &mut cur);
+                tower.push(crate::vpc_cross_layer::SlotCrossLayerState {
+                    source_slots,
+                    source_weights,
+                    bias,
+                    err_pred_mse,
+                    learning_progress: 0.0,
+                    n_updates: 0,
+                    residual: 0.0,
+                    explained_fraction,
+                });
+            }
+            slot_towers.push(tower);
+        }
+    }
+
     // Rejected v21/v22 naming sections removed by cleanup spec 2026-04-20.
     // Older snapshot files containing those bytes are no longer readable;
     // v23+ omits them entirely.
@@ -984,6 +1128,10 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         framed_byte_egress,
         active_reasoning_gap,
         self_development,
+        audio_raw_total_samples,
+        audio_raw_last_clock_us,
+        slot_xlayers,
+        slot_towers,
     })
 }
 
@@ -2288,14 +2436,14 @@ fn read_vocal_organ_snapshot(bytes: &[u8], cur: &mut usize) -> VocalOrganState {
         pitch_tension,
         resonance_position,
         noise_mix,
-        formant_f1: rd_f64(bytes, cur),
-        formant_f2: rd_f64(bytes, cur),
-        formant_f3: rd_f64(bytes, cur),
-        voiced_ratio: rd_f64(bytes, cur),
-        breath_noise_ratio: rd_f64(bytes, cur),
-        envelope_attack: rd_f64(bytes, cur),
-        envelope_decay: rd_f64(bytes, cur),
-        envelope_sustain: rd_f64(bytes, cur),
+        formant_f1,
+        formant_f2,
+        formant_f3,
+        voiced_ratio,
+        breath_noise_ratio,
+        envelope_attack,
+        envelope_decay,
+        envelope_sustain,
         phase,
         last_update_t_us,
     }
@@ -2881,6 +3029,8 @@ fn write_learned_bias_summary(buf: &mut Vec<u8>, s: &LearnedBiasSummary) {
     buf.extend_from_slice(&(s.protected_axis_curves as u64).to_le_bytes());
     buf.extend_from_slice(&(s.ordinary_axis_curves as u64).to_le_bytes());
     buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
+    buf.extend_from_slice(&s.prediction_familiarity.to_le_bytes());
+    buf.extend_from_slice(&s.action_suppression.to_le_bytes());
 }
 
 fn read_learned_bias_summary(bytes: &[u8], cur: &mut usize) -> LearnedBiasSummary {
@@ -2905,5 +3055,10 @@ fn read_learned_bias_summary(bytes: &[u8], cur: &mut usize) -> LearnedBiasSummar
         protected_axis_curves: rd_u64(bytes, cur) as u32,
         ordinary_axis_curves: rd_u64(bytes, cur) as u32,
         last_update_t_us: rd_u64(bytes, cur),
+        prediction_familiarity: rd_f64(bytes, cur),
+        action_suppression: rd_f64(bytes, cur),
+        // vocal_efficacy 的真实持久化在 learned_bias.bin;snapshot 摘要(观察侧)
+        // 暂不带它,补默认 0.0(不升 snapshot 版本)。
+        vocal_efficacy: 0.0,
     }
 }
