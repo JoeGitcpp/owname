@@ -43,8 +43,20 @@ import {
   RateLimiter,
   SessionGuard,
   IdleTracker,
+  XorCipher,
   SENSES_FRAME_BYTES,
 } from './security.mjs'
+import {
+  evaluate_session,
+  collect_to_pool,
+  merge_pool,
+} from './training_pool.mjs'
+import {
+  handleAuthRequest,
+  handleAuthVerify,
+  handleAuthCheck,
+  requireAuth,
+} from './auth.mjs'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT             = parseInt(process.env.ABORN_PORT     || '3900',   10)
@@ -56,6 +68,11 @@ const PER_IP_MAX       = parseInt(process.env.ABORN_PERIP    || '2',      10)
 const RATE_PER_MIN     = parseInt(process.env.ABORN_RATE     || '5',      10)
 const IDLE_MIN         = parseInt(process.env.ABORN_IDLE_MIN || '5',      10)
 const MAX_SESSION_MIN  = parseInt(process.env.ABORN_MAX_MIN  || '30',     10)
+// Training pool: where collected learned_bias files go, and where the master lives
+const POOL_DIR         = process.env.ABORN_POOL_DIR  || resolve('../training_pool')
+const MASTER_BIAS      = process.env.ABORN_MASTER_BIAS || resolve('../master_learned_bias.bin')
+// Merge the pool into master every N minutes (0 = disable)
+const MERGE_INTERVAL_MIN = parseInt(process.env.ABORN_MERGE_MIN || '60', 10)
 
 mkdirSync(SESSIONS_DIR, { recursive: true })
 
@@ -64,15 +81,26 @@ const rateLimiter = new RateLimiter({ maxPerMinute: RATE_PER_MIN, windowMs: 60_0
 const sessionGuard = new SessionGuard({ globalMax: GLOBAL_MAX, perIpMax: PER_IP_MAX })
 const idleTracker  = new IdleTracker({ idleMs: IDLE_MIN * 60_000 })
 
-// Periodic cleanup
+// Periodic cleanup: prune rate-limiter + close idle sessions
 setInterval(() => {
   rateLimiter.prune()
-  // Force-close idle sessions
   for (const id of idleTracker.idleSessions()) {
     const entry = activeSessions.get(id)
     if (entry) entry.ws.close(1001, 'idle')
   }
 }, 60_000)
+
+// Periodic training-pool merge (if enabled)
+if (MERGE_INTERVAL_MIN > 0) {
+  setInterval(() => {
+    try {
+      const r = merge_pool(POOL_DIR, MASTER_BIAS)
+      if (r.merged > 0) {
+        console.log(`[pool] merged ${r.merged} sessions into master (skipped ${r.skipped})`)
+      }
+    } catch { /* pool not ready yet */ }
+  }, MERGE_INTERVAL_MIN * 60_000)
+}
 
 // ── MIME types ────────────────────────────────────────────────────────────────
 const MIME = {
@@ -90,8 +118,21 @@ const MIME = {
 const activeSessions = new Map()
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
-const http = createServer((req, res) => {
-  let path = req.url.split('?')[0]
+const http = createServer(async (req, res) => {
+  const url = req.url.split('?')[0]
+
+  // Auth routes
+  if (url === '/auth/request' && req.method === 'POST') {
+    return handleAuthRequest(req, res)
+  }
+  if (url === '/auth/verify' && req.method === 'POST') {
+    return handleAuthVerify(req, res)
+  }
+  if (url === '/auth/check') {
+    return handleAuthCheck(req, res)
+  }
+
+  let path = url
   if (path === '/' || !path.includes('.')) path = '/index.html'
 
   const file = join(STATIC_DIR, path)
@@ -125,6 +166,12 @@ const http = createServer((req, res) => {
 const wss = new WebSocketServer({ server: http, maxPayload: SENSES_FRAME_BYTES + 64 })
 
 wss.on('connection', (ws, req) => {
+  // Auth gate: require valid session cookie (disabled in dev if SMTP not configured)
+  if (!requireAuth(req)) {
+    ws.close(1008, 'unauthorized')
+    return
+  }
+
   // Extract real IP (CF tunnel adds CF-Connecting-IP header)
   const ip = req.headers['cf-connecting-ip']
            || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
@@ -148,6 +195,12 @@ wss.on('connection', (ws, req) => {
   const socketPath = join(runtimeDir, 'net.sock')
   mkdirSync(runtimeDir, { recursive: true })
 
+  // Seed new session with master learned_bias (distributed training inheritance).
+  // Body loads learned_bias.bin from its runtime dir on startup.
+  if (existsSync(MASTER_BIAS)) {
+    try { copyFileSync(MASTER_BIAS, join(runtimeDir, 'learned_bias.bin')) } catch { }
+  }
+
   // Spawn body in headless mode
   const child = spawn(BODY_BIN, [runtimeDir, '--headless', socketPath], {
     stdio: 'ignore',
@@ -168,6 +221,13 @@ wss.on('connection', (ws, req) => {
   const hardTimeout = setTimeout(() => {
     ws.close(1001, 'session-limit')
   }, MAX_SESSION_MIN * 60_000)
+
+  // XOR session key — send hello to browser, apply to all frames both ways
+  const xorKey = XorCipher.newKey()
+  const hello  = Buffer.allocUnsafe(5)
+  hello[0] = 0x00   // hello tag
+  xorKey.copy(hello, 1)
+  ws.send(hello)    // browser reads this and initialises its XOR state
 
   // Connect to body's Unix socket
   let bodySocket   = null
@@ -196,7 +256,8 @@ wss.on('connection', (ws, req) => {
             const n    = vocalBuf.readUInt16LE(1)
             const need = 3 + n * 4
             if (vocalBuf.length < need) break
-            if (ws.readyState === 1) ws.send(vocalBuf.slice(0, need))
+            // XOR-obfuscate the frame before sending to browser
+            if (ws.readyState === 1) ws.send(XorCipher.apply(vocalBuf.slice(0, need), xorKey))
             vocalBuf = vocalBuf.slice(need)
           } else {
             vocalBuf = vocalBuf.slice(1)  // resync
@@ -226,7 +287,7 @@ wss.on('connection', (ws, req) => {
       frame[5]      = vstate || 0
       frame.writeFloatLE(0, 6)  // self_coherence (future)
       frame.writeFloatLE(0, 10 - 4)  // gap_pressure (future)
-      ws.send(frame)
+      ws.send(XorCipher.apply(frame, xorKey))
     } catch { /* snapshot not ready */ }
   }, 1000)
 
@@ -234,7 +295,9 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (data, isBinary) => {
     if (!isBinary) { ws.close(1003, 'text-not-allowed'); return }
 
-    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    const raw = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    // Decode XOR obfuscation before validation and forwarding
+    const buf = XorCipher.apply(raw, xorKey)
 
     if (!validateFrame(buf)) {
       badFrames++
@@ -254,13 +317,29 @@ wss.on('connection', (ws, req) => {
     sessionGuard.release(sessionId)
     activeSessions.delete(sessionId)
 
-    // Give body 2 s to write checkpoint, then terminate
+    // Give body 3 s to write checkpoint, then evaluate and collect.
     setTimeout(() => {
       child.kill('SIGTERM')
       setTimeout(() => {
-        try { rmSync(runtimeDir, { recursive: true, force: true }) } catch { }
+        // Evaluate session quality before collecting training result.
+        try {
+          const result = evaluate_session({
+            runtimeDir,
+            startedAt: entry.startedAt,
+            endedAt: Date.now(),
+          })
+          if (result.pass) {
+            collect_to_pool(runtimeDir, POOL_DIR, sessionId)
+          }
+          // else: session did not meet quality threshold — discard
+        } catch { /* evaluation error: skip collection */ }
+
+        // Clean up session directory
+        setTimeout(() => {
+          try { rmSync(runtimeDir, { recursive: true, force: true }) } catch { }
+        }, 1000)
       }, 3000)
-    }, 2000)
+    }, 3000)
   }
 
   ws.on('close', cleanup)

@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto'
+
 /**
  * security.mjs — gateway security primitives.
  *
@@ -120,6 +122,38 @@ export class SessionGuard {
   total()       { return this.#sessions.size }
   forIp(ip)     { return this.#ipCounts.get(ip) || 0 }
   sessions()    { return [...this.#sessions.keys()] }
+}
+
+// ── XOR session cipher ───────────────────────────────────────────────────────
+/**
+ * Lightweight per-session XOR obfuscation.
+ * NOT cryptographic security — TLS (WSS) handles that.
+ * Purpose: make the WebSocket payload completely unreadable in browser
+ * DevTools / packet analysers so protocol structure cannot be reverse-
+ * engineered by inspecting live traffic.
+ *
+ * Protocol:
+ *   1. On WS connect the server sends a 5-byte hello:
+ *        [0x00][key0][key1][key2][key3]
+ *   2. All subsequent frames from the browser are XOR'd with the key
+ *        (cycling through key[i % 4]).
+ *   3. All frames sent TO the browser are XOR'd with the same key.
+ */
+export class XorCipher {
+  /** Generate a fresh 4-byte random session key (synchronous). */
+  static newKey() {
+    return randomBytes(4)
+  }
+
+  /** Apply XOR cipher (in-place on a copy). Pure: returns a new Buffer. */
+  static apply(data, key) {
+    if (!Buffer.isBuffer(data) || !Buffer.isBuffer(key) || key.length < 4) {
+      throw new Error('XorCipher.apply: invalid args')
+    }
+    const out = Buffer.allocUnsafe(data.length)
+    for (let i = 0; i < data.length; i++) out[i] = data[i] ^ key[i % 4]
+    return out
+  }
 }
 
 // ── Idle-timeout tracker ──────────────────────────────────────────────────────

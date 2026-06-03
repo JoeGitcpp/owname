@@ -8,6 +8,7 @@
     "dev": "ABORN_PORT=3900 node server.mjs"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "nodemailer": "^8.0.10",
+    "ws": "^8.21.0"
   }
 }

@@ -122,3 +122,39 @@ describe('SessionGuard', () => {
     assert.equal(sg.forIp('3.3.3.3'), 0)
   })
 })
+
+// ── XorCipher ─────────────────────────────────────────────────────────────────
+import { XorCipher } from './security.mjs'
+
+describe('XorCipher', () => {
+  it('generates a 4-byte session key', () => {
+    const k = XorCipher.newKey()
+    assert.ok(Buffer.isBuffer(k) && k.length === 4)
+  })
+
+  it('keys from different calls differ (not always zero)', () => {
+    const keys = new Set(Array.from({length: 20}, () => XorCipher.newKey().toString('hex')))
+    assert.ok(keys.size > 1, 'keys should vary')
+  })
+
+  it('xor then xor again returns original', () => {
+    const key = Buffer.from([0xAB, 0xCD, 0xEF, 0x12])
+    const data = Buffer.from([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+    const enc = XorCipher.apply(data, key)
+    const dec = XorCipher.apply(enc, key)
+    assert.deepEqual(dec, data)
+  })
+
+  it('xored output differs from input', () => {
+    const key  = Buffer.from([0xFF, 0xFF, 0xFF, 0xFF])
+    const data = Buffer.from([0x01, 0x00, 0x01, 0x00, 0x01])
+    const enc  = XorCipher.apply(data, key)
+    assert.notDeepEqual(enc, data)
+  })
+
+  it('zero key leaves data unchanged', () => {
+    const key  = Buffer.alloc(4, 0)
+    const data = Buffer.from([0xDE, 0xAD, 0xBE, 0xEF])
+    assert.deepEqual(XorCipher.apply(data, key), data)
+  })
+})

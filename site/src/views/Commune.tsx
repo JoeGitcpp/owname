@@ -49,16 +49,25 @@ function packSenses(s: import('../lib/perception').Senses): ArrayBuffer {
   return buf
 }
 
+// XOR helpers (mirrors server-side XorCipher, no import needed — tiny inline)
+function xorApply(data: Uint8Array, key: Uint8Array): Uint8Array {
+  const out = new Uint8Array(data.length)
+  for (let i = 0; i < data.length; i++) out[i] = data[i] ^ key[i % 4]
+  return out
+}
+
 function useBodyBridge(running: boolean, getSenses: () => import('../lib/perception').Senses) {
   const wsRef       = useRef<WebSocket | null>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
   const nextTimeRef = useRef(0)
+  const xorKeyRef   = useRef<Uint8Array | null>(null)   // set after hello frame
 
   useEffect(() => {
     if (!running) return
     const ws = new WebSocket(GATEWAY_WS)
     ws.binaryType = 'arraybuffer'
     wsRef.current  = ws
+    xorKeyRef.current = null  // reset key on new connection
 
     const Ctor = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
     const actx = new Ctor()
@@ -67,34 +76,53 @@ function useBodyBridge(running: boolean, getSenses: () => import('../lib/percept
 
     ws.onmessage = (ev: MessageEvent) => {
       if (!(ev.data instanceof ArrayBuffer)) return
-      const view = new DataView(ev.data)
+      const raw  = new Uint8Array(ev.data)
+      const key  = xorKeyRef.current
+
+      // First message is the hello frame: [0x00][k0][k1][k2][k3]
+      if (!key) {
+        if (raw.length === 5 && raw[0] === 0x00) {
+          xorKeyRef.current = raw.slice(1, 5)
+        }
+        return
+      }
+
+      // Decode XOR then dispatch by tag
+      const buf  = xorApply(raw, key)
+      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
       const tag  = view.getUint8(0)
+
       if (tag === TAG_VOCAL) {
-        const n       = view.getUint16(1, true)
-        const RATE    = 22050
-        const abuf    = actx.createBuffer(1, n, RATE)
-        const chan     = abuf.getChannelData(0)
+        const n    = view.getUint16(1, true)
+        const RATE = 22050
+        const abuf = actx.createBuffer(1, n, RATE)
+        const chan  = abuf.getChannelData(0)
         for (let i = 0; i < n; i++) chan[i] = view.getFloat32(3 + i * 4, true)
         const src = actx.createBufferSource()
         src.buffer = abuf
         src.connect(actx.destination)
-        const now = actx.currentTime
+        const now  = actx.currentTime
         const when = Math.max(now, nextTimeRef.current)
         src.start(when)
         nextTimeRef.current = when + abuf.duration
       }
+      // 0x03 state frames: future — feed into Modality
     }
 
-    // Send Senses frames at ~20 Hz while connected.
+    // Send XOR-obfuscated Senses frames at ~20 Hz once key is received.
     const interval = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return
-      ws.send(packSenses(getSenses()))
+      const key = xorKeyRef.current
+      if (!key) return   // wait for hello
+      const plain = new Uint8Array(packSenses(getSenses()))
+      ws.send(xorApply(plain, key))
     }, 50)
 
     return () => {
       clearInterval(interval)
       ws.close()
       wsRef.current = null
+      xorKeyRef.current = null
       actx.close()
       audioCtxRef.current = null
     }
