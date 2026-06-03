@@ -3988,11 +3988,23 @@ impl Viewport {
             bias.action_suppression,
         );
         let replay = self.global_attention.read().unwrap().replay_intensity;
-        let drive_pressure = field_pressure
+        let raw_urge = field_pressure
             .max(evidence_pressure)
             .max(gap_pressure)
             .max(baseline)
             .max(replay * 0.25);
+        // Innate survival reflex (治本 of the silent-run starvation): the inner
+        // urge to voice yields in REAL TIME to self-preservation pressure —
+        // 饿了就少叫,吃饱了才咿呀. The pressure scales the urge BELOW the reflex's
+        // own threshold when survival is at stake, so no burst fires → no voicing
+        // exertion → reserve recovers. Continuous interoceptive modulation of the
+        // one drive field (NOT a state-named behaviour gate); fast enough to
+        // survive before the body could ever learn restraint. Only the
+        // inner-pressure self-babble is gated here; external/attachment-driven
+        // voicing (region B below) is left for the dual-drive to arbitrate.
+        let self_preservation = self.read_vital_core().self_preservation_pressure();
+        let drive_pressure =
+            crate::vocal_drive_field::survival_gated_urge(raw_urge, self_preservation);
         let drive = crate::vocal_reflex::VocalReflexDrive {
             drive_pressure,
             energy: drive_pressure,
@@ -4107,6 +4119,34 @@ impl Viewport {
             };
             self.familiar_objects.write().unwrap().observe(now_us, fp);
         }
+        // Stage 0: mirror familiarity scalars onto shared axes.
+        // ATTACHMENT = strongest emergent bond (most-familiar object's score).
+        // PRESENCE   = whether that most-familiar object is currently active/seen.
+        //   High PRESENCE + low PRESENCE next tick → prediction miss = "longing" substrate.
+        let fo = self.familiar_objects.read().unwrap();
+        if let Some(most) = fo.most_familiar() {
+            let attachment = most.familiarity;
+            // Presence: 1.0 if a currently-active slot's fingerprint is close enough
+            // (< MATCH_DIST) to the most-familiar object — it is "here now".
+            // Persistent miss (predicted present, actually absent) = longing substrate.
+            let most_fp = most.fingerprint;
+            drop(fo); // release read lock before slot reads
+            let present = (0..crate::N_OBJECT_SLOTS).any(|sid| {
+                self.read_slot(sid)
+                    .filter(|s| s.active)
+                    .and_then(|s| crate::familiar_objects::fingerprint_from_slot(s.vib.as_ref()))
+                    .map(|fp| {
+                        let d: f64 = fp.iter().zip(most_fp.iter())
+                            .map(|(a, b)| (a - b) * (a - b))
+                            .sum::<f64>()
+                            .sqrt();
+                        d < 0.20 // mirrors familiar_objects::MATCH_DIST
+                    })
+                    .unwrap_or(false)
+            });
+            self.push_observation(crate::INTERO_ATTACHMENT, now_us, attachment);
+            self.push_observation(crate::INTERO_PRESENCE, now_us, if present { 1.0 } else { 0.0 });
+        }
     }
 
     pub fn read_familiar_objects(&self) -> crate::familiar_objects::FamiliarObjectsState {
@@ -4166,6 +4206,14 @@ impl Viewport {
         let drain = (self.vital_env.drain(env_now) + exertion).clamp(0.0, 1.0);
 
         self.vital_core.write().unwrap().tick(now_us, supply, drain);
+        // Stage 0 (interoceptive substrate): mirror vital scalars onto shared axes
+        // so they are predicted, produce err, and enter the relation/tower fabric.
+        // The box retains full ownership of its dynamics; this is a READ + mirror.
+        // 推论5: no positive/negative labels — these are substrate quantities only.
+        let vc = self.vital_core.read().unwrap();
+        self.push_observation(crate::INTERO_RESERVE, now_us, vc.reserve);
+        self.push_observation(crate::INTERO_VITAL_ANXIETY, now_us, vc.vital_anxiety);
+        self.push_observation(crate::INTERO_PAIN, now_us, vc.pain);
     }
 
     pub fn read_vital_core(&self) -> crate::vital_core::VitalCoreState {
@@ -4184,6 +4232,10 @@ impl Viewport {
             .write()
             .unwrap()
             .tick(now_us, interoception, agency);
+        // Stage 0: mirror self-model scalars onto shared axes.
+        let sm = self.self_model.read().unwrap();
+        self.push_observation(crate::INTERO_SELF_COHERENCE, now_us, sm.self_coherence);
+        self.push_observation(crate::INTERO_AGENCY, now_us, sm.agency);
     }
 
     pub fn read_self_model(&self) -> crate::self_model::SelfModelState {

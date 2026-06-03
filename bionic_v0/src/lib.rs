@@ -84,10 +84,46 @@ pub const VIS_AXES_PER_REGION: usize = 5; // brightness, R, G, B, motion
 pub const VIS_AXES: usize = VIS_REGIONS * VIS_AXES_PER_REGION; // 20
 
 // Axis layout in the shared coordinate system:
-//   [0 .. VIB_BANDS)              = hearing (frequency bands)
-//   [VIB_BANDS .. VIB_BANDS+VIS_AXES) = vision (region × physical quantity)
+//   [0 .. VIB_BANDS)                  = hearing (frequency bands)
+//   [AXIS_VIS_BASE .. AXIS_VIS_BASE+VIS_AXES) = vision (region × physical quantity)
+//   [AXIS_INTERO_BASE .. AXIS_INTERO_BASE+INTERO_AXES) = interoception (body-internal scalars)
+//
+// Interoceptive axes (2026-06-03 redesign — Stage 0):
+//   Internal body scalars are mirrored onto the shared substrate so they are
+//   predicted, produce err, enter relations, and feed the abstraction tower —
+//   EXACTLY as external perception does. This is the substrate-unification fix:
+//   internal state stops being isolated boxes and becomes part of the same
+//   prediction/error/relation fabric as vision and hearing.
+//
+//   Each axis name is a numeric engineering locator (like VIS_SUB_BRIGHTNESS),
+//   NOT a semantic label. The substrate doesn't "know" reserve is vital or that
+//   gap_pressure is cognitive — it just predicts a scalar curve. Feelings
+//   (surprise, longing, calm) emerge from prediction error patterns over these
+//   axes, not from labels. No absolute positive/negative values are pre-assigned
+//   (推论5: 无绝对正负判断, 感受涌现自预测差值).
 pub const AXIS_VIS_BASE: usize = VIB_BANDS; // 4
-pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES; // 24
+pub const AXIS_INTERO_BASE: usize = VIB_BANDS + VIS_AXES; // 24
+
+// Ten interoceptive axes — the minimal set that covers vital/self/familiar/
+// reasoning dynamics. All are scalars in [0,1] already maintained by existing
+// box dynamics; Stage 0 only MIRRORS them here (zero behavior change).
+pub const INTERO_RESERVE: usize = AXIS_INTERO_BASE + 0; // survival reserve
+pub const INTERO_VITAL_ANXIETY: usize = AXIS_INTERO_BASE + 1; // predicted-trajectory dread
+pub const INTERO_PAIN: usize = AXIS_INTERO_BASE + 2;       // acute self-damage signal
+pub const INTERO_SELF_COHERENCE: usize = AXIS_INTERO_BASE + 3; // self-model stability
+pub const INTERO_AGENCY: usize = AXIS_INTERO_BASE + 4;     // sense of causal efficacy
+pub const INTERO_ATTACHMENT: usize = AXIS_INTERO_BASE + 5; // strongest emergent bond
+pub const INTERO_GAP_PRESSURE: usize = AXIS_INTERO_BASE + 6; // unresolved prediction gap
+pub const INTERO_CLOSURE: usize = AXIS_INTERO_BASE + 7;    // gap-closing signal
+pub const INTERO_LEARNING_PROGRESS: usize = AXIS_INTERO_BASE + 8; // prediction improving
+pub const INTERO_PRESENCE: usize = AXIS_INTERO_BASE + 9;   // familiar-object in-presence
+//   Presence axis: high when the most-familiar object is actively seen/heard;
+//   low when absent. Persistent high-err on this axis (predicted-present but
+//   actually absent) is the substrate form of "longing" — no label needed.
+
+pub const INTERO_AXES: usize = 10;
+pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES; // 34
+
 pub const AXIS_VIB: usize = 0;
 pub const AXIS_SYNTH: usize = 0; // retained for backward compat
 
@@ -411,9 +447,11 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 // v48: pre-language solitary growth fields added to self-development trace.
 // v49: audio_raw tier-0 waveform buffer added to viewport and snapshot.
 // v50: per-slot cross-layer (B1 tier-1) learned relation weights.
-/// v51: per-slot residual TOWER (recursive PC depth, tiers ≥2) — observer-
-/// visible so emergent abstraction depth can be seen in a live run.
-pub const SNAPSHOT_VERSION: u64 = 51;
+// v51: per-slot residual TOWER (recursive PC depth, tiers ≥2).
+/// v52: interoceptive substrate unification Stage 0 — AXIS_COUNT 24→34 (10 new
+/// interoceptive axes: reserve/anxiety/pain/coherence/agency/attachment/gap/
+/// closure/learning_progress/presence). Per-axis snapshot blocks grow accordingly.
+pub const SNAPSHOT_VERSION: u64 = 52;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

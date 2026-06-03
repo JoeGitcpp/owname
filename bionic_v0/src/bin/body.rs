@@ -265,10 +265,14 @@ fn main() {
         })
     };
 
-    // Per-band AR-2 predictors, 100 Hz — purely consume viewport data, do not
-    // own any input source, so they stay in body.rs.
+    // AR-2 predictors for ALL active axes (hearing + vision + interoception),
+    // 100 Hz. Previously only VIB_BANDS (4) were covered; expanding to AXIS_COUNT
+    // (34) means visual and interoceptive axes are now predicted — they produce
+    // err signals, feed into the relation graph, and enter the abstraction tower.
+    // This is Stage 0 of the interoceptive substrate unification: zero behavior
+    // change to the boxes; the predictors simply observe whatever each axis holds.
     let predictors: Arc<Mutex<Vec<Ar2Predictor>>> =
-        Arc::new(Mutex::new((0..VIB_BANDS).map(Ar2Predictor::new).collect()));
+        Arc::new(Mutex::new((0..bionic_v0::AXIS_COUNT).map(Ar2Predictor::new).collect()));
     let vp_pred = vp.clone();
     let pred_ref = predictors.clone();
     let h_pred = spawn_ticker(profile.predictor_hz, stop.clone(), move |_| {

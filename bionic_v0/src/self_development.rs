@@ -326,6 +326,12 @@ impl Viewport {
             .write()
             .unwrap()
             .update(sample, now_us);
+        // Stage 0: mirror learning_progress scalar onto its shared interoceptive
+        // axis. prediction_improvement = EMA of d(gap)/dt downward component —
+        // the substrate form of "prediction is getting better". No label "good/bad";
+        // it is a substrate quantity that the prediction engine will now predict.
+        let lp = self.self_development.read().unwrap().prediction_improvement;
+        self.push_observation(crate::INTERO_LEARNING_PROGRESS, now_us, lp);
     }
 
     pub fn read_self_development(&self) -> SelfDevelopmentState {

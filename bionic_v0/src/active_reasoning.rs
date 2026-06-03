@@ -139,6 +139,14 @@ impl Viewport {
             active_cycles: state.active_cycles,
         };
         state.push_trace(trace);
+        // Stage 0: mirror gap/closure scalars onto shared axes so they are
+        // predicted and enter the relation fabric. Read after the write above
+        // to pick up the freshly-computed values.
+        let gap = state.gap_pressure;
+        let clos = state.closure_score;
+        drop(state); // release write lock before calling push_observation
+        self.push_observation(crate::INTERO_GAP_PRESSURE, now_us, gap);
+        self.push_observation(crate::INTERO_CLOSURE, now_us, clos);
     }
 
     pub fn read_active_reasoning_gap(&self) -> ActiveReasoningGapState {

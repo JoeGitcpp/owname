@@ -82,9 +82,37 @@ impl VocalDriveField {
     }
 }
 
+/// Innate survival reflex: self-preservation pressure suppresses the INNER urge
+/// to voice (self-babble), in real time. `gain = 1 - pressure`: well-fed
+/// (pressure≈0) → full urge; starving / Standby (pressure→1) → silent. This is
+/// continuous interoceptive modulation of the expression drive — the
+/// self-preservation half of the dual drive acting on expression — NOT a
+/// behaviour-selecting gate. It is INNATE (not learned) so it acts fast enough
+/// to conserve energy before the body starves into Standby, instead of voicing
+/// itself to death and never living long enough to learn restraint.
+///
+/// Applied ONLY to the inner-pressure urge; external/attachment-driven voicing
+/// (a cry toward a caregiver) is left for the dual-drive to arbitrate, since an
+/// emergent bond may rightly override self-preservation.
+pub fn survival_gated_urge(urge: f64, self_preservation_pressure: f64) -> f64 {
+    let gain = (1.0 - unit(self_preservation_pressure)).clamp(0.0, 1.0);
+    urge * gain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn survival_pressure_suppresses_inner_voice_urge() {
+        let urge = 0.8;
+        // well-fed → full urge
+        assert!((survival_gated_urge(urge, 0.0) - 0.8).abs() < 1e-9);
+        // starving / Standby → silent
+        assert!(survival_gated_urge(urge, 1.0) < 1e-9);
+        // monotone: more survival pressure → less urge (饿了就少叫)
+        assert!(survival_gated_urge(urge, 0.3) > survival_gated_urge(urge, 0.7));
+    }
 
     fn c(intensity: f64, pitch: f64) -> VocalDriveContribution {
         VocalDriveContribution {
