@@ -103,6 +103,20 @@ pub fn survival_gated_urge(urge: f64, self_preservation_pressure: f64) -> f64 {
 mod tests {
     use super::*;
 
+    /// In Standby (self_preservation=1.0) the gate must silence the COMBINED
+    /// output completely — including any region-B (external) contribution.
+    /// This is the metabolic consistency guard: reserve=0 → cannot spend drain.
+    #[test]
+    fn standby_silences_even_external_drive() {
+        // Simulate: region A fully silent (already gated), region B at 0.6.
+        let combined_intensity = 0.6; // external target is driving
+        let standby_pressure = 1.0;  // Standby pins self_preservation to 1.0
+        let result = survival_gated_urge(combined_intensity, standby_pressure);
+        assert!(result < 1e-9,
+            "Standby must silence combined drive (got {result}); \
+             otherwise drain=0.7 prevents recovery");
+    }
+
     #[test]
     fn survival_pressure_suppresses_inner_voice_urge() {
         let urge = 0.8;

@@ -4051,6 +4051,20 @@ impl Viewport {
 
         // --- Combine into one field, then ONE outlet voices ---
         let combined = VocalDriveField::combine(&contribs);
+        // Apply survival gate to the FULL combined drive (region A was already
+        // gated; this catches region B in Standby). In Standby (reserve=0,
+        // self_preservation=1.0) → combined.intensity→0 → decay path → drain
+        // returns to base metabolism 0.2 → reserve can actually recover. Without
+        // this, region B (ambient-sound imitation) keeps firing at 0.7 drain and
+        // makes recovery physically impossible. This is not suppressing expression;
+        // it is metabolic self-consistency: you cannot spend energy you don't have.
+        let combined = VocalDriveField {
+            intensity: crate::vocal_drive_field::survival_gated_urge(
+                combined.intensity,
+                self_preservation,
+            ),
+            ..combined
+        };
         if combined.intensity <= 0.0 {
             // No drive this tick: let the organ decay (and emit stop/decay
             // output events), the way the old imitation loop did when idle.
