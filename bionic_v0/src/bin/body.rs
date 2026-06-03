@@ -76,6 +76,10 @@ struct BodyArgs {
     duration_secs: u64,
     profile: BodyRuntimeProfile,
     nursery_bias: bool,
+    /// Headless (server) mode: path to the Unix socket the gateway connects to.
+    /// When set, hardware adapters (cpal mic/camera/speakers) are replaced by
+    /// network adapters that receive Senses frames from the gateway.
+    headless_socket: Option<PathBuf>,
 }
 
 fn parse_body_args(args: &[String]) -> BodyArgs {
@@ -83,12 +87,19 @@ fn parse_body_args(args: &[String]) -> BodyArgs {
     let mut duration_secs: Option<u64> = None;
     let mut low_power = false;
     let mut nursery_bias = false;
+    let mut headless_socket: Option<PathBuf> = None;
 
-    for arg in args.iter().skip(1) {
+    let mut iter = args.iter().skip(1).peekable();
+    while let Some(arg) = iter.next() {
         if arg == "--solitary-low-power" {
             low_power = true;
         } else if arg == "--nursery-bias" {
             nursery_bias = true;
+        } else if arg == "--headless" {
+            // --headless <socket_path>
+            if let Some(p) = iter.next() {
+                headless_socket = Some(PathBuf::from(p));
+            }
         } else if runtime_dir.is_none() {
             runtime_dir = Some(PathBuf::from(arg));
         } else if duration_secs.is_none() {
@@ -105,6 +116,7 @@ fn parse_body_args(args: &[String]) -> BodyArgs {
             BodyRuntimeProfile::normal()
         },
         nursery_bias,
+        headless_socket,
     }
 }
 
@@ -171,6 +183,7 @@ fn main() {
     let runtime_dir = body_args.runtime_dir;
     let duration_secs = body_args.duration_secs;
     let profile = body_args.profile;
+    let headless_socket = body_args.headless_socket;
 
     std::fs::create_dir_all(&runtime_dir).ok();
     let paths = Arc::new(SnapshotPaths::new(&runtime_dir));
@@ -235,9 +248,31 @@ fn main() {
 
     // All sensory I/O goes through the registry. body.rs is oblivious to
     // which modalities are present — only that the registry exists.
-    let h_adapters = {
+    //
+    // Headless mode (--headless <socket>): NetSensesAdapter replaces the
+    // hardware adapters. It reads compact binary Senses frames from the
+    // Unix socket written by aborn-gateway and pushes them onto the shared
+    // axes.  The same socket carries vocal PCM back to the gateway.
+    //
+    // Hardware mode (default): real mic + camera via cpal/nokhwa.
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use std::os::unix::net::UnixStream as StdUnixStream;
+    type VocalTx = StdArc<StdMutex<Option<StdUnixStream>>>;
+
+    let net_vocal_tx: VocalTx;
+    let h_adapters;
+    if let Some(socket_path) = headless_socket {
+        let (net_adapter, vt) = bionic_v0::net_adapter::NetSensesAdapter::new(socket_path);
+        net_vocal_tx = vt;
+        h_adapters = spawn_registry_driver(vp.clone(), stop.clone(), move || {
+            let mut reg = AdapterRegistry::new();
+            register_or_abort(&mut reg, Box::new(net_adapter));
+            reg
+        });
+    } else {
+        net_vocal_tx = StdArc::new(StdMutex::new(None));
         let vp_reg = vp.clone();
-        spawn_registry_driver(vp.clone(), stop.clone(), move || {
+        h_adapters = spawn_registry_driver(vp.clone(), stop.clone(), move || {
             let mut reg = AdapterRegistry::new();
             // VIB: real mic. Owns its cpal stream inside this thread.
             register_or_abort(&mut reg, Box::new(VibAdapter::new(&vp_reg)));
@@ -245,10 +280,6 @@ fn main() {
             // the real hardware path is live; on failure phot_health surfaces
             // FAULT immediately via the stub — never a silent fallback to
             // synthetic data.
-            // No human-readable diagnostics in the body process (cleanup spec
-            // §4.5). Camera startup outcome is observable through phot_health
-            // state alone: success → live; failure → StubRealCameraFrameProvider
-            // drives phot_health = FAULT via the adapter path.
             let cam: Box<dyn bionic_v0::phot_camera::CameraFrameProvider> =
                 match RealCameraFrameProvider::try_new() {
                     Ok(p) => Box::new(p),
@@ -262,7 +293,7 @@ fn main() {
                 )),
             );
             reg
-        })
+        });
     };
 
     // AR-2 predictors for ALL active axes (hearing + vision + interoception),
@@ -330,7 +361,9 @@ fn main() {
 
     // Vocal substrate ticker, 50 Hz. Body-side execution only: learned vocal
     // curves update continuously without text, TTS, or request/response logic.
+    // In headless mode, also sample the vocal organ and send PCM to the gateway.
     let vp_vocal = vp.clone();
+    let vt_for_ticker = net_vocal_tx.clone();
     let h_vocal = spawn_ticker(profile.vocal_hz, stop.clone(), move |_| {
         let t = now_us();
         // 改造6: external sound is observed into the target (no voicing here),
@@ -338,8 +371,21 @@ fn main() {
         vp_vocal.tick_vocal_target_from_vib(t);
         vp_vocal.tick_vocal_drive_field(t);
         vp_vocal.tick_vocal_memory(t);
+        // Headless mode: send vocal PCM to gateway via the shared socket.
+        // In hardware mode the tx slot is None and this is a no-op.
+        {
+            let guard = vt_for_ticker.lock().unwrap();
+            if guard.is_some() {
+                drop(guard); // release before the (slightly expensive) PCM synthesis
+                let samples = bionic_v0::net_adapter::sample_vocal_pcm(&vp_vocal);
+                bionic_v0::net_adapter::send_vocal_frame(&vt_for_ticker, &samples);
+            }
+        }
     });
 
+    // Hardware vocal output (cpal speakers). In headless mode net_vocal_tx
+    // carries the audio back to the gateway instead; this ticker is a no-op
+    // (spawn_vocal_output checks for audio device and silently skips if absent).
     let h_vocal_output = spawn_vocal_output(vp.clone(), stop.clone());
 
     // AudioAdapter: raw waveform capture (tier-0 audio)

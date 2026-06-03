@@ -1,4 +1,5 @@
 pub mod action_consequence;
+pub mod net_adapter;
 pub mod action_output;
 pub mod active_reasoning;
 pub mod audio_adapter;

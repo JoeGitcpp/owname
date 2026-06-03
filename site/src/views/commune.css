@@ -1,0 +1,276 @@
+/* =====================================================
+   Commune viewport — video-call layout
+   Main view = AI modality (full screen, "remote party")
+   PiP       = self camera (bottom-right corner)
+   Controls  = bottom centre bar
+   ===================================================== */
+
+.commune {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: #000;
+  user-select: none;
+}
+
+/* AI modality canvas — fills the whole screen like the remote party */
+.commune__field {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---- Remote party label (top-left, like FaceTime name) ---- */
+.commune__remote-label {
+  position: absolute;
+  top: 20px;
+  left: 22px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 10px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.commune__remote-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  animation: breathe 2.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.commune__remote-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--ink);
+}
+
+.commune__timer {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}
+
+/* ---- Self-view PiP ---- */
+.commune__self {
+  position: absolute;
+  bottom: 108px;          /* sit just above the control bar */
+  right: 20px;
+  z-index: 4;
+  width: clamp(96px, 22vw, 180px);
+  aspect-ratio: 3/4;      /* portrait, like FaceTime self-view */
+  border-radius: 16px;
+  overflow: hidden;
+  border: 2px solid rgba(255,255,255,0.12);
+  background: #0a0e14;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+  opacity: 0;
+  transform: scale(0.88) translateY(8px);
+  transition: opacity 0.4s ease, transform 0.4s cubic-bezier(0.16,1,0.3,1);
+  /* mirror horizontally — natural self-view */
+}
+
+.commune__self--visible {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+}
+
+.commune__self-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);  /* mirror */
+  display: block;
+}
+
+/* cam-off: dark overlay with icon instead of black feed */
+.commune__self--off .commune__self-video {
+  opacity: 0;
+}
+
+.commune__self-off-icon {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ink-faint);
+}
+.commune__self-off-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+/* ---- Bottom control bar ---- */
+.commune__controls {
+  position: absolute;
+  bottom: 32px;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 0 24px;
+}
+
+/* regular control button (mic / cam) */
+.commune__ctrl {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(20, 26, 36, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--ink);
+  display: grid;
+  place-items: center;
+  transition: background 0.2s, border-color 0.2s, transform 0.15s;
+}
+.commune__ctrl svg {
+  width: 22px;
+  height: 22px;
+}
+.commune__ctrl:hover {
+  background: rgba(40, 52, 68, 0.9);
+  border-color: rgba(255,255,255,0.28);
+}
+.commune__ctrl:active {
+  transform: scale(0.93);
+}
+/* active = currently muted / cam-off — show state as filled amber */
+.commune__ctrl--active {
+  background: rgba(217, 160, 91, 0.18);
+  border-color: var(--accent-warm);
+  color: var(--accent-warm);
+}
+.commune__ctrl--active:hover {
+  background: rgba(217, 160, 91, 0.28);
+}
+
+/* hangup button — larger, red, prominent */
+.commune__hangup {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: none;
+  background: #e53e3e;
+  color: #fff;
+  display: grid;
+  place-items: center;
+  transition: background 0.2s, transform 0.15s;
+  box-shadow: 0 4px 20px rgba(229, 62, 62, 0.45);
+}
+.commune__hangup svg {
+  width: 28px;
+  height: 28px;
+}
+.commune__hangup:hover {
+  background: #c53030;
+}
+.commune__hangup:active {
+  transform: scale(0.93);
+}
+
+/* ---- Permission / error modals ---- */
+.commune__modal {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 8;
+  width: min(420px, 88vw);
+  text-align: center;
+  padding: 38px 32px 34px;
+  background: rgba(10, 14, 20, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+}
+.commune__modal h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+.commune__modal p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.82;
+  color: var(--ink-dim);
+}
+
+.commune__actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 26px;
+}
+.commune__btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  padding: 10px 22px;
+  border-radius: 999px;
+  transition: border-color 0.2s, color 0.2s;
+}
+.commune__btn:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+.commune__btn--primary {
+  border-color: var(--accent);
+  color: var(--bg);
+  background: var(--accent);
+}
+.commune__btn--primary:hover {
+  background: #6fe0d1;
+}
+
+/* requesting spinner */
+.commune__spinner {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 20px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---- Mobile tweaks ---- */
+@media (max-width: 480px) {
+  .commune__self {
+    width: 84px;
+    bottom: 100px;
+    right: 14px;
+    border-radius: 12px;
+  }
+  .commune__controls {
+    gap: 12px;
+    bottom: 24px;
+  }
+  .commune__ctrl { width: 48px; height: 48px; }
+  .commune__hangup { width: 58px; height: 58px; }
+}

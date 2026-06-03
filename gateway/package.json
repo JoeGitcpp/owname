@@ -1,0 +1,13 @@
+{
+  "name": "aborn-gateway",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "ABORN_PORT=3900 node server.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

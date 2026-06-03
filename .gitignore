@@ -23,5 +23,7 @@ bionic_v0/--help/
 
 # Agent/session state and bundled external apps (not project source)
 /.claude/
-/site/
+/site/dist/
+/site/node_modules/
+/gateway/node_modules/
 /sillytavern/
