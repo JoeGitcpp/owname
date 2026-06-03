@@ -55,3 +55,5 @@ winit = "0.28"
 [profile.release]
 opt-level = 3
 lto = "thin"
+strip = "symbols"     # remove all symbol table + debug info from binary
+codegen-units = 1     # single codegen unit: best optimization + hardest to reverse
