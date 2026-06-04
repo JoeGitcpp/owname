@@ -32,11 +32,12 @@ import { WebSocketServer } from 'ws'
 import { createConnection } from 'node:net'
 import { spawn }            from 'node:child_process'
 import {
-  readFileSync, existsSync, mkdirSync, rmSync,
+  readFileSync, existsSync, mkdirSync, rmSync, copyFileSync,
 }                           from 'node:fs'
 import { join, resolve }    from 'node:path'
 import { createReadStream } from 'node:fs'
 import { extname }          from 'node:path'
+import { createHash }       from 'node:crypto'
 
 import {
   validateFrame,
@@ -56,6 +57,7 @@ import {
   handleAuthVerify,
   handleAuthCheck,
   requireAuth,
+  verifySessionCookie,
 } from './auth.mjs'
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -72,10 +74,17 @@ const MAX_SESSION_MIN  = parseInt(process.env.ABORN_MAX_MIN  || '30',     10)
 const POOL_DIR         = process.env.ABORN_POOL_DIR  || resolve('../training_pool')
 const MASTER_BIAS      = process.env.ABORN_MASTER_BIAS || resolve('../master_learned_bias.bin')
 const MASTER_RUNTIME   = process.env.ABORN_RUNTIME     || resolve('../runtime')
+// Per-user persistent memory: familiar_objects, vital_core, self_model survive across sessions.
+// Keyed by SHA-256(email)[0:16] — no raw email on disk.
+const USERS_DIR        = process.env.ABORN_USERS_DIR  || resolve('../user-memories')
 // Merge the pool into master every N minutes (0 = disable)
 const MERGE_INTERVAL_MIN = parseInt(process.env.ABORN_MERGE_MIN || '60', 10)
 
+// Personal checkpoint files that belong to the user and must never be merged into master.
+const PERSONAL_FILES = ['familiar_objects.bin', 'vital_core.bin', 'self_model.bin']
+
 mkdirSync(SESSIONS_DIR, { recursive: true })
+mkdirSync(USERS_DIR,    { recursive: true })
 
 // ── Security instances ────────────────────────────────────────────────────────
 const rateLimiter = new RateLimiter({ maxPerMinute: RATE_PER_MIN, windowMs: 60_000 })
@@ -167,11 +176,21 @@ const http = createServer(async (req, res) => {
 const wss = new WebSocketServer({ server: http, maxPayload: SENSES_FRAME_BYTES + 64 })
 
 wss.on('connection', (ws, req) => {
-  // Auth gate: require valid session cookie (disabled in dev if SMTP not configured)
-  if (!requireAuth(req)) {
+  // Auth gate: verify cookie and extract email for per-user memory routing.
+  // Falls back to anonymous (null email) in dev when SMTP is not configured.
+  const authSession = verifySessionCookie(req.headers.cookie)
+  if (!authSession && requireAuth(req)) {
     ws.close(1008, 'unauthorized')
     return
   }
+
+  // Derive a stable, privacy-safe user key from the email (SHA-256, first 16 hex chars).
+  // Anonymous/dev sessions get key 'anon' and share the master personal files.
+  const userKey = authSession?.email
+    ? createHash('sha256').update(authSession.email.toLowerCase()).digest('hex').slice(0, 16)
+    : 'anon'
+  const userDir = join(USERS_DIR, userKey)
+  if (authSession?.email) mkdirSync(userDir, { recursive: true })
 
   // Extract real IP (CF tunnel adds CF-Connecting-IP header)
   const ip = req.headers['cf-connecting-ip']
@@ -196,17 +215,20 @@ wss.on('connection', (ws, req) => {
   const socketPath = join(runtimeDir, 'net.sock')
   mkdirSync(runtimeDir, { recursive: true })
 
-  // Seed new session: copy all checkpoint files the body reads on startup.
-  // This lets the body start with established predictor weights, vital reserve,
-  // familiar-object sediment, and self-model rather than cold-starting from zero.
+  // Seed new session:
+  //   learned_bias.bin  ← master (shared general experience, best available)
+  //   personal files    ← user's own dir first, fallback to master runtime
+  //   This way the body starts with its general skills AND remembers this user.
   const SEED_FILES = [
-    ['learned_bias.bin',      join(MASTER_RUNTIME, 'learned_bias.bin')],
-    ['vital_core.bin',        join(MASTER_RUNTIME, 'vital_core.bin')],
-    ['familiar_objects.bin',  join(MASTER_RUNTIME, 'familiar_objects.bin')],
-    ['self_model.bin',        join(MASTER_RUNTIME, 'self_model.bin')],
+    ['learned_bias.bin', existsSync(MASTER_BIAS)
+      ? MASTER_BIAS
+      : join(MASTER_RUNTIME, 'learned_bias.bin')],
   ]
-  // Legacy path: also try the flat master_learned_bias.bin if present
-  if (existsSync(MASTER_BIAS)) SEED_FILES[0][1] = MASTER_BIAS
+  for (const f of PERSONAL_FILES) {
+    const fromUser   = join(userDir, f)
+    const fromMaster = join(MASTER_RUNTIME, f)
+    SEED_FILES.push([f, existsSync(fromUser) ? fromUser : fromMaster])
+  }
   for (const [dst, src] of SEED_FILES) {
     if (existsSync(src)) {
       try { copyFileSync(src, join(runtimeDir, dst)) } catch { }
@@ -224,6 +246,7 @@ wss.on('connection', (ws, req) => {
     process:    child,
     socketPath,
     runtimeDir,
+    userDir,
     startedAt:  Date.now(),
   }
   activeSessions.set(sessionId, entry)
@@ -341,7 +364,19 @@ wss.on('connection', (ws, req) => {
     setTimeout(() => {
       child.kill('SIGTERM')
       setTimeout(() => {
+        // Save personal memory files back to user's persistent dir BEFORE any cleanup.
+        // These are never merged into master — they belong exclusively to this user.
+        if (existsSync(userDir)) {
+          for (const f of PERSONAL_FILES) {
+            const src = join(runtimeDir, f)
+            if (existsSync(src)) {
+              try { copyFileSync(src, join(userDir, f)) } catch { }
+            }
+          }
+        }
+
         // Evaluate session quality before collecting training result.
+        // Only learned_bias.bin goes to the pool — general experience, no personal data.
         try {
           const result = evaluate_session({
             runtimeDir,
@@ -354,7 +389,7 @@ wss.on('connection', (ws, req) => {
           // else: session did not meet quality threshold — discard
         } catch { /* evaluation error: skip collection */ }
 
-        // Clean up session directory
+        // Clean up session directory (personal files already saved above)
         setTimeout(() => {
           try { rmSync(runtimeDir, { recursive: true, force: true }) } catch { }
         }, 1000)

@@ -107,7 +107,7 @@ function makeSessionCookie(email) {
   }
 }
 
-function verifySessionCookie(cookieHeader) {
+export function verifySessionCookie(cookieHeader) {
   if (!cookieHeader) return null
   const match = cookieHeader.match(new RegExp(`${COOKIE_NAME}=([^;]+)`))
   if (!match) return null
