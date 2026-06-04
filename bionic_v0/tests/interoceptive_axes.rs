@@ -9,8 +9,8 @@
 //! not value labels.
 
 use bionic_v0::{
-    AXIS_INTERO_BASE, AXIS_VIS_BASE, AXIS_CODE_BASE, AXIS_COUNT,
-    INTERO_AXES, CODE_AXES, VIB_BANDS, VIS_AXES,
+    AXIS_INTERO_BASE, AXIS_VIS_BASE, AXIS_CODE_BASE, AXIS_GAUSS_BASE, AXIS_COUNT,
+    INTERO_AXES, CODE_AXES, GAUSS_SUMMARY_AXES, VIB_BANDS, VIS_AXES,
     INTERO_RESERVE, INTERO_VITAL_ANXIETY, INTERO_PAIN,
     INTERO_SELF_COHERENCE, INTERO_AGENCY, INTERO_ATTACHMENT,
     INTERO_GAP_PRESSURE, INTERO_CLOSURE, INTERO_LEARNING_PROGRESS,
@@ -29,10 +29,12 @@ fn axis_ranges_are_non_overlapping_and_cover_axis_count() {
     assert_eq!(AXIS_INTERO_BASE, VIB_BANDS + VIS_AXES, "intero starts right after vision");
     // Interoception [AXIS_INTERO_BASE .. AXIS_CODE_BASE)
     assert_eq!(AXIS_CODE_BASE, VIB_BANDS + VIS_AXES + INTERO_AXES, "code axes start right after interoception");
-    // Code/digital  [AXIS_CODE_BASE .. AXIS_COUNT)
-    assert_eq!(AXIS_COUNT, VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES, "AXIS_COUNT = all four bands");
+    // Code/digital  [AXIS_CODE_BASE .. AXIS_GAUSS_BASE)
+    assert_eq!(AXIS_GAUSS_BASE, VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES, "gauss summary axes start right after code");
+    // Gaussian summary [AXIS_GAUSS_BASE .. AXIS_COUNT)
+    assert_eq!(AXIS_COUNT, VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES + GAUSS_SUMMARY_AXES, "AXIS_COUNT = all five bands");
     // No gap between bands
-    assert_eq!(AXIS_COUNT, 39, "expected 4+20+10+5=39 axes total");
+    assert_eq!(AXIS_COUNT, 41, "expected 4+20+10+5+2=41 axes total");
 }
 
 /// All ten interoceptive axis indices fall in [AXIS_INTERO_BASE, AXIS_COUNT).

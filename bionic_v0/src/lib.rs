@@ -148,7 +148,25 @@ pub const CODE_AXES: usize = 5;
 /// Normalization cap for CODE_SPAN axis. Byte lengths ≥ this value saturate to 1.0.
 pub const CODE_SPAN_MAX_BYTES: f64 = 65536.0;
 
-pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES; // 39
+// --- Phase 1 (keystone ①): Gaussian visual field summary axes ---
+// Two scalar summaries of the sparse Gaussian field, mirrored onto the unified
+// tier-0 axis stream so they are predicted, produce err, and enter the relation/
+// tower fabric — exactly as every other substrate signal does.
+//
+//   GAUSS_RECON_MSE   → mean-squared reconstruction residual (pre-update, this
+//                        tick). Falls as the field learns a stable scene; steady
+//                        high value signals that the field is overwhelmed or the
+//                        scene is too chaotic to fit.  This is the signal that
+//                        ⑤'s encoder-layer probe reads.
+//   GAUSS_ACTIVE_FRAC → active_count / GAUSS_CAP, normalized to [0,1].
+//                        Tracks sparsity health: near 0 = almost nothing active
+//                        (scene absent / all died), near 1 = pool nearly full.
+pub const AXIS_GAUSS_BASE: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES; // 39
+pub const GAUSS_RECON_MSE_AXIS: usize  = AXIS_GAUSS_BASE + 0;
+pub const GAUSS_ACTIVE_FRAC_AXIS: usize = AXIS_GAUSS_BASE + 1;
+pub const GAUSS_SUMMARY_AXES: usize = 2;
+
+pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES + GAUSS_SUMMARY_AXES; // 41
 
 pub const AXIS_VIB: usize = 0;
 pub const AXIS_SYNTH: usize = 0; // retained for backward compat
@@ -486,7 +504,11 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 /// v54: prediction_gap_slow added to SelfDevelopmentState — two-timescale noise
 /// rejection for INTERO_LEARNING_PROGRESS; probe drive rewired from raw surprise
 /// to learning progress.
-pub const SNAPSHOT_VERSION: u64 = 54;
+/// v55: Gaussian visual field (keystone ①) Phase 1 Stage B — GaussianField added
+/// to Viewport; two summary axes GAUSS_RECON_MSE / GAUSS_ACTIVE_FRAC (AXIS_COUNT
+/// 39→41) mirrored onto the unified tier-0 stream; adapter drives the field from
+/// real camera frames; body.rs is already wired through the adapter registry.
+pub const SNAPSHOT_VERSION: u64 = 55;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

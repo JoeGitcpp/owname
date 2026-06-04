@@ -588,6 +588,12 @@ impl ModalityAdapter for RealPhotAdapter {
             self.prev_region_brightness = new_brightness;
         }
 
+        // Phase 1 (keystone ①): drive the Gaussian visual field from this same
+        // frame. tick_gaussian_field runs one predictive-coding tick and mirrors
+        // GAUSS_RECON_MSE / GAUSS_ACTIVE_FRAC onto the unified tier-0 axis stream.
+        // Runs on every received frame, same tick as region_perception above.
+        vp.tick_gaussian_field(&frame, now_us);
+
         // Multi-region extraction. The first frame returns an empty Vec (no
         // diff target yet).
         //

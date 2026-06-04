@@ -1312,6 +1312,14 @@ pub struct Viewport {
     /// Updated each tick via the depth-observer update rule when
     /// translation_term is Some.  Cleared (observable=false) when still.
     pub depth_observer: RwLock<DepthObserver>,
+
+    // ── Phase 1 (keystone ①): sparse Gaussian visual field ───────────────────
+
+    /// Sparse anisotropic Gaussian visual field (derived layer, like object
+    /// slots). Driven each camera frame by `tick_gaussian_field`; summary
+    /// scalars mirrored onto GAUSS_RECON_MSE_AXIS / GAUSS_ACTIVE_FRAC_AXIS so
+    /// they are predicted, produce err, and enter the relation/tower fabric.
+    pub gaussian_field: RwLock<crate::phot_gaussian::GaussianField>,
 }
 
 impl Viewport {
@@ -1404,6 +1412,7 @@ impl Viewport {
             audio_raw: Arc::new(AudioRawBuffer::new()),
             efference_copy: RwLock::new(EfferenceCopyState::default()),
             depth_observer: RwLock::new(DepthObserver::default()),
+            gaussian_field: RwLock::new(crate::phot_gaussian::GaussianField::new()),
         }
     }
 
@@ -4404,5 +4413,36 @@ impl Viewport {
     pub fn tick_vocal_memory(&self, now_us: u64) {
         let mut mem = self.vocal_memory.write().unwrap();
         mem.tick_decay(now_us);
+    }
+
+    // ── Phase 1 (keystone ①): Gaussian visual field ──────────────────────────
+
+    /// Drive one predictive-coding tick of the Gaussian field from a camera
+    /// frame, then mirror the two summary scalars onto the unified tier-0 axis
+    /// stream.  Called by RealPhotAdapter::tick() with every received frame.
+    ///
+    /// DoD (b): GAUSS_RECON_MSE_AXIS and GAUSS_ACTIVE_FRAC_AXIS are pushed via
+    /// push_observation so they enter the same observed/predicted/err/prior fabric
+    /// as every other tier-0 axis.
+    pub fn tick_gaussian_field(
+        &self,
+        frame: &crate::phot_camera::CameraFrame,
+        now_us: u64,
+    ) {
+        let mse = {
+            let mut field = self.gaussian_field.write().unwrap();
+            field.tick_frame(frame)
+        };
+        let active_frac = {
+            let field = self.gaussian_field.read().unwrap();
+            field.active_count() as f64 / crate::phot_gaussian::GAUSS_CAP as f64
+        };
+        self.push_observation(crate::GAUSS_RECON_MSE_AXIS,   now_us, mse.clamp(0.0, 1.0));
+        self.push_observation(crate::GAUSS_ACTIVE_FRAC_AXIS, now_us, active_frac.clamp(0.0, 1.0));
+    }
+
+    /// Read a snapshot clone of the Gaussian field state (for observers / tests).
+    pub fn read_gaussian_field(&self) -> crate::phot_gaussian::GaussianField {
+        self.gaussian_field.read().unwrap().clone()
     }
 }
