@@ -276,6 +276,9 @@ pub const PHOT_BANDS: usize = 4;
 // --- Phase 4A: real PHOT ingress path ---
 pub mod phot_camera;
 
+// --- Phase 1 (keystone ①): sparse anisotropic Gaussian visual field ---
+pub mod phot_gaussian;
+
 // --- Language binding runtime maintenance ---
 pub const BINDING_REFRESH_HZ: u32 = 5;
 /// A trace with no updates for this long is considered stale for runtime
