@@ -187,6 +187,34 @@
   transform: scale(0.93);
 }
 
+/* ---- Perception hint (nudge toward motion) ---- */
+.commune__hint {
+  position: absolute;
+  bottom: 104px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  max-width: min(520px, 78vw);
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.7;
+  letter-spacing: 0.01em;
+  color: var(--ink-dim);
+  background: rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 14px;
+  padding: 9px 16px;
+  pointer-events: none;
+}
+@media (max-width: 480px) {
+  .commune__hint {
+    bottom: 200px;       /* lift clear of the self-view PiP */
+    max-width: 88vw;
+    font-size: 12px;
+  }
+}
+
 /* ---- Permission / error modals ---- */
 .commune__modal {
   position: absolute;

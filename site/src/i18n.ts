@@ -31,8 +31,8 @@ export const dict = {
   'commune.leave': { zh: '离开', en: 'Leave' },
   'commune.live': { zh: '在场', en: 'present' },
   'commune.hint': {
-    zh: '它在感知。移动、出声，看它如何回应。',
-    en: 'It is perceiving. Move, make sound, watch how it answers.',
+    zh: '它在感知。比起静止，它更能从运动里读懂世界——移动、出声，或拿手边的东西（比如手机）在镜头前缓缓挪动、转动、推远拉近。',
+    en: 'It is perceiving. It reads the world better from motion than stillness — move, make sound, or take something at hand (a phone, say) and slowly shift, turn, and move it near and far before the lens.',
   },
   'commune.mute': { zh: '静音', en: 'Mute' },
   'commune.unmute': { zh: '取消静音', en: 'Unmute' },

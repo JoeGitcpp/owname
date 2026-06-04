@@ -266,6 +266,11 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
         {camOff && <div className="commune__self-off-icon"><CamOffIcon /></div>}
       </div>
 
+      {/* Perception hint — nudge toward motion: depth & shape emerge from movement */}
+      {isLive && (
+        <p className="commune__hint fade-in">{t('commune.hint')}</p>
+      )}
+
       {/* Control bar */}
       {isLive && (
         <div className="commune__controls fade-in">
