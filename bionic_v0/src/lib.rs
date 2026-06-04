@@ -16,8 +16,6 @@ pub mod dual_drive;
 pub mod vocal_drive_field;
 pub mod allostatic_stability;
 pub mod auditory_visual;
-pub mod binary_character_ear;
-pub mod binary_character_mouth;
 pub mod clock;
 pub mod code_ingress;
 pub mod code_ingress_adapter;

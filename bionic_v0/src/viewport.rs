@@ -11,9 +11,6 @@ use crate::active_surface::ActiveSurfaceState;
 use crate::adaptive_stability::AdaptiveStabilityState;
 use crate::audio_raw::AudioRawBuffer;
 use crate::auditory_visual::{AuditoryVisualState, ChannelSample, ReturnSample};
-use crate::binary_character_ear::{
-    to_code_ingress_frame, BinaryCharacterBurstInput, BinaryCharacterEarState,
-};
 use crate::code_ingress::{CodeIngressFrameInput, CodeIngressState};
 use crate::evidence_tension::EvidenceTensionState;
 use crate::evolution_priors::BiasPriors;
@@ -1192,11 +1189,6 @@ pub struct Viewport {
     /// disturbances enter body time as numeric traces, not text meaning.
     pub code_ingress: RwLock<CodeIngressState>,
 
-    /// Body-side binary character ingress organ. This organ separates
-    /// concurrent byte-bearing fibers before they enter the lower code-ingress
-    /// trace substrate.
-    pub binary_character_ear: RwLock<BinaryCharacterEarState>,
-
     /// VPC contract trace substrate — timing / provenance only.
     /// Tracks publication and open-prediction metadata without altering
     /// observation truth or granting any ontological authority.
@@ -1353,7 +1345,6 @@ impl Viewport {
             active_surface: RwLock::new(ActiveSurfaceState::default()),
             language_binding: RwLock::new(LanguageBindingState::default()),
             code_ingress: RwLock::new(CodeIngressState::default()),
-            binary_character_ear: RwLock::new(BinaryCharacterEarState::default()),
             vpc_contract: RwLock::new(VpcContractState::default()),
             action_output: RwLock::new(ActionOutputState::default()),
             action_output_write_seq: AtomicU64::new(0),
@@ -2055,28 +2046,6 @@ impl Viewport {
 
     pub fn observe_code_ingress_frame(&self, input: CodeIngressFrameInput<'_>) {
         self.code_ingress.write().unwrap().observe_frame(input);
-    }
-
-    pub fn read_binary_character_ear(&self) -> BinaryCharacterEarState {
-        self.binary_character_ear.read().unwrap().clone()
-    }
-
-    pub fn observe_binary_character_burst(&self, input: BinaryCharacterBurstInput<'_>) {
-        let lane_id = {
-            let mut ear = self.binary_character_ear.write().unwrap();
-            ear.observe_burst(BinaryCharacterBurstInput {
-                fiber_id: input.fiber_id,
-                carrier_id: input.carrier_id,
-                t_start_us: input.t_start_us,
-                t_end_us: input.t_end_us,
-                bytes: input.bytes,
-                burst_energy: input.burst_energy,
-                framing_validity: input.framing_validity,
-            });
-            ear.active_lane_id
-        };
-
-        self.observe_code_ingress_frame(to_code_ingress_frame(lane_id, &input));
     }
 
     pub fn read_learned_bias(&self) -> LearnedBiasState {
