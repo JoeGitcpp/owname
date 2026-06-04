@@ -20,13 +20,11 @@ ssh $REMOTE "mkdir -p $DEPLOY_DIR/site/dist $DEPLOY_DIR/gateway $DEPLOY_DIR/scri
 
 # Static site
 rsync -az --delete "$ROOT/site/dist/"   "$REMOTE:$DEPLOY_DIR/site/dist/"
-# Gateway (security + server)
-rsync -az           "$ROOT/gateway/server.mjs" \
-                    "$ROOT/gateway/security.mjs" \
-                    "$ROOT/gateway/auth.mjs" \
-                    "$ROOT/gateway/training_pool.mjs" \
-                    "$ROOT/gateway/package.json" \
-                    "$REMOTE:$DEPLOY_DIR/gateway/"
+# Gateway — sync all .mjs modules (exclude test files) + package manifests
+rsync -az \
+  --exclude 'node_modules/' \
+  --exclude '*.test.mjs' \
+  "$ROOT/gateway/" "$REMOTE:$DEPLOY_DIR/gateway/"
 # Bionic source (for server-side compile)
 rsync -az --delete \
   --exclude target --exclude .git \

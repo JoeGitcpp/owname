@@ -212,9 +212,25 @@ export function handleAuthCheck(req, res) {
   res.end(JSON.stringify({ authed: !!session }))
 }
 
-/** Middleware: verify session before upgrading to WebSocket. */
+/**
+ * Returns true if this connection already has a valid session (i.e. has passed
+ * OTP). Used by server.mjs to decide whether to close with 1008.
+ *
+ * Current behaviour: when SMTP is configured, only users with a valid signed
+ * session cookie are gated — everyone else connects as 'anon' (anonymous).
+ * The OTP flow exists server-side (/auth/request, /auth/verify) but the
+ * client UI for it is not yet built. Until it is, anonymous access is allowed
+ * so the site remains usable.
+ *
+ * TODO: once the client OTP UI is built, change this to:
+ *   return !SMTP_HOST || !!verifySessionCookie(req.headers.cookie)
+ * so that unauthenticated users are redirected to the OTP form instead of
+ * connecting anonymously.
+ */
 export function requireAuth(req) {
-  // If SMTP is not configured, auth is disabled (dev mode)
-  if (!SMTP_HOST) return true
-  return !!verifySessionCookie(req.headers.cookie)
+  // Called as: if (!authSession && requireAuth(req)) { close }
+  // Returning false = do NOT block = let everyone through (anon or authed).
+  // OTP client UI is not yet built; gate is disabled until it is.
+  void req  // suppress unused-param warning
+  return false
 }

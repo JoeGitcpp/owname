@@ -33,11 +33,21 @@ import { createConnection } from 'node:net'
 import { spawn }            from 'node:child_process'
 import {
   readFileSync, existsSync, mkdirSync, rmSync, copyFileSync,
+  appendFileSync,
 }                           from 'node:fs'
 import { join, resolve }    from 'node:path'
 import { createReadStream } from 'node:fs'
 import { extname }          from 'node:path'
 import { createHash }       from 'node:crypto'
+
+// ── File logger (StandardOutput=null in systemd, so write to file) ────────────
+// Logs connection events, auth, body lifecycle. Never logs frame content.
+const LOG_FILE = join(new URL('.', import.meta.url).pathname, '../gateway.log')
+function glog(...args) {
+  const line = `[${new Date().toISOString()}] ${args.join(' ')}\n`
+  process.stderr.write(line)                 // → journalctl (StandardError=journal)
+  try { appendFileSync(LOG_FILE, line) } catch { } // → ~/aborn/gateway.log
+}
 
 import {
   validateFrame,
@@ -59,6 +69,16 @@ import {
   requireAuth,
   verifySessionCookie,
 } from './auth.mjs'
+import {
+  handlePhoneRequest,
+  handlePhoneVerify,
+  verifyPhoneCookie,
+} from './phone_auth.mjs'
+import { InstanceRegistry }        from './instance_registry.mjs'
+import { transition }               from './instance_lifecycle.mjs'
+import { ResourceGovernor }        from './resource_governor.mjs'
+import { MemoryStore }             from './memory_store.mjs'
+import { EphemeralSessionManager } from './ephemeral_session.mjs'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT             = parseInt(process.env.ABORN_PORT     || '3900',   10)
@@ -79,6 +99,11 @@ const MASTER_RUNTIME   = process.env.ABORN_RUNTIME     || resolve('../runtime')
 const USERS_DIR        = process.env.ABORN_USERS_DIR  || resolve('../user-memories')
 // Merge the pool into master every N minutes (0 = disable)
 const MERGE_INTERVAL_MIN = parseInt(process.env.ABORN_MERGE_MIN || '60', 10)
+// Persistent instances: max simultaneously active instances (hot-updatable via POST /admin/instances/limit)
+const INSTANCE_MAX          = parseInt(process.env.ABORN_INSTANCE_MAX   || '8',  10)
+// Ephemeral sessions: per-IP concurrent cap and idle timeout
+const EPHEMERAL_PERIP_MAX   = parseInt(process.env.ABORN_EPH_PERIP      || '3',  10)
+const EPHEMERAL_TIMEOUT_MIN = parseInt(process.env.ABORN_EPH_IDLE_MIN   || '30', 10)
 
 // Personal checkpoint files that belong to the user and must never be merged into master.
 const PERSONAL_FILES = ['familiar_objects.bin', 'vital_core.bin', 'self_model.bin']
@@ -90,6 +115,50 @@ mkdirSync(USERS_DIR,    { recursive: true })
 const rateLimiter = new RateLimiter({ maxPerMinute: RATE_PER_MIN, windowMs: 60_000 })
 const sessionGuard = new SessionGuard({ globalMax: GLOBAL_MAX, perIpMax: PER_IP_MAX })
 const idleTracker  = new IdleTracker({ idleMs: IDLE_MIN * 60_000 })
+
+// ── Instance management singletons ───────────────────────────────────────────
+const instanceRegistry = new InstanceRegistry()
+const resourceGovernor = new ResourceGovernor(INSTANCE_MAX)
+const memoryStore      = new MemoryStore(USERS_DIR)
+const ephemeralMgr     = new EphemeralSessionManager({
+  perIpMax:  EPHEMERAL_PERIP_MAX,
+  timeoutMs: EPHEMERAL_TIMEOUT_MIN * 60_000,
+})
+
+// ── Shared HTTP helpers ───────────────────────────────────────────────────────
+function readBody(req) {
+  return new Promise(resolve => {
+    let body = ''
+    req.on('data', c => body += c)
+    req.on('end', () => resolve(body))
+  })
+}
+
+function sendJson(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(data))
+}
+
+/** Extract the real client IP, honouring Cloudflare and standard proxy headers. */
+function clientIp(req) {
+  return req.headers['cf-connecting-ip']
+      || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+      || req.socket.remoteAddress
+      || 'unknown'
+}
+
+/**
+ * Resolve the caller's identity from their session cookies.
+ * Checks phone cookie first (new), then email cookie (legacy).
+ * Returns { key, type, value } or null.
+ */
+function resolveIdentity(req) {
+  const phone = verifyPhoneCookie(req.headers.cookie)
+  if (phone?.phone) return { key: `phone:${phone.phone}`, type: 'phone', value: phone.phone }
+  const email = verifySessionCookie(req.headers.cookie)
+  if (email?.email) return { key: `email:${email.email}`, type: 'email', value: email.email }
+  return null
+}
 
 // Periodic cleanup: prune rate-limiter + close idle sessions
 setInterval(() => {
@@ -131,15 +200,121 @@ const activeSessions = new Map()
 const http = createServer(async (req, res) => {
   const url = req.url.split('?')[0]
 
-  // Auth routes
-  if (url === '/auth/request' && req.method === 'POST') {
-    return handleAuthRequest(req, res)
+  // ── Auth routes ─────────────────────────────────────────────────────────────
+  if (url === '/auth/request' && req.method === 'POST') return handleAuthRequest(req, res)
+  if (url === '/auth/verify'  && req.method === 'POST') return handleAuthVerify(req, res)
+  if (url === '/auth/check')                            return handleAuthCheck(req, res)
+  if (url === '/auth/request-phone' && req.method === 'POST') return handlePhoneRequest(req, res)
+  if (url === '/auth/verify-phone'  && req.method === 'POST') return handlePhoneVerify(req, res)
+
+  // ── Instance routes (/instances) ─────────────────────────────────────────
+  // GET /instances/me — return caller's current instance (null if none)
+  if (url === '/instances/me' && req.method === 'GET') {
+    const identity = resolveIdentity(req)
+    if (!identity) return sendJson(res, 401, { error: 'unauthorized' })
+    const instance = instanceRegistry.getByIdentity(identity.key)
+    return sendJson(res, 200, { instance: instance ?? null })
   }
-  if (url === '/auth/verify' && req.method === 'POST') {
-    return handleAuthVerify(req, res)
+
+  // POST /instances — create a persistent instance for the authenticated user
+  if (url === '/instances' && req.method === 'POST') {
+    const identity = resolveIdentity(req)
+    if (!identity) return sendJson(res, 401, { error: 'unauthorized' })
+
+    if (!resourceGovernor.canStart()) {
+      return sendJson(res, 503, {
+        error:   'capacity_full',
+        message: '当前实例容量已满，请稍后重试',
+        queued:  resourceGovernor.suspended(),
+      })
+    }
+    try {
+      const inst     = instanceRegistry.create(identity.key)
+      const newState = transition(inst.state, 'verify')   // pending_verification → running
+      instanceRegistry.setState(inst.id, newState)
+      resourceGovernor.onStart(inst.id)
+      glog(`[instance] created: id=${inst.id} identity=${identity.key}`)
+      return sendJson(res, 201, { instance: instanceRegistry.get(inst.id) })
+    } catch (e) {
+      if (/already/i.test(e.message)) return sendJson(res, 409, { error: 'instance_exists' })
+      throw e
+    }
   }
-  if (url === '/auth/check') {
-    return handleAuthCheck(req, res)
+
+  // DELETE /instances/me — destroy the caller's instance and free its slot
+  if (url === '/instances/me' && req.method === 'DELETE') {
+    const identity = resolveIdentity(req)
+    if (!identity) return sendJson(res, 401, { error: 'unauthorized' })
+    const inst = instanceRegistry.getByIdentity(identity.key)
+    if (!inst) return sendJson(res, 404, { error: 'no_instance' })
+
+    const nextToResume = resourceGovernor.onDestroy(inst.id)
+    instanceRegistry.destroy(inst.id)
+    if (nextToResume) {
+      // Resume oldest queued instance — bring it back to running
+      try { instanceRegistry.setState(nextToResume, 'running') } catch { }
+      glog(`[instance] resumed from queue: id=${nextToResume}`)
+    }
+    glog(`[instance] destroyed: id=${inst.id} identity=${identity.key}`)
+    return sendJson(res, 200, { ok: true })
+  }
+
+  // ── Admin: hot-update the instance cap ──────────────────────────────────
+  // POST /admin/instances/limit  { limit: number }
+  // Protected by ABORN_ADMIN_SECRET header.
+  if (url === '/admin/instances/limit' && req.method === 'POST') {
+    const secret = process.env.ABORN_ADMIN_SECRET
+    if (!secret || req.headers['x-admin-secret'] !== secret) {
+      return sendJson(res, 403, { error: 'forbidden' })
+    }
+    const body = await readBody(req)
+    let limit
+    try { limit = parseInt(JSON.parse(body).limit, 10) } catch { }
+    if (!Number.isInteger(limit) || limit < 0) {
+      return sendJson(res, 400, { error: 'invalid_limit' })
+    }
+    const toSuspend = resourceGovernor.setLimit(limit)
+    for (const id of toSuspend) {
+      try { instanceRegistry.setState(id, 'suspended') } catch { }
+    }
+    glog(`[admin] instance limit updated: ${limit} (suspended ${toSuspend.length})`)
+    return sendJson(res, 200, {
+      ok:        true,
+      limit:     resourceGovernor.limit,
+      running:   resourceGovernor.running(),
+      suspended: resourceGovernor.suspended(),
+    })
+  }
+
+  // ── Session routes (/sessions) — ephemeral, no auth required ─────────────
+  // POST /sessions — create an ephemeral session slot
+  if (url === '/sessions' && req.method === 'POST') {
+    const ip = clientIp(req)
+    try {
+      const sessionId = ephemeralMgr.create(ip)
+      return sendJson(res, 201, { sessionId })
+    } catch {
+      return sendJson(res, 429, {
+        error:   'session_limit',
+        message: '当前临时会话数已达上限',
+      })
+    }
+  }
+
+  // DELETE /sessions/:id — explicitly destroy an ephemeral session
+  if (url.startsWith('/sessions/') && req.method === 'DELETE') {
+    const sessionId = url.slice('/sessions/'.length)
+    if (sessionId) ephemeralMgr.destroy(sessionId)
+    return sendJson(res, 200, { ok: true })
+  }
+
+  // GET /sessions/stats — diagnostic (active count, per-IP)
+  if (url === '/sessions/stats' && req.method === 'GET') {
+    const ip = clientIp(req)
+    return sendJson(res, 200, {
+      total:     ephemeralMgr.size(),
+      forThisIp: ephemeralMgr.countForIp(ip),
+    })
   }
 
   let path = url
@@ -173,30 +348,51 @@ const http = createServer(async (req, res) => {
 })
 
 // ── WebSocket server ──────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ server: http, maxPayload: SENSES_FRAME_BYTES + 64 })
+const wss = new WebSocketServer({
+  server: http,
+  maxPayload: SENSES_FRAME_BYTES + 64,
+  // Cloudflare tunnel strips WebSocket extension headers (permessage-deflate),
+  // causing the binary XOR hello to arrive garbled at the client.
+  // Disable compression so all frames are sent as raw binary.
+  perMessageDeflate: false,
+})
 
 wss.on('connection', (ws, req) => {
-  // Auth gate: verify cookie and extract email for per-user memory routing.
-  // Falls back to anonymous (null email) in dev when SMTP is not configured.
-  const authSession = verifySessionCookie(req.headers.cookie)
-  if (!authSession && requireAuth(req)) {
+  // ── Identity resolution: phone cookie > email cookie > anon ──────────────
+  const identity    = resolveIdentity(req)
+  const authSession = verifySessionCookie(req.headers.cookie)  // keep for legacy check
+
+  if (!identity && !authSession && requireAuth(req)) {
+    glog('[ws] rejected: no valid session — auth required')
     ws.close(1008, 'unauthorized')
     return
   }
+  glog(`[ws] connected: user=${identity?.value ?? authSession?.email ?? 'anon'}`)
 
-  // Derive a stable, privacy-safe user key from the email (SHA-256, first 16 hex chars).
-  // Anonymous/dev sessions get key 'anon' and share the master personal files.
-  const userKey = authSession?.email
-    ? createHash('sha256').update(authSession.email.toLowerCase()).digest('hex').slice(0, 16)
+  // ── User directory for binary personal files ──────────────────────────────
+  // New: keyed by SHA-256(identityValue)[0:16] for both email and phone.
+  // Legacy email sessions continue to use SHA-256(email) — same derivation.
+  const identityValue = identity?.value ?? authSession?.email ?? null
+  const userKey = identityValue
+    ? createHash('sha256').update(identityValue.toLowerCase()).digest('hex').slice(0, 16)
     : 'anon'
   const userDir = join(USERS_DIR, userKey)
-  if (authSession?.email) mkdirSync(userDir, { recursive: true })
+  if (identityValue) mkdirSync(userDir, { recursive: true })
 
-  // Extract real IP (CF tunnel adds CF-Connecting-IP header)
-  const ip = req.headers['cf-connecting-ip']
-           || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-           || req.socket.remoteAddress
-           || 'unknown'
+  // ── Ephemeral session registration (anon only) ───────────────────────────
+  // Persistent-instance connections are governed by instanceRegistry + resourceGovernor.
+  // Anonymous connections use EphemeralSessionManager to enforce per-IP cap and idle sweep.
+  let ephemeralId = null
+  const ip = clientIp(req)
+
+  if (!identity) {
+    try {
+      ephemeralId = ephemeralMgr.create(ip)
+    } catch {
+      ws.close(1013, 'ephemeral-capacity')
+      return
+    }
+  }
 
   // Layer 2: rate limit WS upgrades per IP
   if (!rateLimiter.allow(ip)) {
@@ -236,6 +432,8 @@ wss.on('connection', (ws, req) => {
   }
 
   // Spawn body in headless mode
+  const modeLabel = identity ? `persistent:${identity.key}` : 'ephemeral'
+  glog(`[body] spawn: session=${sessionId} mode=${modeLabel}`)
   const child = spawn(BODY_BIN, [runtimeDir, '--headless', socketPath], {
     stdio: 'ignore',
     detached: false,
@@ -336,7 +534,10 @@ wss.on('connection', (ws, req) => {
 
   // Layer 4 + 5: validate every incoming frame; track idle
   ws.on('message', (data, isBinary) => {
-    if (!isBinary) { ws.close(1003, 'text-not-allowed'); return }
+    if (!isBinary) {
+      glog(`[ws] close: session=${sessionId} reason=text-not-allowed`)
+      ws.close(1003, 'text-not-allowed'); return
+    }
 
     const raw = Buffer.isBuffer(data) ? data : Buffer.from(data)
     // Decode XOR obfuscation before validation and forwarding
@@ -344,13 +545,22 @@ wss.on('connection', (ws, req) => {
 
     if (!validateFrame(buf)) {
       badFrames++
-      if (badFrames >= MAX_BAD) ws.close(1008, 'bad-frames')
+      if (badFrames === 1) glog(`[ws] bad-frame: session=${sessionId} size=${raw.length} tag=0x${buf[0]?.toString(16)}`)
+      if (badFrames >= MAX_BAD) {
+        glog(`[ws] close: session=${sessionId} reason=bad-frames count=${badFrames}`)
+        ws.close(1008, 'bad-frames')
+      }
       return
     }
     badFrames = 0
     idleTracker.touch(sessionId)
+    if (ephemeralId) ephemeralMgr.heartbeat(ephemeralId)   // reset idle timer for ephemeral
 
     try { bodySocket?.write(buf) } catch { /* body socket closed */ }
+  })
+
+  ws.on('close', (code, reason) => {
+    glog(`[ws] closed: session=${sessionId} code=${code} reason=${reason?.toString()||''}`)
   })
 
   const cleanup = () => {
@@ -359,13 +569,15 @@ wss.on('connection', (ws, req) => {
     idleTracker.remove(sessionId)
     sessionGuard.release(sessionId)
     activeSessions.delete(sessionId)
+    if (ephemeralId) ephemeralMgr.destroy(ephemeralId)  // free per-IP slot immediately
 
     // Give body 3 s to write checkpoint, then evaluate and collect.
     setTimeout(() => {
       child.kill('SIGTERM')
       setTimeout(() => {
         // Save personal memory files back to user's persistent dir BEFORE any cleanup.
-        // These are never merged into master — they belong exclusively to this user.
+        // Persistent-instance sessions save back to their named userDir.
+        // Ephemeral sessions write to 'anon' dir which is the shared fallback.
         if (existsSync(userDir)) {
           for (const f of PERSONAL_FILES) {
             const src = join(runtimeDir, f)
@@ -399,15 +611,14 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', cleanup)
   ws.on('error', () => ws.close())
-  child.on('exit', () => {
+  child.on('exit', (code) => {
+    glog(`[body] exit: session=${sessionId} code=${code}`)
     activeSessions.delete(sessionId)
     if (ws.readyState === 1) ws.close(1000)
   })
 })
 
 http.listen(PORT, '127.0.0.1', () => {
-  // Bind to 127.0.0.1 only — CF tunnel is the only way in.
-  // No direct internet access to this port.
-  console.log(`[aborn-gateway] :${PORT} bound to 127.0.0.1 (tunnel only)`)
-  console.log(`[aborn-gateway] body=${BODY_BIN} sessions=${SESSIONS_DIR}`)
+  glog(`[aborn-gateway] :${PORT} bound to 127.0.0.1 (tunnel only)`)
+  glog(`[aborn-gateway] body=${BODY_BIN} sessions=${SESSIONS_DIR}`)
 })
