@@ -41,9 +41,10 @@ impl Default for VocalOrganState {
             pitch_tension: 0.0,
             resonance_position: 0.0,
             noise_mix: 0.0,
-            formant_f1: 500.0,
-            formant_f2: 1500.0,
-            formant_f3: 2500.0,
+            // Infant vocal tract defaults (shorter tract → higher formants)
+            formant_f1: 800.0,
+            formant_f2: 2500.0,
+            formant_f3: 4000.0,
             voiced_ratio: 0.0,
             breath_noise_ratio: 0.0,
             envelope_attack: 0.0,

@@ -13,12 +13,15 @@
   user-select: none;
 }
 
-/* AI modality canvas — fills the whole screen like the remote party */
-.commune__field {
+/* Surface canvas — raw body pixel output, fills the screen */
+.commune__surface {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #000;
 }
 
 /* ---- Remote party label (top-left, like FaceTime name) ---- */

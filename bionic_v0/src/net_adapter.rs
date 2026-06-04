@@ -47,7 +47,10 @@ const BANDS: usize = 12;
 const FRAME_BYTES: usize = 1 + (2 + BANDS) * 4 + GRID_W * GRID_H * 4;
 
 // ── Output frame constants ───────────────────────────────────────────────────
-const TAG_VOCAL: u8 = 0x02;
+const TAG_VOCAL: u8   = 0x02;
+const TAG_SURFACE: u8 = 0x04;
+const SURF_W: usize   = 160;
+const SURF_H: usize   = 90;
 
 // ── Shared latest-senses buffer ──────────────────────────────────────────────
 #[derive(Clone)]
@@ -247,7 +250,7 @@ pub fn sample_vocal_pcm(vp: &Arc<Viewport>) -> Vec<f32> {
     if organ.breath_drive < 0.01 {
         return vec![0.0f32; n];
     }
-    let pitch = 100.0 + organ.pitch_tension as f64 * 400.0;
+    let pitch = 280.0 + organ.pitch_tension as f64 * 420.0;
     let resonance = organ.resonance_position as f64 * 3.0;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -258,4 +261,42 @@ pub fn sample_vocal_pcm(vp: &Arc<Viewport>) -> Vec<f32> {
         out.push((organ.breath_drive as f64 * f).clamp(-1.0, 1.0) as f32);
     }
     out
+}
+
+// ── Surface pixel sender ─────────────────────────────────────────────────────
+/// Maintains trail history across calls and sends rendered surface RGBA frames
+/// (tag 0x04) to the gateway via the same vocal TX socket.
+pub struct SurfaceSender {
+    history: crate::surface_history::SurfaceHistory,
+}
+
+impl SurfaceSender {
+    pub fn new() -> Self {
+        Self { history: crate::surface_history::SurfaceHistory::new(16) }
+    }
+
+    pub fn send(&mut self, snap_path: &std::path::Path, vocal_tx: &Arc<Mutex<Option<UnixStream>>>) {
+        let snap = match crate::snapshot::read_snapshot(snap_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let frame = crate::surface_projection::project_surface_frame(&snap);
+        self.history.update(&frame);
+        let trails = self.history.render_trails();
+        let config = crate::surface_render::RenderConfig::new(SURF_W, SURF_H);
+        let pixels = crate::surface_render::render_surface_frame(&frame, &trails, config);
+
+        let mut guard = vocal_tx.lock().unwrap();
+        let stream = match guard.as_mut() { Some(s) => s, None => return };
+
+        let mut buf = Vec::with_capacity(5 + SURF_W * SURF_H * 4);
+        buf.push(TAG_SURFACE);
+        buf.extend_from_slice(&(SURF_W as u16).to_le_bytes());
+        buf.extend_from_slice(&(SURF_H as u16).to_le_bytes());
+        for px in &pixels { buf.extend_from_slice(px); }
+
+        if stream.write_all(&buf).is_err() {
+            *guard = None;
+        }
+    }
 }

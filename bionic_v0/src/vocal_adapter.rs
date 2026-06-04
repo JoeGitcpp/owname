@@ -17,7 +17,8 @@ pub fn sample_vocal_waveform(vp: &Arc<Viewport>, n_samples: usize) -> Vec<f64> {
         return samples;
     }
 
-    let pitch = 100.0 + organ.pitch_tension * 400.0;
+    // Infant voice range: 280–700 Hz (tension=0.35 → ~427 Hz, newborn-like)
+    let pitch = 280.0 + organ.pitch_tension * 420.0;
     let resonance = organ.resonance_position * 3.0;
 
     for i in 0..n_samples {
@@ -128,7 +129,7 @@ fn next_wave_sample(vp: &Arc<Viewport>, phase: &mut f64, sample_rate_hz: f64) ->
         return next_wave_sample_v2(&organ, phase, sample_rate_hz);
     }
 
-    let pitch = 100.0 + organ.pitch_tension * 400.0;
+    let pitch = 280.0 + organ.pitch_tension * 420.0;
     let resonance = organ.resonance_position * 3.0;
     let phase_step = pitch / sample_rate_hz;
     *phase = (*phase + phase_step).fract();
@@ -142,7 +143,8 @@ fn next_wave_sample(vp: &Arc<Viewport>, phase: &mut f64, sample_rate_hz: f64) ->
 }
 
 fn next_wave_sample_v2(organ: &crate::vocal_organ::VocalOrganState, phase: &mut f64, sample_rate_hz: f64) -> f32 {
-    let pitch = 80.0 + organ.pitch_tension * 420.0;
+    // Infant formant range: 300–700 Hz fundamental
+    let pitch = 300.0 + organ.pitch_tension * 400.0;
     let phase_step = pitch / sample_rate_hz;
     *phase = (*phase + phase_step).fract();
 

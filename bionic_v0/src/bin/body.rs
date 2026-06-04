@@ -406,6 +406,17 @@ fn main() {
         h_audio
     };
 
+    // Headless-only: render surface pixels and push to gateway at 10 Hz.
+    // In hardware mode the VocalTx slot is always None so send() is a no-op.
+    let h_surface = {
+        let vt_surf = net_vocal_tx.clone();
+        let snap_path_surf = paths.final_path.clone();
+        let mut sender = bionic_v0::net_adapter::SurfaceSender::new();
+        spawn_ticker(30, stop.clone(), move |_| {
+            sender.send(&snap_path_surf, &vt_surf);
+        })
+    };
+
     let h_learned_bias_checkpoint = {
         let vp_checkpoint = vp.clone();
         let paths_checkpoint = learned_bias_paths.clone();
@@ -455,6 +466,7 @@ fn main() {
         }
     }
 
+    let _ = h_surface.join();
     let _ = h_adapters.join();
     let _ = h_pred.join();
     let _ = h_hl.join();

@@ -71,6 +71,7 @@ const MAX_SESSION_MIN  = parseInt(process.env.ABORN_MAX_MIN  || '30',     10)
 // Training pool: where collected learned_bias files go, and where the master lives
 const POOL_DIR         = process.env.ABORN_POOL_DIR  || resolve('../training_pool')
 const MASTER_BIAS      = process.env.ABORN_MASTER_BIAS || resolve('../master_learned_bias.bin')
+const MASTER_RUNTIME   = process.env.ABORN_RUNTIME     || resolve('../runtime')
 // Merge the pool into master every N minutes (0 = disable)
 const MERGE_INTERVAL_MIN = parseInt(process.env.ABORN_MERGE_MIN || '60', 10)
 
@@ -195,10 +196,21 @@ wss.on('connection', (ws, req) => {
   const socketPath = join(runtimeDir, 'net.sock')
   mkdirSync(runtimeDir, { recursive: true })
 
-  // Seed new session with master learned_bias (distributed training inheritance).
-  // Body loads learned_bias.bin from its runtime dir on startup.
-  if (existsSync(MASTER_BIAS)) {
-    try { copyFileSync(MASTER_BIAS, join(runtimeDir, 'learned_bias.bin')) } catch { }
+  // Seed new session: copy all checkpoint files the body reads on startup.
+  // This lets the body start with established predictor weights, vital reserve,
+  // familiar-object sediment, and self-model rather than cold-starting from zero.
+  const SEED_FILES = [
+    ['learned_bias.bin',      join(MASTER_RUNTIME, 'learned_bias.bin')],
+    ['vital_core.bin',        join(MASTER_RUNTIME, 'vital_core.bin')],
+    ['familiar_objects.bin',  join(MASTER_RUNTIME, 'familiar_objects.bin')],
+    ['self_model.bin',        join(MASTER_RUNTIME, 'self_model.bin')],
+  ]
+  // Legacy path: also try the flat master_learned_bias.bin if present
+  if (existsSync(MASTER_BIAS)) SEED_FILES[0][1] = MASTER_BIAS
+  for (const [dst, src] of SEED_FILES) {
+    if (existsSync(src)) {
+      try { copyFileSync(src, join(runtimeDir, dst)) } catch { }
+    }
   }
 
   // Spawn body in headless mode
@@ -256,7 +268,15 @@ wss.on('connection', (ws, req) => {
             const n    = vocalBuf.readUInt16LE(1)
             const need = 3 + n * 4
             if (vocalBuf.length < need) break
-            // XOR-obfuscate the frame before sending to browser
+            if (ws.readyState === 1) ws.send(XorCipher.apply(vocalBuf.slice(0, need), xorKey))
+            vocalBuf = vocalBuf.slice(need)
+          } else if (tag === 0x04) {
+            // Surface pixel frame: [0x04][w:u16le][h:u16le][w*h*4 RGBA bytes]
+            if (vocalBuf.length < 5) break
+            const w    = vocalBuf.readUInt16LE(1)
+            const h    = vocalBuf.readUInt16LE(3)
+            const need = 5 + w * h * 4
+            if (vocalBuf.length < need) break
             if (ws.readyState === 1) ws.send(XorCipher.apply(vocalBuf.slice(0, need), xorKey))
             vocalBuf = vocalBuf.slice(need)
           } else {

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { useI18n } from '../i18n'
-import { Field } from '../components/Field'
 import { Perception } from '../lib/perception'
 import { acquireSenses, releaseStream, type MediaResult } from '../lib/media'
 import { idleSenses } from '../lib/idle'
@@ -9,8 +8,8 @@ import './commune.css'
 // ── Body bridge ───────────────────────────────────────────────────────────────
 // Connects to aborn-gateway via WebSocket. On each Perception.read() tick,
 // packs the Senses struct into a compact binary frame (0x01) and sends it.
-// Receives vocal PCM frames (0x02) and plays them via Web Audio.
-// Protocol is binary only — no field names, no JSON.
+// Receives vocal PCM (0x02) and plays it; receives surface pixels (0x04)
+// and draws them to the surface canvas.
 
 const GATEWAY_WS = (() => {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -19,10 +18,10 @@ const GATEWAY_WS = (() => {
 
 const TAG_SENSES = 0x01
 const TAG_VOCAL  = 0x02
+const TAG_SURFACE = 0x04
 const BANDS      = 12
 const GW         = 32
 const GH         = 24
-// Frame size: 1 + (2+BANDS)*4 + GW*GH*4 = 3137 bytes
 const FRAME_BYTES = 1 + (2 + BANDS) * 4 + GW * GH * 4
 
 function packSenses(s: import('../lib/perception').Senses): ArrayBuffer {
@@ -37,37 +36,38 @@ function packSenses(s: import('../lib/perception').Senses): ArrayBuffer {
   }
   view.setFloat32(off, s.motion, true); off += 4
   view.setFloat32(off, s.luma,   true); off += 4
-  // grid: resize s.grid (s.gw × s.gh) to GW × GH by nearest-neighbour
   for (let gy = 0; gy < GH; gy++) {
     for (let gx = 0; gx < GW; gx++) {
       const sx = Math.floor(gx * s.gw / GW)
       const sy = Math.floor(gy * s.gh / GH)
-      const v  = s.grid[sy * s.gw + sx] ?? 0
-      view.setFloat32(off, v, true); off += 4
+      view.setFloat32(off, s.grid[sy * s.gw + sx] ?? 0, true); off += 4
     }
   }
   return buf
 }
 
-// XOR helpers (mirrors server-side XorCipher, no import needed — tiny inline)
 function xorApply(data: Uint8Array, key: Uint8Array): Uint8Array {
   const out = new Uint8Array(data.length)
   for (let i = 0; i < data.length; i++) out[i] = data[i] ^ key[i % 4]
   return out
 }
 
-function useBodyBridge(running: boolean, getSenses: () => import('../lib/perception').Senses) {
-  const wsRef       = useRef<WebSocket | null>(null)
-  const audioCtxRef = useRef<AudioContext | null>(null)
-  const nextTimeRef = useRef(0)
-  const xorKeyRef   = useRef<Uint8Array | null>(null)   // set after hello frame
+function useBodyBridge(
+  running: boolean,
+  getSenses: () => import('../lib/perception').Senses,
+  surfaceRef: React.RefObject<HTMLCanvasElement | null>,
+) {
+  const wsRef        = useRef<WebSocket | null>(null)
+  const audioCtxRef  = useRef<AudioContext | null>(null)
+  const nextTimeRef  = useRef(0)
+  const xorKeyRef    = useRef<Uint8Array | null>(null)
 
   useEffect(() => {
     if (!running) return
     const ws = new WebSocket(GATEWAY_WS)
     ws.binaryType = 'arraybuffer'
     wsRef.current  = ws
-    xorKeyRef.current = null  // reset key on new connection
+    xorKeyRef.current = null
 
     const Ctor = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
     const actx = new Ctor()
@@ -76,18 +76,14 @@ function useBodyBridge(running: boolean, getSenses: () => import('../lib/percept
 
     ws.onmessage = (ev: MessageEvent) => {
       if (!(ev.data instanceof ArrayBuffer)) return
-      const raw  = new Uint8Array(ev.data)
-      const key  = xorKeyRef.current
+      const raw = new Uint8Array(ev.data)
+      const key = xorKeyRef.current
 
-      // First message is the hello frame: [0x00][k0][k1][k2][k3]
       if (!key) {
-        if (raw.length === 5 && raw[0] === 0x00) {
-          xorKeyRef.current = raw.slice(1, 5)
-        }
+        if (raw.length === 5 && raw[0] === 0x00) xorKeyRef.current = raw.slice(1, 5)
         return
       }
 
-      // Decode XOR then dispatch by tag
       const buf  = xorApply(raw, key)
       const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
       const tag  = view.getUint8(0)
@@ -105,15 +101,36 @@ function useBodyBridge(running: boolean, getSenses: () => import('../lib/percept
         const when = Math.max(now, nextTimeRef.current)
         src.start(when)
         nextTimeRef.current = when + abuf.duration
+
+      } else if (tag === TAG_SURFACE) {
+        // Raw surface pixels from surface_render.rs — apply brightness boost so
+        // low-drive states (pixel values 1-10/255) are visible at full screen scale.
+        if (buf.byteLength < 5) return
+        const w = view.getUint16(1, true)
+        const h = view.getUint16(3, true)
+        if (buf.byteLength < 5 + w * h * 4) return
+        const cv = surfaceRef.current
+        if (!cv) return
+        const ctx2d = cv.getContext('2d')
+        if (!ctx2d) return
+        if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h }
+        const src = new Uint8Array(buf.buffer, buf.byteOffset + 5, w * h * 4)
+        const img = ctx2d.createImageData(w, h)
+        const GAIN = 6  // lift low-drive pixels; saturates naturally at 255
+        for (let i = 0; i < src.length; i += 4) {
+          img.data[i]   = Math.min(255, src[i]   * GAIN)
+          img.data[i+1] = Math.min(255, src[i+1] * GAIN)
+          img.data[i+2] = Math.min(255, src[i+2] * GAIN)
+          img.data[i+3] = 255
+        }
+        ctx2d.putImageData(img, 0, 0)
       }
-      // 0x03 state frames: future — feed into Modality
     }
 
-    // Send XOR-obfuscated Senses frames at ~20 Hz once key is received.
     const interval = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return
       const key = xorKeyRef.current
-      if (!key) return   // wait for hello
+      if (!key) return
       const plain = new Uint8Array(packSenses(getSenses()))
       ws.send(xorApply(plain, key))
     }, 50)
@@ -153,10 +170,11 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
   const [muted, setMuted] = useState(false)
   const [camOff, setCamOff] = useState(false)
 
-  const perceptionRef = useRef<Perception | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
-  const selfVideoRef = useRef<HTMLVideoElement>(null)
-  const fallback = useRef(idleSenses())
+  const perceptionRef  = useRef<Perception | null>(null)
+  const streamRef      = useRef<MediaStream | null>(null)
+  const selfVideoRef   = useRef<HTMLVideoElement>(null)
+  const surfaceRef     = useRef<HTMLCanvasElement>(null)
+  const fallback       = useRef(idleSenses())
 
   const timer = useCallTimer(phase.k === 'live')
 
@@ -168,16 +186,12 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
       return
     }
     streamRef.current = res.stream
-
-    // Self-view: attach stream to the display <video>
     if (selfVideoRef.current) {
       selfVideoRef.current.srcObject = res.stream
       selfVideoRef.current.muted = true
       selfVideoRef.current.playsInline = true
-      void selfVideoRef.current.play().catch(() => {/* autoplay deferred */})
+      void selfVideoRef.current.play().catch(() => {})
     }
-
-    // Perception: also uses the same stream for analysis
     const perc = new Perception()
     await perc.attach(res.stream)
     perc.resumeAudio()
@@ -226,22 +240,18 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
     setCamOff(newOff)
   }
 
-  const read = () => {
-    const perc = perceptionRef.current
-    return perc ? perc.read() : fallback.current
-  }
+  const read = () => perceptionRef.current ? perceptionRef.current.read() : fallback.current
 
-  // Bridge: forward Senses to the body on the server, receive vocal PCM back.
-  useBodyBridge(phase.k === 'live', read)
+  useBodyBridge(phase.k === 'live', read, surfaceRef)
 
   const isLive = phase.k === 'live'
 
   return (
     <div className="commune">
-      {/* AI presence — main "remote party" view */}
-      <Field read={read} className="commune__field" readout={isLive} />
+      {/* Surface canvas — raw body visual from surface_render.rs */}
+      <canvas ref={surfaceRef} className="commune__surface" aria-hidden="true" />
 
-      {/* "aborn" name label, top-left — like the other party's name in a call */}
+      {/* Top-left: minimal live indicator (no internal params) */}
       {isLive && (
         <div className="commune__remote-label fade-in">
           <span className="commune__remote-dot" />
@@ -250,48 +260,27 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
         </div>
       )}
 
-      {/* Self-view PiP — always mounted so the video element exists when stream arrives */}
+      {/* Self-view PiP */}
       <div className={`commune__self ${isLive ? 'commune__self--visible' : ''} ${camOff ? 'commune__self--off' : ''}`}>
-        <video
-          ref={selfVideoRef}
-          className="commune__self-video"
-          muted
-          playsInline
-          autoPlay
-        />
-        {camOff && (
-          <div className="commune__self-off-icon">
-            <CamOffIcon />
-          </div>
-        )}
+        <video ref={selfVideoRef} className="commune__self-video" muted playsInline autoPlay />
+        {camOff && <div className="commune__self-off-icon"><CamOffIcon /></div>}
       </div>
 
-      {/* Bottom control bar — the heart of the video-call feel */}
+      {/* Control bar */}
       {isLive && (
         <div className="commune__controls fade-in">
-          <ControlBtn
-            active={muted}
-            onClick={toggleMute}
-            label={muted ? t('commune.unmute') : t('commune.mute')}
-          >
+          <ControlBtn active={muted} onClick={toggleMute} label={muted ? t('commune.unmute') : t('commune.mute')}>
             {muted ? <MicOffIcon /> : <MicIcon />}
           </ControlBtn>
-
           <button className="commune__hangup" onClick={leave} aria-label={t('commune.leave')}>
             <HangupIcon />
           </button>
-
-          <ControlBtn
-            active={camOff}
-            onClick={toggleCam}
-            label={camOff ? t('commune.camon') : t('commune.camoff')}
-          >
+          <ControlBtn active={camOff} onClick={toggleCam} label={camOff ? t('commune.camon') : t('commune.camoff')}>
             {camOff ? <CamOffIcon /> : <CamIcon />}
           </ControlBtn>
         </div>
       )}
 
-      {/* Requesting permission */}
       {phase.k === 'requesting' && (
         <div className="commune__modal fade-in">
           <span className="commune__spinner" />
@@ -299,7 +288,6 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
         </div>
       )}
 
-      {/* Denied / unsupported */}
       {(phase.k === 'denied' || phase.k === 'unsupported') && (
         <div className="commune__modal fade-in">
           <h2>{t(phase.k === 'denied' ? 'commune.denied.title' : 'commune.unsupported.title')}</h2>
@@ -310,9 +298,7 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
                 {t('commune.retry')}
               </button>
             )}
-            <button className="commune__btn" onClick={leave}>
-              {t('commune.leave')}
-            </button>
+            <button className="commune__btn" onClick={leave}>{t('commune.leave')}</button>
           </div>
         </div>
       )}
@@ -320,31 +306,17 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
   )
 }
 
-// ---------- small control button ----------
-function ControlBtn({
-  active,
-  onClick,
-  label,
-  children,
-}: {
-  active?: boolean
-  onClick: () => void
-  label: string
-  children: React.ReactNode
+function ControlBtn({ active, onClick, label, children }: {
+  active?: boolean; onClick: () => void; label: string; children: React.ReactNode
 }) {
   return (
-    <button
-      className={`commune__ctrl${active ? ' commune__ctrl--active' : ''}`}
-      onClick={onClick}
-      aria-label={label}
-      title={label}
-    >
+    <button className={`commune__ctrl${active ? ' commune__ctrl--active' : ''}`}
+      onClick={onClick} aria-label={label} title={label}>
       {children}
     </button>
   )
 }
 
-// ---------- inline SVG icons ----------
 function MicIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
@@ -355,7 +327,6 @@ function MicIcon() {
     </svg>
   )
 }
-
 function MicOffIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
@@ -369,7 +340,6 @@ function MicOffIcon() {
     </svg>
   )
 }
-
 function CamIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
@@ -378,7 +348,6 @@ function CamIcon() {
     </svg>
   )
 }
-
 function CamOffIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
@@ -388,7 +357,6 @@ function CamOffIcon() {
     </svg>
   )
 }
-
 function HangupIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor">

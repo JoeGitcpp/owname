@@ -302,13 +302,11 @@ export class Modality {
     ctx.fillStyle = vig
     ctx.fillRect(0, 0, this.w, this.h)
 
-    // ---- streaming signal strip (top) ----
-    this.drawSignalStrip(s)
-
-    // ---- spectrum bars (bottom) ----
-    this.drawSpectrumBars(s)
-
-    if (this.showReadout) this.drawReadout(s)
+    if (this.showReadout) {
+      this.drawSignalStrip(s)
+      this.drawSpectrumBars(s)
+      this.drawReadout(s)
+    }
   }
 
   // Scrolling 4-channel signal history — EKG / oscilloscope style
