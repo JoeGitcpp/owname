@@ -143,59 +143,120 @@ fn stamp_trail_point(
     width: usize,
     height: usize,
 ) {
-    let px = (point.x * width as f64) as isize;
-    let py = (point.y * height as f64) as isize;
-    let intensity = (point.alpha * 96.0) as u8;
+    let cx = point.x * width as f64;
+    let cy = point.y * height as f64;
+    let peak = point.alpha * 96.0;
+    // σ = 1.5 px  →  smooth trail without single-pixel gaps between frames.
+    const SIGMA: f64 = 1.5;
+    const R: isize = 4; // ceil(3σ)
+    let cx_i = cx as isize;
+    let cy_i = cy as isize;
 
-    if px >= 0 && px < width as isize && py >= 0 && py < height as isize {
-        let idx = py as usize * width + px as usize;
-        buffer[idx][0] = buffer[idx][0].max(intensity);
-        buffer[idx][1] = buffer[idx][1].max(intensity);
-        buffer[idx][2] = buffer[idx][2].max(intensity);
-        buffer[idx][3] = 255;
+    for dy in -R..=R {
+        for dx in -R..=R {
+            let px = cx_i + dx;
+            let py = cy_i + dy;
+            if px < 0 || px >= width as isize || py < 0 || py >= height as isize {
+                continue;
+            }
+            let w = (-(dx * dx + dy * dy) as f64 / (2.0 * SIGMA * SIGMA)).exp();
+            let intensity = (peak * w).clamp(0.0, 255.0) as u8;
+            if intensity == 0 {
+                continue;
+            }
+            let idx = py as usize * width + px as usize;
+            buffer[idx][0] = buffer[idx][0].max(intensity);
+            buffer[idx][1] = buffer[idx][1].max(intensity);
+            buffer[idx][2] = buffer[idx][2].max(intensity);
+            buffer[idx][3] = 255;
+        }
     }
 }
 
 fn fill_object_blob(buffer: &mut [[u8; 4]], obj: &SurfaceObjectGlyph, width: usize, height: usize) {
     let cx = obj.center_x * width as f64;
     let cy = obj.center_y * height as f64;
-    let rx = obj.radius_x * width as f64;
-    let ry = obj.radius_y * height as f64;
+    // σ = radius (1 std-dev = glyph radius); clamp to ≥1 px to avoid div-by-zero.
+    let sx = (obj.radius_x * width as f64).max(1.0);
+    let sy = (obj.radius_y * height as f64).max(1.0);
+    // Scan out to 3σ: exp(-½·3²) ≈ 0.011; we cull below 0.01.
+    let min_x = (cx - sx * 3.0).max(0.0) as usize;
+    let max_x = (cx + sx * 3.0).min(width as f64 - 1.0) as usize;
+    let min_y = (cy - sy * 3.0).max(0.0) as usize;
+    let max_y = (cy + sy * 3.0).min(height as f64 - 1.0) as usize;
 
-    let min_x = (cx - rx).max(0.0) as usize;
-    let max_x = (cx + rx).min(width as f64 - 1.0) as usize;
-    let min_y = (cy - ry).max(0.0) as usize;
-    let max_y = (cy + ry).min(height as f64 - 1.0) as usize;
+    // Base brightness in [0, 255] — driven by stability and attention.
+    let base = (0.35 + 0.65 * obj.stability_hint.clamp(0.0, 1.0))
+        * (96.0 + 159.0 * obj.attention_share.clamp(0.0, 1.0))
+        * (0.5 + 0.5 * obj.action_intensity_hint.clamp(0.0, 1.0));
 
-    let base_intensity = ((0.35 + 0.65 * obj.stability_hint.clamp(0.0, 1.0))
-        * (96.0 + 159.0 * obj.attention_share.clamp(0.0, 1.0))) as u8;
-
-    // Multi-channel color synthesis
-    // R = err_hint (prediction error) - high error → red tint
-    // G = surprise_hint + attention_bias_hint * 0.5
-    // B = attention_bias_hint
-    let r_f = obj.err_hint.clamp(0.0, 1.0);
-    let g_f = (obj.surprise_hint + obj.attention_bias_hint * 0.5).clamp(0.0, 1.0);
-    let b_f = obj.attention_bias_hint.clamp(0.0, 1.0);
-
-    let intensity_multiplier = 0.5 + 0.5 * obj.action_intensity_hint.clamp(0.0, 1.0);
+    // Peak channel values at the Gaussian centre (w = 1).
+    // Hint colors occupy 2/3; neutral base luminance fills the remaining 1/3.
+    //   R = err_hint          (prediction error → red)
+    //   G = surprise + ½·attention_bias
+    //   B = attention_bias
+    let r_peak = (obj.err_hint.clamp(0.0, 1.0) * 255.0 * 2.0 / 3.0 + base / 3.0)
+        .clamp(0.0, 255.0);
+    let g_peak = ((obj.surprise_hint + obj.attention_bias_hint * 0.5).clamp(0.0, 1.0)
+        * 255.0 * 2.0 / 3.0 + base / 3.0)
+        .clamp(0.0, 255.0);
+    let b_peak = (obj.attention_bias_hint.clamp(0.0, 1.0) * 255.0 * 2.0 / 3.0 + base / 3.0)
+        .clamp(0.0, 255.0);
 
     for y in min_y..=max_y {
         for x in min_x..=max_x {
-            let dx = (x as f64 - cx) / rx.max(1.0);
-            let dy = (y as f64 - cy) / ry.max(1.0);
-            if dx * dx + dy * dy <= 1.0 {
-                let idx = y * width + x;
-                if idx < buffer.len() {
-                    let base = (base_intensity as f64 * intensity_multiplier) as u8;
-                    let r = ((r_f * 2.0 / 3.0 + base as f64 / 3.0).clamp(0.0, 255.0)) as u8;
-                    let g = ((g_f * 2.0 / 3.0 + base as f64 / 3.0).clamp(0.0, 255.0)) as u8;
-                    let b = ((b_f * 2.0 / 3.0 + base as f64 / 3.0).clamp(0.0, 255.0)) as u8;
-                    buffer[idx][0] = buffer[idx][0].max(r);
-                    buffer[idx][1] = buffer[idx][1].max(g);
-                    buffer[idx][2] = buffer[idx][2].max(b);
-                    buffer[idx][3] = 255;
-                }
+            // Normalised displacement in units of σ (anisotropic).
+            let dx = (x as f64 - cx) / sx;
+            let dy = (y as f64 - cy) / sy;
+            // 2-D anisotropic Gaussian: w = exp(-½(dx²+dy²))
+            let w = (-0.5 * (dx * dx + dy * dy)).exp();
+            if w < 0.01 {
+                continue; // prune negligible tail
+            }
+
+            let idx = y * width + x;
+            if idx >= buffer.len() {
+                continue;
+            }
+            // Scale colour and alpha by Gaussian weight → soft cloud blob.
+            let r = (r_peak * w) as u8;
+            let g = (g_peak * w) as u8;
+            let b = (b_peak * w) as u8;
+            let a = (w * 255.0) as u8;
+            buffer[idx][0] = buffer[idx][0].max(r);
+            buffer[idx][1] = buffer[idx][1].max(g);
+            buffer[idx][2] = buffer[idx][2].max(b);
+            buffer[idx][3] = buffer[idx][3].max(a);
+        }
+    }
+}
+
+/// Stamp a tiny Gaussian splat (3×3, σ=0.8 px) at a single point along a line.
+/// This gives relation edges a soft glow instead of a 1-px hard pencil stroke.
+fn stamp_edge_gaussian(
+    buffer: &mut [[u8; 4]],
+    cx: isize,
+    cy: isize,
+    r_peak: u8,
+    alpha_peak: u8,
+    width: usize,
+    height: usize,
+) {
+    const SIGMA: f64 = 0.8;
+    for oy in -1isize..=1 {
+        for ox in -1isize..=1 {
+            let px = cx + ox;
+            let py = cy + oy;
+            if px < 0 || px >= width as isize || py < 0 || py >= height as isize {
+                continue;
+            }
+            let w = (-(ox * ox + oy * oy) as f64 / (2.0 * SIGMA * SIGMA)).exp();
+            let idx = py as usize * width + px as usize;
+            if idx < buffer.len() {
+                buffer[idx][0] = buffer[idx][0].max((r_peak as f64 * w) as u8);
+                buffer[idx][1] = buffer[idx][1].max((alpha_peak as f64 / 2.0 * w) as u8);
+                buffer[idx][2] = buffer[idx][2].max((alpha_peak as f64 / 2.0 * w) as u8);
+                buffer[idx][3] = buffer[idx][3].max((alpha_peak as f64 * w) as u8);
             }
         }
     }
@@ -220,39 +281,33 @@ fn render_relation_glyph(
     let x1 = (tgt.center_x * width as f64) as isize;
     let y1 = (tgt.center_y * height as f64) as isize;
 
-    let dx = (x1 - x0).abs();
-    let dy = (y1 - y0).abs();
+    let alpha_peak = (rel.strength * 128.0) as u8;
+    let surprise_r_peak = (rel.surprise * 192.0) as u8;
+
+    // Bresenham walk — at each pixel stamp a 3×3 Gaussian splat for soft glow.
+    let adx = (x1 - x0).abs();
+    let ady = (y1 - y0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
     let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx - dy;
+    let mut err = adx - ady;
 
     let mut x = x0;
     let mut y = y0;
     let mut continue_drawing = true;
 
     while continue_drawing {
-        if x >= 0 && x < width as isize && y >= 0 && y < height as isize {
-            let idx = y as usize * width + x as usize;
-            if idx < buffer.len() {
-                let alpha = (rel.strength * 128.0) as u8;
-                let surprise_r = (rel.surprise * 192.0) as u8;
-                buffer[idx][0] = buffer[idx][0].max(surprise_r);
-                buffer[idx][1] = buffer[idx][1].max(alpha / 2);
-                buffer[idx][2] = buffer[idx][2].max(alpha / 2);
-                buffer[idx][3] = buffer[idx][3].max(alpha);
-            }
-        }
+        stamp_edge_gaussian(buffer, x, y, surprise_r_peak, alpha_peak, width, height);
 
         if x == x1 && y == y1 {
             continue_drawing = false;
         } else {
             let e2 = 2 * err;
-            if e2 > -dy {
-                err -= dy;
+            if e2 > -ady {
+                err -= ady;
                 x += sx;
             }
-            if e2 < dx {
-                err += dx;
+            if e2 < adx {
+                err += adx;
                 y += sy;
             }
         }
