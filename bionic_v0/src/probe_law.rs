@@ -84,9 +84,9 @@ impl Viewport {
     pub fn refresh_probe_law(&self, now_us: u64) {
         let novelty = self.read_global_reasoning_memory_summary().novelty_score;
         let evidence_pressure = self.read_evidence_tension().unresolved_pressure;
-        let (surprise_pressure, current_top_slot_id) = {
+        let current_top_slot_id = {
             let rs = self.global_reasoning.read().unwrap();
-            (rs.global_surprise_load, rs.routing_focus_slot_ids[0])
+            rs.routing_focus_slot_ids[0]
         };
         let relation_pressure = {
             let gr = self.global_relations.read().unwrap();
@@ -96,7 +96,9 @@ impl Viewport {
                 .map(|e| e.pred.relation_surprise)
                 .fold(0.0_f64, f64::max)
         };
-        let active_gap_pressure = self.read_active_reasoning_gap().gap_pressure;
+        // Curiosity drive = learning progress (gap DECLINING rate), not raw surprise.
+        // Noise regions keep slow ≈ fast → learning_progress ≈ 0 → not explored.
+        let learning_progress = self.read_self_development().prediction_improvement;
         let active_surface = self.read_active_surface();
         let field_pressure = if active_surface.traces_alive > 0 {
             active_surface.effective_probe_pressure()
@@ -113,9 +115,8 @@ impl Viewport {
             };
         let raw_drive = novelty
             .max(evidence_pressure)
-            .max(surprise_pressure)
+            .max(learning_progress)
             .max(relation_pressure)
-            .max(active_gap_pressure)
             .max(field_pressure)
             .max(slot_switch_pressure)
             .clamp(0.0, 1.0);

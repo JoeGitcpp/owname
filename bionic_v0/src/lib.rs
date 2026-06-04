@@ -19,6 +19,7 @@ pub mod auditory_visual;
 pub mod clock;
 pub mod code_ingress;
 pub mod code_ingress_adapter;
+pub mod capability_curriculum_governor;
 pub mod curriculum;
 pub mod curriculum_governor;
 pub mod curriculum_material;
@@ -61,6 +62,11 @@ pub mod vocal_target;
 pub mod vpc;
 pub mod vpc_cross_layer;
 
+// Phase A: virtual neck + efference copy + depth observer
+pub mod efference_copy;
+pub mod depth_observer;
+pub mod virtual_neck;
+
 pub const HISTORY_CAP: usize = 1024;
 
 pub const VIB_BANDS: usize = 4;
@@ -83,9 +89,10 @@ pub const VIS_AXES_PER_REGION: usize = 5; // brightness, R, G, B, motion
 pub const VIS_AXES: usize = VIS_REGIONS * VIS_AXES_PER_REGION; // 20
 
 // Axis layout in the shared coordinate system:
-//   [0 .. VIB_BANDS)                  = hearing (frequency bands)
-//   [AXIS_VIS_BASE .. AXIS_VIS_BASE+VIS_AXES) = vision (region × physical quantity)
-//   [AXIS_INTERO_BASE .. AXIS_INTERO_BASE+INTERO_AXES) = interoception (body-internal scalars)
+//   [0 .. VIB_BANDS)                         = hearing (frequency bands)
+//   [AXIS_VIS_BASE .. +VIS_AXES)              = vision (region × physical quantity)
+//   [AXIS_INTERO_BASE .. +INTERO_AXES)        = interoception (body-internal scalars)
+//   [AXIS_CODE_BASE .. +CODE_AXES)            = code/digital objects (STRUCT/ORDER subset)
 //
 // Interoceptive axes (2026-06-03 redesign — Stage 0):
 //   Internal body scalars are mirrored onto the shared substrate so they are
@@ -121,7 +128,27 @@ pub const INTERO_PRESENCE: usize = AXIS_INTERO_BASE + 9;   // familiar-object in
 //   actually absent) is the substrate form of "longing" — no label needed.
 
 pub const INTERO_AXES: usize = 10;
-pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES; // 34
+
+// Five code/digital-object projection axes — the tier-0 STRUCT/ORDER sub-set as applied to
+// digital objects.  Per design doc §4: physical and digital objects are different projections
+// of the same coordinate system, not two systems.  Code objects use only the STRUCT and
+// STRUCT-ORDER sub-set (no INRT/THRM/ELEC/MAGN/etc.):
+//   CODE_POS             → stream-context identity, normalized [0,1]  (pos_* analog)
+//   CODE_SPAN            → frame byte length, normalized to CODE_SPAN_MAX_BYTES (span_* analog)
+//   CODE_STRUCT_ORDER_POS    → byte distribution skew   (struct_order_pos analog)
+//   CODE_STRUCT_ORDER_ORIENT → byte transition energy   (struct_order_orient analog)
+//   CODE_STRUCT_ORDER_PERIOD → sequence recurrence score (struct_order_period analog)
+pub const AXIS_CODE_BASE: usize = VIB_BANDS + VIS_AXES + INTERO_AXES; // 34
+pub const CODE_POS: usize             = AXIS_CODE_BASE + 0;
+pub const CODE_SPAN: usize            = AXIS_CODE_BASE + 1;
+pub const CODE_STRUCT_ORDER_POS: usize    = AXIS_CODE_BASE + 2;
+pub const CODE_STRUCT_ORDER_ORIENT: usize = AXIS_CODE_BASE + 3;
+pub const CODE_STRUCT_ORDER_PERIOD: usize = AXIS_CODE_BASE + 4;
+pub const CODE_AXES: usize = 5;
+/// Normalization cap for CODE_SPAN axis. Byte lengths ≥ this value saturate to 1.0.
+pub const CODE_SPAN_MAX_BYTES: f64 = 65536.0;
+
+pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES; // 39
 
 pub const AXIS_VIB: usize = 0;
 pub const AXIS_SYNTH: usize = 0; // retained for backward compat
@@ -450,7 +477,13 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 /// v52: interoceptive substrate unification Stage 0 — AXIS_COUNT 24→34 (10 new
 /// interoceptive axes: reserve/anxiety/pain/coherence/agency/attachment/gap/
 /// closure/learning_progress/presence). Per-axis snapshot blocks grow accordingly.
-pub const SNAPSHOT_VERSION: u64 = 52;
+/// v53: CODE axis block (5 axes, AXIS_COUNT 34→39) — digital objects enter the
+/// unified tier-0 axis stream via push_observation.  code_ingress frames project
+/// onto CODE_POS/SPAN/STRUCT_ORDER_POS/ORIENT/PERIOD; no separate representation.
+/// v54: prediction_gap_slow added to SelfDevelopmentState — two-timescale noise
+/// rejection for INTERO_LEARNING_PROGRESS; probe drive rewired from raw surprise
+/// to learning progress.
+pub const SNAPSHOT_VERSION: u64 = 54;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.

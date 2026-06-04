@@ -28,11 +28,12 @@ ordinary ingress
   -> ordinary ingress consequence windows
   -> action-consequence pairs
   -> language binding events only when pair evidence is strong enough
-  -> snapshot v52
+  -> snapshot v54
   -> observer
 
 computer-native byte ingress
   -> code ingress trace substrate
+  -> tier-0 CODE axes (CODE_POS / CODE_SPAN / CODE_STRUCT_ORDER_*) via push_observation
   -> snapshot / observer
 
 birth sensitivity and learned bias

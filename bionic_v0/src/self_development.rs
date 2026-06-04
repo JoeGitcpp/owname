@@ -10,6 +10,9 @@ use crate::{CONSEQUENCE_WINDOW_CAP, PAIR_HISTORY_CAP, WRITE_EPOCH_HISTORY_CAP};
 pub struct SelfDevelopmentState {
     pub prediction_gap: f64,
     pub prediction_improvement: f64,
+    /// Slow EMA of prediction_gap (α=0.04). Used for two-timescale trend detection:
+    /// trend = slow − fast; positive only while gap is persistently declining.
+    pub prediction_gap_slow: f64,
     pub stable_recurrence: f64,
     pub familiarity_pressure: f64,
     pub repetition_pressure: f64,
@@ -62,9 +65,16 @@ struct SelfDevelopmentSample {
 impl SelfDevelopmentState {
     fn update(&mut self, sample: SelfDevelopmentSample, now_us: u64) {
         let gap = unit(sample.prediction_gap);
-        let instant_improvement = unit((self.prediction_gap - gap).max(0.0));
-        self.prediction_improvement = ema(self.prediction_improvement, instant_improvement, 0.25);
+        // Two-timescale trend: slow EMA captures history; (slow − fast) is positive
+        // only while gap is persistently declining. For pure noise the slow and fast
+        // EMAs converge to the same mean, so the signed trend oscillates around 0 and
+        // the clamped output stays near 0. A noisy-TV region therefore reads ≈ 0 here
+        // even when its instantaneous surprise is high.
+        let trend = self.prediction_gap_slow - gap;
+        let raw_pi = (1.0 - 0.12) * self.prediction_improvement + 0.12 * trend;
+        self.prediction_improvement = raw_pi.clamp(0.0, 1.0);
         self.prediction_gap = gap;
+        self.prediction_gap_slow = ema(self.prediction_gap_slow, gap, 0.04);
 
         let recurrence = unit(
             sample.pattern_recurrence

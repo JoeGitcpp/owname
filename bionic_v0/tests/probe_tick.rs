@@ -34,11 +34,11 @@ fn refresh_probe_law_collapses_multiple_output_pressures_to_one_write_epoch() {
 }
 
 #[test]
-fn refresh_probe_law_surprise_pressure_starts_one_write_epoch() {
+fn refresh_probe_law_learning_progress_starts_one_write_epoch() {
+    // Probe drive now requires learning progress, not raw surprise.
     let vp = Viewport::new();
     {
-        let mut rs = vp.global_reasoning.write().unwrap();
-        rs.global_surprise_load = 0.8;
+        vp.self_development.write().unwrap().prediction_improvement = 0.8;
     }
 
     vp.refresh_probe_law(1_000_000);
@@ -46,6 +46,22 @@ fn refresh_probe_law_surprise_pressure_starts_one_write_epoch() {
 
     let ao = vp.read_action_output();
     assert_eq!(ao.n_write_epochs, 1);
+}
+
+#[test]
+fn refresh_probe_law_raw_surprise_alone_does_not_start_epoch() {
+    // High raw surprise with zero learning progress must not drive the probe.
+    let vp = Viewport::new();
+    {
+        let mut rs = vp.global_reasoning.write().unwrap();
+        rs.global_surprise_load = 1.0;
+    }
+
+    vp.refresh_probe_law(1_000_000);
+    vp.tick_probe_output_from_law(1_000_000);
+
+    let ao = vp.read_action_output();
+    assert_eq!(ao.n_write_epochs, 0);
 }
 
 #[test]

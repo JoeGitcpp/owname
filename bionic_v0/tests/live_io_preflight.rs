@@ -237,7 +237,12 @@ fn probe_pair_delay_adjusts_physical_vocal_magnitude() {
 }
 
 #[test]
-fn surprise_pressure_refresh_starts_physical_vocal_write() {
+fn raw_surprise_alone_does_not_start_physical_vocal_write() {
+    // Curiosity/probe drive was retargeted from RAW surprise to learning-progress
+    // to avoid the noisy-TV trap (an agent rewarded by raw prediction error gets
+    // trapped staring at irreducible noise). Raw global_surprise_load alone must
+    // therefore NO LONGER start a physical vocal write. The positive case — that
+    // learning-progress DOES drive it — lives in probe_drive_learning_progress.rs.
     let vp = Viewport::new();
     {
         let mut rs = vp.global_reasoning.write().unwrap();
@@ -248,11 +253,10 @@ fn surprise_pressure_refresh_starts_physical_vocal_write() {
     vp.tick_probe_output_from_law(5_000_000);
 
     let out = vp.read_action_output();
-    assert_eq!(out.n_write_epochs, 1);
-
-    let organ = vp.read_vocal_organ();
-    assert!(organ.breath_drive > 0.0);
-    assert_eq!(organ.last_update_t_us, 5_000_000);
+    assert_eq!(
+        out.n_write_epochs, 0,
+        "raw surprise must no longer drive a vocal write (noisy-TV fix)"
+    );
 }
 
 #[test]

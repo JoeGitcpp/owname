@@ -18,6 +18,10 @@ pub enum OutputChannelKind {
     #[default]
     GenericWrite,
     FramedByteEgress,
+    /// Phase A: virtual neck lateral translation command.  Discriminant = 2.
+    /// Substrate-level engineering handle for action-consequence pairing of
+    /// self-motion commands with their subsequent visual consequences.
+    NeckTranslation,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -17,6 +17,8 @@ use crate::evolution_priors::BiasPriors;
 use crate::framed_byte_egress::FramedByteEgressState;
 use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, LanguageBindingState};
 use crate::learned_bias::{LearnedBiasEventInput, LearnedBiasState};
+use crate::depth_observer::DepthObserver;
+use crate::efference_copy::EfferenceCopyState;
 use crate::mark_disturbance::MarkDisturbanceState;
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::{PhotSlotPredictor, VPC_FAMILY_PHOT};
@@ -786,6 +788,17 @@ fn clamp01(x: f64) -> f64 {
     }
 }
 
+// Fold a stream_context_id (arbitrary u64) into [0,1] via splitmix64 bit-mixing
+// so that nearby ids spread uniformly across the CODE_POS axis range.
+fn code_pos_from_ctx(x: u64) -> f64 {
+    let h = x ^ (x >> 30);
+    let h = h.wrapping_mul(0xbf58476d1ce4e5b9u64);
+    let h = h ^ (h >> 27);
+    let h = h.wrapping_mul(0x94d049bb133111ebu64);
+    let h = h ^ (h >> 31);
+    (h >> 11) as f64 / (1u64 << 53) as f64
+}
+
 fn ambient_energy_for(amb: &AmbientSnapshot, modality_bit: u8) -> f64 {
     match modality_bit {
         MOD_VIB => amb.vib.event_energy,
@@ -1286,6 +1299,18 @@ pub struct Viewport {
     /// Tier-0 raw audio waveform ring buffer (48 kHz, 60 s).
     /// Written by AudioAdapter, read by audio predictors (future).
     pub audio_raw: Arc<AudioRawBuffer>,
+
+    // ── Phase A: virtual neck + efference copy + depth observer ──────────────
+
+    /// Most-recently-commanded camera translation (efference copy).
+    /// Written by the neck controller each tick; read by
+    /// `inject_efference_motion_priors` and `update_depth_from_efference`.
+    pub efference_copy: RwLock<EfferenceCopyState>,
+
+    /// Per-region inverse-depth estimates (ρ = 1/z).
+    /// Updated each tick via the depth-observer update rule when
+    /// translation_term is Some.  Cleared (observable=false) when still.
+    pub depth_observer: RwLock<DepthObserver>,
 }
 
 impl Viewport {
@@ -1376,6 +1401,8 @@ impl Viewport {
             learned_bias: RwLock::new(LearnedBiasState::default()),
             mark_disturbance: RwLock::new(MarkDisturbanceState::default()),
             audio_raw: Arc::new(AudioRawBuffer::new()),
+            efference_copy: RwLock::new(EfferenceCopyState::default()),
+            depth_observer: RwLock::new(DepthObserver::default()),
         }
     }
 
@@ -2045,7 +2072,32 @@ impl Viewport {
     }
 
     pub fn observe_code_ingress_frame(&self, input: CodeIngressFrameInput<'_>) {
+        let t_us = input.t_end_us;
+        let stream_ctx = input.stream_context_id;
+        let byte_len = input.bytes.len();
         self.code_ingress.write().unwrap().observe_frame(input);
+        // Project byte-object measurements onto tier-0 CODE axes.
+        // Per design doc §4: digital objects are the same coordinate system projected
+        // onto the STRUCT/ORDER sub-set; not a separate representation.
+        let (order_pos, order_orient, order_period) = {
+            let ci = self.code_ingress.read().unwrap();
+            let op = ci.recent_frames.last().map(|t| t.byte_distribution_skew).unwrap_or(0.0);
+            let oo = ci.recent_frames.last().map(|t| t.byte_transition_energy).unwrap_or(0.0);
+            let per = ci
+                .sequence_windows
+                .last()
+                .filter(|w| w.stream_context_id == stream_ctx)
+                .map(|w| w.recurrence_score)
+                .unwrap_or(0.0);
+            (op, oo, per)
+        };
+        let code_pos = code_pos_from_ctx(stream_ctx);
+        let code_span = (byte_len as f64 / crate::CODE_SPAN_MAX_BYTES).min(1.0);
+        self.push_observation(crate::CODE_POS, t_us, code_pos);
+        self.push_observation(crate::CODE_SPAN, t_us, code_span);
+        self.push_observation(crate::CODE_STRUCT_ORDER_POS, t_us, order_pos);
+        self.push_observation(crate::CODE_STRUCT_ORDER_ORIENT, t_us, order_orient);
+        self.push_observation(crate::CODE_STRUCT_ORDER_PERIOD, t_us, order_period);
     }
 
     pub fn read_learned_bias(&self) -> LearnedBiasState {
@@ -4082,11 +4134,13 @@ impl Viewport {
         vt.tick_decay(now_us);
     }
 
-    /// C5: observe active objects' fingerprints into the familiar-objects
-    /// sediment. Each active slot with a live VIB band-shape contributes a
-    /// fingerprint; matching one re-recognizes that object, novel ones sediment.
-    /// Identity and the responsible-person bond emerge from accumulated
-    /// familiarity (no id table, no label).
+    /// C5 (DERIVED LAYER): observe active slots' VIB+PHOT fingerprints into the
+    /// familiar-objects sediment. familiar_objects reads the tier-0 slot
+    /// projections already written by adapters — it does not establish a separate
+    /// representation. Outputs feed back into shared axes via INTERO_ATTACHMENT
+    /// and INTERO_PRESENCE. Each active slot contributes an 8-dim fingerprint
+    /// (4 VIB + 4 PHOT halves); identity and the responsible-person bond emerge
+    /// from accumulated familiarity (no id table, no label).
     pub fn tick_familiar_objects(&self, now_us: u64) {
         for slot_id in 0..N_OBJECT_SLOTS {
             let Some(slot) = self.read_slot(slot_id) else {
@@ -4096,7 +4150,7 @@ impl Viewport {
                 continue;
             }
             let Some(fp) =
-                crate::familiar_objects::fingerprint_from_slot(slot.vib.as_ref())
+                crate::familiar_objects::fingerprint_from_slot(slot.vib.as_ref(), slot.phot.as_ref())
             else {
                 continue;
             };
@@ -4117,13 +4171,13 @@ impl Viewport {
             let present = (0..crate::N_OBJECT_SLOTS).any(|sid| {
                 self.read_slot(sid)
                     .filter(|s| s.active)
-                    .and_then(|s| crate::familiar_objects::fingerprint_from_slot(s.vib.as_ref()))
+                    .and_then(|s| crate::familiar_objects::fingerprint_from_slot(s.vib.as_ref(), s.phot.as_ref()))
                     .map(|fp| {
                         let d: f64 = fp.iter().zip(most_fp.iter())
                             .map(|(a, b)| (a - b) * (a - b))
                             .sum::<f64>()
                             .sqrt();
-                        d < 0.20 // mirrors familiar_objects::MATCH_DIST
+                        d < crate::familiar_objects::MATCH_DIST_PUB
                     })
                     .unwrap_or(false)
             });
@@ -4191,7 +4245,7 @@ impl Viewport {
         self.vital_core.write().unwrap().tick(now_us, supply, drain);
         // Stage 0 (interoceptive substrate): mirror vital scalars onto shared axes
         // so they are predicted, produce err, and enter the relation/tower fabric.
-        // The box retains full ownership of its dynamics; this is a READ + mirror.
+        // The box retains full autonomy over its dynamics; this is a READ + mirror.
         // 推论5: no positive/negative labels — these are substrate quantities only.
         let vc = self.vital_core.read().unwrap();
         self.push_observation(crate::INTERO_RESERVE, now_us, vc.reserve);

@@ -1,9 +1,28 @@
 //! C5: persistent object identity / caregiver imprinting (minimal emergent form).
 //!
-//! Objects live in anonymous, index-reused slots, so "is this the same object as
-//! before?" is otherwise lost (and fully lost on restart). This adds a small
-//! sediment of FAMILIAR OBJECTS — each a numeric fingerprint plus accumulated
-//! familiarity — on top of slots (it does NOT touch the slot architecture).
+//! # DERIVED LAYER
+//!
+//! familiar_objects is a **slot-derived layer**: it reads the tier-0 slot
+//! projections (VIB and PHOT band-family observed values) that the adapters
+//! already wrote via the normal push_observation → slot pathway.  It does NOT
+//! establish a separate perception representation; the fingerprint is a compact
+//! summary of what the unified slot state already contains.
+//!
+//! Outputs (familiarity, recognition_count) feed back into the shared axis
+//! stream via `push_observation(INTERO_ATTACHMENT, …)` and
+//! `push_observation(INTERO_PRESENCE, …)` — the only entry-points to the
+//! prediction/error/relation fabric.
+//!
+//! The `familiar_objects.bin` checkpoint stores the intermediate summary only;
+//! the primary truth lives in the slot state and the interoceptive axes.
+//!
+//! # Identity mechanics
+//!
+//! Objects live in anonymous, index-reused slots, so "is this the same object
+//! as before?" is otherwise lost (and fully lost on restart).  This adds a
+//! small sediment of FAMILIAR OBJECTS — each a numeric fingerprint plus
+//! accumulated familiarity — on top of slots (it does NOT touch the slot
+//! architecture).
 //!
 //! Identity is EMERGENT, not a table lookup and not a label:
 //!   - A re-appearing object whose fingerprint matches a sediment raises that
@@ -17,16 +36,26 @@
 
 use crate::substrate::unit;
 
-/// Width of an object fingerprint (a compact numeric signature of how an object
-/// "looks/sounds" — its band-shape + spatial tendency, all in [0,1]).
-pub const OBJECT_FINGERPRINT_DIM: usize = 4;
+/// Width of an object fingerprint.
+///
+/// 8 = 4 VIB half + 4 PHOT half (both derived from slot tier-0 band-family
+/// observed values). When a modality is absent the corresponding half is zero,
+/// so two modality-absent objects still produce zero distance in that half.
+pub const OBJECT_FINGERPRINT_DIM: usize = 8;
+
+/// The VIB half occupies fp[0..FINGERPRINT_VIB_HALF].
+const FINGERPRINT_VIB_HALF: usize = 4;
 
 /// Max sediment size. Like vocal_memory's cap: a life keeps only a handful of
 /// deeply familiar objects; the rest fade.
 pub const FAMILIAR_OBJECT_CAP: usize = 8;
 
 /// Fingerprint match distance below which two fingerprints are "the same object".
-const MATCH_DIST: f64 = 0.20;
+/// With 8-dim fingerprints, two VIB-only objects (PHOT portion = zeros for both)
+/// still produce only VIB-part distance, so this threshold preserves pre-8-dim
+/// semantics for audio-only scenes.
+pub const MATCH_DIST_PUB: f64 = 0.20;
+const MATCH_DIST: f64 = MATCH_DIST_PUB;
 
 /// Minimum real-time gap between familiarity increments for one object. Seeing
 /// the same object more often than this drifts its fingerprint but does NOT
@@ -135,7 +164,8 @@ impl FamiliarObjectsState {
 use std::path::{Path, PathBuf};
 
 const FAMILIAR_MAGIC: u64 = 0xB10B10_0000_00C5;
-const FAMILIAR_VERSION: u64 = 1;
+// v2: OBJECT_FINGERPRINT_DIM 4→8 (VIB half + PHOT half). Old .bin files rejected.
+const FAMILIAR_VERSION: u64 = 2;
 
 pub struct FamiliarObjectsCheckpointPaths {
     pub final_path: PathBuf,
@@ -245,30 +275,59 @@ pub fn read_familiar_objects_checkpoint(
     })
 }
 
-/// Extract an object fingerprint from a slot's VIB band-shape. The fingerprint
-/// is the band ENERGY SHAPE normalized to sum 1 (so it captures "what this
-/// object sounds like" — its spectral contour — independent of loudness, which
-/// is transient). Returns None when there's no usable band energy.
+/// Extract an object fingerprint from a slot's VIB + PHOT band-shapes.
+///
+/// DERIVED LAYER: reads the tier-0 slot projections that the adapters wrote via
+/// the normal ingress pathway.  Does not introduce a new representation.
+///
+/// Layout: `fp[0..FINGERPRINT_VIB_HALF]` = VIB spectral shape (required),
+///         `fp[FINGERPRINT_VIB_HALF..]`  = PHOT spectral shape (zeros when absent).
+///
+/// Each half is the band ENERGY SHAPE normalized to sum 1, capturing spectral
+/// contour independent of loudness/brightness magnitude. Returns `None` when
+/// VIB is absent or silent (VIB is the required primary signal).
 pub fn fingerprint_from_slot(
     vib: Option<&crate::viewport::BandFamilyState>,
+    phot: Option<&crate::viewport::BandFamilyState>,
 ) -> Option<[f64; OBJECT_FINGERPRINT_DIM]> {
+    // --- VIB half (required) ---
     let vib = vib?;
-    let n = vib.observed.len().min(OBJECT_FINGERPRINT_DIM);
-    if n == 0 {
+    let nv = vib.observed.len().min(FINGERPRINT_VIB_HALF);
+    if nv == 0 {
         return None;
     }
-    let mut fp = [0.0; OBJECT_FINGERPRINT_DIM];
-    let mut sum = 0.0;
-    for i in 0..n {
+    let mut fp = [0.0f64; OBJECT_FINGERPRINT_DIM];
+    let mut vib_sum = 0.0;
+    for i in 0..nv {
         let e = vib.observed[i].abs();
         fp[i] = e;
-        sum += e;
+        vib_sum += e;
     }
-    if sum < 1e-9 {
+    if vib_sum < 1e-9 {
         return None; // silent slot has no spectral identity
     }
-    for v in fp.iter_mut() {
-        *v = unit(*v / sum);
+    for v in fp[..FINGERPRINT_VIB_HALF].iter_mut() {
+        *v = unit(*v / vib_sum);
+    }
+    // --- PHOT half (optional; zeros when absent) ---
+    if let Some(phot) = phot {
+        let np = phot.observed.len().min(FINGERPRINT_VIB_HALF);
+        let mut phot_sum = 0.0;
+        for i in 0..np {
+            let e = phot.observed[i].abs();
+            fp[FINGERPRINT_VIB_HALF + i] = e;
+            phot_sum += e;
+        }
+        if phot_sum >= 1e-9 {
+            for v in fp[FINGERPRINT_VIB_HALF..].iter_mut() {
+                *v = unit(*v / phot_sum);
+            }
+        } else {
+            // Dark/absent PHOT: leave PHOT half as zeros.
+            for v in fp[FINGERPRINT_VIB_HALF..].iter_mut() {
+                *v = 0.0;
+            }
+        }
     }
     Some(fp)
 }
@@ -278,7 +337,8 @@ mod tests {
     use super::*;
 
     fn fp(a: f64, b: f64, c: f64, d: f64) -> [f64; OBJECT_FINGERPRINT_DIM] {
-        [a, b, c, d]
+        // VIB half only; PHOT half = zeros (audio-only test objects).
+        [a, b, c, d, 0.0, 0.0, 0.0, 0.0]
     }
 
     #[test]

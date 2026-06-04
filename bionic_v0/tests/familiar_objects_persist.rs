@@ -14,11 +14,12 @@ fn familiar_objects_survive_checkpoint_roundtrip() {
     let paths = FamiliarObjectsCheckpointPaths::new(&dir);
 
     let mut s = FamiliarObjectsState::default();
-    let caregiver = [0.5, 0.3, 0.15, 0.05];
+    // OBJECT_FINGERPRINT_DIM = 8 (4 VIB + 4 PHOT halves).
+    let caregiver = [0.5, 0.3, 0.15, 0.05, 0.0, 0.0, 0.0, 0.0];
     for k in 0..12 {
         s.observe(1_000 + k * 100, caregiver);
     }
-    s.observe(99_999, [0.05, 0.15, 0.3, 0.5]); // a stranger, once
+    s.observe(99_999, [0.05, 0.15, 0.3, 0.5, 0.0, 0.0, 0.0, 0.0]); // a stranger, once
     let before_top = s.most_familiar().cloned().expect("most familiar");
 
     write_familiar_objects_checkpoint(&s, &paths).expect("write");

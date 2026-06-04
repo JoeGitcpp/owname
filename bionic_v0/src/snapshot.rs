@@ -2802,6 +2802,7 @@ fn read_active_reasoning_gap_snapshot(bytes: &[u8], cur: &mut usize) -> ActiveRe
 fn write_self_development(buf: &mut Vec<u8>, s: &SelfDevelopmentState) {
     buf.extend_from_slice(&s.prediction_gap.to_le_bytes());
     buf.extend_from_slice(&s.prediction_improvement.to_le_bytes());
+    buf.extend_from_slice(&s.prediction_gap_slow.to_le_bytes());
     buf.extend_from_slice(&s.stable_recurrence.to_le_bytes());
     buf.extend_from_slice(&s.familiarity_pressure.to_le_bytes());
     buf.extend_from_slice(&s.repetition_pressure.to_le_bytes());
@@ -2845,6 +2846,7 @@ fn read_self_development_snapshot(bytes: &[u8], cur: &mut usize) -> SelfDevelopm
     SelfDevelopmentState {
         prediction_gap: rd_f64(bytes, cur),
         prediction_improvement: rd_f64(bytes, cur),
+        prediction_gap_slow: rd_f64(bytes, cur),
         stable_recurrence: rd_f64(bytes, cur),
         familiarity_pressure: rd_f64(bytes, cur),
         repetition_pressure: rd_f64(bytes, cur),
