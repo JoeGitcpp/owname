@@ -1,3 +1,11 @@
+// Derived extraction buffer — NOT an independent object representation.
+// This module computes numeric traces (transition energy, distribution skew,
+// sequence recurrence) from raw byte frames.  Those traces are the SOURCE
+// from which viewport::observe_code_ingress_frame projects onto the five
+// tier-0 CODE axes (CODE_POS / CODE_SPAN / CODE_STRUCT_ORDER_POS /
+// CODE_STRUCT_ORDER_ORIENT / CODE_STRUCT_ORDER_PERIOD).  The CODE-axis stream
+// is the single authoritative representation of digital objects.
+// CodeIngressState must not be consulted as a substitute for those axes.
 use crate::{
     CODE_INGRESS_BYTE_SAMPLE_CAP, CODE_INGRESS_FRAME_HISTORY_CAP,
     CODE_INGRESS_PROJECTION_HISTORY_CAP, CODE_INGRESS_SEQUENCE_WINDOW_CAP,

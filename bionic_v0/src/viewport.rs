@@ -1226,8 +1226,9 @@ pub struct Viewport {
     /// Cursor for life-closure producer consumption of framed-byte returns.
     /// Engineering locator only; keeps producer ticks idempotent.
     pub life_closure_framed_return_producer_cursor: AtomicU64,
-    /// Cursor for evidence pressure consumption of code ingress frames.
-    /// Engineering locator only; keeps producer ticks idempotent.
+    /// Timestamp cursor (t_us) of the last CODE-axis observation processed by
+    /// tick_evidence_tension_from_code_ingress.  Engineering locator only;
+    /// keeps producer ticks idempotent.  Not persisted in snapshots.
     pub code_ingress_evidence_cursor: AtomicU64,
     /// Action-consequence loop substrate (v26). Records consequence windows
     /// and explicit pairs. No target inference; no success/failure semantics.
@@ -1453,54 +1454,72 @@ impl Viewport {
     }
 
     pub fn tick_evidence_tension_from_code_ingress(&self, t_us: u64) {
-        let last_frame_seq = self.code_ingress_evidence_cursor.load(Ordering::Relaxed);
-        let Some((max_frame_seq, sample)) = ({
-            let code = self.code_ingress.read().unwrap();
-            let fresh = code
-                .recent_frames
-                .iter()
-                .filter(|frame| frame.frame_seq > last_frame_seq)
-                .collect::<Vec<_>>();
-            if fresh.is_empty() {
-                None
-            } else {
-                let max_frame_seq = fresh
-                    .iter()
-                    .map(|frame| frame.frame_seq)
-                    .max()
-                    .unwrap_or(last_frame_seq);
-                let avg_transition = fresh
-                    .iter()
-                    .map(|frame| frame.byte_transition_energy)
-                    .sum::<f64>()
-                    / fresh.len().max(1) as f64;
-                let avg_skew = fresh
-                    .iter()
-                    .map(|frame| frame.byte_distribution_skew)
-                    .sum::<f64>()
-                    / fresh.len().max(1) as f64;
-                let window = code.sequence_windows.last();
-                let recurrence = window.map(|w| w.recurrence_score).unwrap_or(0.0);
-                let ambiguity = window.map(|w| w.ambiguity_level).unwrap_or(0.0);
-                Some((
-                    max_frame_seq,
-                    PressureSample {
-                        err: avg_transition,
-                        recurrence,
-                        ambiguity,
-                        deviation: avg_skew,
-                        cross_channel: code.stream_count.saturating_sub(1) as f64,
-                        ..Default::default()
-                    },
-                ))
-            }
-        }) else {
+        // Cursor stores the last processed observation timestamp (t_us), not a
+        // frame_seq.  We read from the tier-0 CODE axes — the single
+        // authoritative representation of digital objects — rather than
+        // duplicating the same values out of the extraction buffer.
+        let last_obs_t_us = self.code_ingress_evidence_cursor.load(Ordering::Relaxed);
+
+        let orient_samples = self
+            .read_latest_observations(crate::CODE_STRUCT_ORDER_ORIENT, crate::CODE_INGRESS_FRAME_HISTORY_CAP)
+            .into_iter()
+            .filter(|s| s.t_us > last_obs_t_us)
+            .collect::<Vec<_>>();
+        let pos_samples = self
+            .read_latest_observations(crate::CODE_STRUCT_ORDER_POS, crate::CODE_INGRESS_FRAME_HISTORY_CAP)
+            .into_iter()
+            .filter(|s| s.t_us > last_obs_t_us)
+            .collect::<Vec<_>>();
+
+        if orient_samples.is_empty() && pos_samples.is_empty() {
             return;
+        }
+
+        let max_obs_t_us = orient_samples
+            .iter()
+            .chain(pos_samples.iter())
+            .map(|s| s.t_us)
+            .max()
+            .unwrap_or(last_obs_t_us);
+
+        let avg_transition = if orient_samples.is_empty() {
+            0.0
+        } else {
+            orient_samples.iter().map(|s| s.value).sum::<f64>() / orient_samples.len() as f64
+        };
+        let avg_skew = if pos_samples.is_empty() {
+            0.0
+        } else {
+            pos_samples.iter().map(|s| s.value).sum::<f64>() / pos_samples.len() as f64
+        };
+
+        let recurrence = self
+            .latest_observation(crate::CODE_STRUCT_ORDER_PERIOD)
+            .map(|s| s.value)
+            .unwrap_or(0.0);
+        // ambiguity is the complement of recurrence confidence; no separate axis.
+        let ambiguity = 1.0 - recurrence;
+
+        // stream_count has no CODE-axis equivalent (it is a buffer-level
+        // multiplicity statistic, not a content property).  Read from the
+        // extraction buffer only for this cross-channel scalar.
+        let cross_channel = {
+            let code = self.code_ingress.read().unwrap();
+            code.stream_count.saturating_sub(1) as f64
+        };
+
+        let sample = PressureSample {
+            err: avg_transition,
+            recurrence,
+            ambiguity,
+            deviation: avg_skew,
+            cross_channel,
+            ..Default::default()
         };
 
         self.tick_evidence_tension(sample, t_us);
         self.code_ingress_evidence_cursor
-            .store(max_frame_seq, Ordering::Relaxed);
+            .store(max_obs_t_us, Ordering::Relaxed);
     }
 
     // --- AmbientChannel API ---
@@ -3204,7 +3223,14 @@ impl Viewport {
             valid: true,
         });
         self.source_writes.fetch_add(1, Ordering::Relaxed);
-        self.last_obs_t_us.store(t_us, Ordering::Relaxed);
+        // Interoceptive axes are internal body signals, not external sensory input.
+        // Updating last_obs_t_us from them would reset the continuity clock and
+        // prevent prolonged silence from depleting the reserve.
+        let intero_range =
+            crate::AXIS_INTERO_BASE..crate::AXIS_INTERO_BASE + crate::INTERO_AXES;
+        if !intero_range.contains(&axis) {
+            self.last_obs_t_us.store(t_us, Ordering::Relaxed);
+        }
     }
 
     pub fn read_last_obs_t_us(&self) -> u64 {
@@ -3507,10 +3533,10 @@ impl Viewport {
         if now_us.saturating_sub(vib.last_event_t_us) > QUIET_WINDOW_US {
             return;
         }
-        // Replaced has_recent_write_coupled_vib_caution with precision-based echo handling
-        let self_match = self.compute_vib_self_match();
+        // Echo guard: block VIB writes that are self-generated.
+        let self_match = self.compute_vib_self_match(now_us);
         if self_match > 0.85 {
-            let reduced_energy = vib.event_energy * (1.0 - self_match).max(0.1);
+            let reduced_energy = vib.event_energy * (1.0 - self_match);
             if reduced_energy < crate::VOCAL_TARGET_INGRESS_MIN_ENERGY {
                 return;
             }
@@ -3563,15 +3589,13 @@ impl Viewport {
     /// Returns [0.0, 1.0]:
     ///   1.0 = VIB signal is entirely self-generated (echo)
     ///   0.0 = VIB signal is entirely external
-    fn compute_vib_self_match(&self) -> f64 {
+    fn compute_vib_self_match(&self, now_us: u64) -> f64 {
         let organ = self.read_vocal_organ();
         if organ.phase != crate::vocal_organ::VocalOrganPhase::Active || organ.breath_drive < 0.01 {
             return 0.0;
         }
 
-        // Use vocal organ's own timestamp — avoids the noisy action_output
-        // channel aggregation that was causing constant false positives.
-        let now_us = self.clock_us.load(std::sync::atomic::Ordering::Relaxed);
+        // Use the tick's now_us so the elapsed time since voicing is correct.
         let since_last_vocal = now_us.saturating_sub(organ.last_update_t_us);
 
         // Guard half-window: 150ms. Past this, treat VIB as external.

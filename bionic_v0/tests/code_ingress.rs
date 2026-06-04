@@ -5,6 +5,10 @@ use bionic_v0::code_ingress::{
 };
 use bionic_v0::code_ingress_adapter::{CodeIngressAdapter, ScriptedCodeIngressCarrier};
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
+use bionic_v0::{
+    CODE_POS, CODE_SPAN, CODE_STRUCT_ORDER_ORIENT, CODE_STRUCT_ORDER_PERIOD,
+    CODE_STRUCT_ORDER_POS,
+};
 use bionic_v0::viewport::Viewport;
 
 #[test]
@@ -145,4 +149,54 @@ fn code_ingress_sources_contain_no_rejected_architecture() {
             );
         }
     }
+}
+
+// Guard: the predictable representation of digital objects lives on the
+// CODE axes, not in the extraction buffer.  After observe_code_ingress_frame
+// all five CODE axes must carry a fresh observation; CodeIngressState itself
+// is a derived extraction buffer and must not be the downstream ground truth.
+#[test]
+fn digital_object_predictable_repr_lands_on_code_axes() {
+    let vp = Arc::new(Viewport::new());
+
+    vp.observe_code_ingress_frame(CodeIngressFrameInput {
+        stream_context_id: 5,
+        t_start_us: 10_000,
+        t_end_us: 10_500,
+        bytes: &[0x10, 0x20, 0x30, 0x40, 0x50],
+        framing_validity: 0.8,
+    });
+
+    // All five CODE axes must have received an observation.
+    for &axis in &[
+        CODE_POS,
+        CODE_SPAN,
+        CODE_STRUCT_ORDER_POS,
+        CODE_STRUCT_ORDER_ORIENT,
+        CODE_STRUCT_ORDER_PERIOD,
+    ] {
+        let obs = vp.latest_observation(axis);
+        assert!(
+            obs.is_some(),
+            "CODE axis {} must carry an observation after observe_code_ingress_frame",
+            axis
+        );
+        let s = obs.unwrap();
+        assert!(
+            s.value >= 0.0 && s.value <= 1.0,
+            "CODE axis {} value {:.4} must be in [0,1]",
+            axis,
+            s.value
+        );
+        assert_eq!(
+            s.t_us, 10_500,
+            "CODE axis {} timestamp must match the frame t_end_us",
+            axis
+        );
+    }
+
+    // The extraction buffer still holds the raw trace (for egress pairing and
+    // snapshot/observer display), but the axis observations are authoritative.
+    let buf = vp.read_code_ingress();
+    assert_eq!(buf.recent_frames.len(), 1, "extraction buffer retains frame trace");
 }

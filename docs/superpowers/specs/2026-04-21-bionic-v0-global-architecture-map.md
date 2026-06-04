@@ -32,9 +32,11 @@ ordinary ingress
   -> observer
 
 computer-native byte ingress
-  -> code ingress trace substrate
+  -> code ingress extraction buffer (CodeIngressState — derived, not independent)
   -> tier-0 CODE axes (CODE_POS / CODE_SPAN / CODE_STRUCT_ORDER_*) via push_observation
-  -> snapshot / observer
+       ← single authoritative representation of digital objects
+  -> evidence tension (reads CODE axes, not buffer)
+  -> snapshot / observer (display mirror of buffer + axes; no decision path)
 
 birth sensitivity and learned bias
   -> numeric update-pressure curves
@@ -57,7 +59,7 @@ turn observations into body ontology.
 | Action consequence | Complete as substrate | `action_consequence.rs`, snapshot / observer | 45 action-consequence tests pass |
 | Vocal runtime bridge | Complete as body-side execution path | `vocal_target.rs`, `vocal_organ.rs`, `vocal_adapter.rs`, `vocal_imitation.rs`, `vocal_memory.rs`, `body.rs` | vocal runtime and body contract tests pass |
 | Live I/O preflight | Complete as deterministic substrate proof | action output + vocal + ingress + consequence + observer | live preflight tests pass; physical hardware availability remains an environment finding |
-| Code ingress | Complete as byte disturbance ingress | `code_ingress.rs`, `code_ingress_adapter.rs`, snapshot / observer | code ingress tests pass |
+| Code ingress | Complete — single representation enforced | `code_ingress.rs` (extraction buffer, declared non-independent), `code_ingress_adapter.rs`, `viewport.rs::tick_evidence_tension_from_code_ingress` (reads CODE axes), snapshot / observer | code ingress tests pass; digital_object_predictable_repr_lands_on_code_axes guard added |
 | Framed byte egress | Complete as minimal digital write-out substrate | `framed_byte_egress.rs`, action output, consequence, snapshot / observer | framed-byte egress tests pass |
 | Evidence pressure | Contracted to generic pressure substrate | `substrate_pressure.rs`, `evidence_tension.rs`, `probe_law.rs` | contraction and evidence-tension tests pass |
 | Learned bias persistence | Contracted to generic pressure-axis sediment only | `learned_bias.rs`, snapshot summary | learned-bias and contraction tests pass |
