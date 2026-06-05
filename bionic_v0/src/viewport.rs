@@ -4411,6 +4411,33 @@ impl Viewport {
     }
 
     pub fn tick_vocal_memory(&self, now_us: u64) {
+        // Record a prototype when the imitation loop has converged on a target
+        // AND the organ actually phonated (real breath, not a survival-gated
+        // zero). This is the LEARNING side of the vocal loop.
+        //
+        // 整合修复: this used to live in tick_vocal_imitation_loop, which the
+        // 改造6 unified-drive-field refactor orphaned — body.rs drives voicing
+        // via tick_vocal_drive_field but never called the imitation loop, so
+        // converged sounds were never stored (n_prototypes stayed 0 forever
+        // despite converge_count climbing into the hundreds). Moved here, the
+        // recording runs every tick right after tick_vocal_drive_field updates
+        // the imitation gap.
+        let imit = self.read_vocal_imitation();
+        if imit.last_gap < 0.2 && imit.converge_count >= 3 {
+            let organ = self.read_vocal_organ();
+            if organ.phase == crate::vocal_organ::VocalOrganPhase::Active
+                && organ.breath_drive > 0.01
+            {
+                let mut mem = self.vocal_memory.write().unwrap();
+                mem.record_success(
+                    now_us,
+                    organ.breath_drive,
+                    organ.pitch_tension,
+                    organ.resonance_position,
+                );
+            }
+        }
+
         let mut mem = self.vocal_memory.write().unwrap();
         mem.tick_decay(now_us);
     }
