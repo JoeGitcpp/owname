@@ -87,7 +87,14 @@ function bandsFromCenter(c, width, energy) {
 }
 
 // ── Curriculum primitives (generators of per-tick {level,flux,bands}) ─────────
-function* tone(center, durMs, energy = 0.7, width = 0.18) {
+// Energy kept GENTLE (≈0.4): every voicing tick costs 0.5 vital exertion
+// regardless of magnitude, so the lever for survival is voicing DUTY CYCLE, not
+// loudness. Lessons are short and followed by rests so reserve recovers between
+// them (the body voices when fed, rests when it must — like infant-directed
+// speech with lots of pauses). Durable learning accumulates in learned_bias
+// (seeded across sessions); the within-session prototype count just signals
+// that the loop is closing.
+function* tone(center, durMs, energy = 0.4, width = 0.18) {
   const n = Math.max(1, Math.round(durMs / DT_MS))
   for (let i = 0; i < n; i++) {
     const env = Math.sin(Math.PI * (i + 0.5) / n)   // smooth attack→decay
@@ -98,7 +105,7 @@ function* silence(durMs) {
   const n = Math.max(1, Math.round(durMs / DT_MS))
   for (let i = 0; i < n; i++) yield { level: 0, flux: 0, bands: new Array(BANDS).fill(0) }
 }
-function* glide(c0, c1, durMs, energy = 0.7) {
+function* glide(c0, c1, durMs, energy = 0.4) {
   const n = Math.max(1, Math.round(durMs / DT_MS))
   for (let i = 0; i < n; i++) {
     const t = (i + 0.5) / n
@@ -110,6 +117,7 @@ function* glide(c0, c1, durMs, energy = 0.7) {
 // One full curriculum pass. Each utterance repeated REPS× so the imitation loop
 // can hit converge_count≥3. Foundational acoustic phases only — analytic, no TTS.
 const REPS = 4
+const REST_MS = 15000   // quiet window between passes so reserve recovers
 function* curriculumPass() {
   const centers = [0.2, 0.5, 0.8, 0.35, 0.65]   // "vowel" spectral targets
 
@@ -124,7 +132,7 @@ function* curriculumPass() {
   }
   // Phase 3 — rhythmic pulses (timing, repeat)
   for (let r = 0; r < REPS; r++) {
-    for (let k = 0; k < 4; k++) { yield* tone(0.5, 180, 0.8); yield* silence(180) }
+    for (let k = 0; k < 4; k++) { yield* tone(0.5, 180, 0.5); yield* silence(180) }
     yield* silence(500)
   }
   // Phase 4 — glides / call-and-response (rising then echo, built-in repetition)
@@ -132,6 +140,11 @@ function* curriculumPass() {
   for (const [a, b] of glides) {
     for (let r = 0; r < REPS; r++) { yield* glide(a, b, 600); yield* silence(300); yield* glide(a, b, 600); yield* silence(500) }
   }
+
+  // Rest between passes — a long quiet window so the body stops voicing and
+  // vital reserve recovers (voicing costs 0.5 drain/tick; only quiet lets
+  // drain fall back to the 0.2 base so supply can lift reserve again).
+  yield* silence(REST_MS)
 }
 
 // ── vocal_efficacy = last 8 bytes of learned_bias.bin (final write_f64) ───────
