@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn band_error_score_tracks_band_sensitivity() {
         let mut priors = BiasPriors::default();
-        let err = [0.1, 0.1, 0.8, 0.1];
+        let err = [0.1, 0.1, 0.8, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let baseline = compute_disruption_score(&err, &priors);
         priors.band_sensitivity[2] = 1.5;
         let amplified = compute_disruption_score(&err, &priors);
