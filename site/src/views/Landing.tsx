@@ -13,7 +13,7 @@ const OVERLAYS: Record<OverlayId, { title: DictKey; body: DictKey }> = {
   legal: { title: 'legal.title', body: 'legal.body' },
 }
 
-export function Landing({ onEnter }: { onEnter: () => void }) {
+export function Landing({ onEnter, onLogin }: { onEnter: () => void; onLogin: () => void }) {
   const { t, lang, setLang } = useI18n()
   const [overlay, setOverlay] = useState<OverlayId | null>(null)
   const idle = idleSenses()
@@ -37,10 +37,18 @@ export function Landing({ onEnter }: { onEnter: () => void }) {
       <main className="landing__center">
         <button className="commune-btn" onClick={onEnter}>
           <span className="commune-btn__ring" />
-          <span className="commune-btn__label">{t('enter')}</span>
+          <span className="commune-btn__label">{t('landing.guest')}</span>
         </button>
         <p className="landing__tagline">{t('tagline')}</p>
         <p className="landing__sub">{t('enter.sub')}</p>
+
+        {/* Login option — upgrade to a persistent instance */}
+        <div className="landing__login-section">
+          <p className="landing__login-hint">{t('landing.login.hint')}</p>
+          <button className="landing__login-btn" onClick={onLogin}>
+            {t('landing.login')}
+          </button>
+        </div>
       </main>
 
       <footer className="landing__foot">

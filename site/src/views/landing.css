@@ -230,3 +230,24 @@
     padding: 32px 22px 28px;
   }
 }
+
+/* ── Login section ───────────────────────────────────────────────────────── */
+.landing__login-section {
+  margin-top: 28px;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+.landing__login-hint {
+  margin: 0;
+  font-size: 12.5px; line-height: 1.7;
+  color: var(--ink-faint);
+  max-width: 320px; text-align: center;
+}
+.landing__login-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, .18);
+  color: var(--ink-dim);
+  font-size: 13px; letter-spacing: .08em;
+  padding: 9px 26px; border-radius: 999px;
+  cursor: pointer; transition: all .2s;
+}
+.landing__login-btn:hover { border-color: var(--accent); color: var(--ink); }

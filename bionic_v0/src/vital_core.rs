@@ -154,7 +154,10 @@ impl VitalCoreState {
         if self.state == VitalState::Standby {
             return 1.0;
         }
-        unit((1.0 - self.reserve) * 0.6 + self.vital_anxiety * 0.4)
+        // Quadratic: stays low at healthy reserve, rises steeply below 0.5
+        // reserve=1.0 → ~0.01  reserve=0.5 → ~0.27  reserve=0.1 → ~0.76
+        let reserve_pressure = (1.0 - self.reserve).powi(2);
+        unit(reserve_pressure * 0.70 + self.vital_anxiety * 0.30)
     }
 }
 
@@ -402,6 +405,22 @@ mod tests {
             VitalState::Alive,
             "sustained supply must revive from Standby (可复苏)"
         );
+    }
+
+    #[test]
+    fn survival_pressure_is_low_when_healthy() {
+        let mut s = VitalCoreState::default();
+        s.reserve = 0.95;
+        let p = s.self_preservation_pressure();
+        assert!(p < 0.05, "healthy body pressure should be <5%, got {p:.3}");
+    }
+
+    #[test]
+    fn survival_pressure_rises_below_half() {
+        let mut s = VitalCoreState::default();
+        s.reserve = 0.4;
+        let p = s.self_preservation_pressure();
+        assert!(p > 0.20, "low-reserve pressure should be >20%, got {p:.3}");
     }
 
     #[test]

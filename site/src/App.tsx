@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
 import { I18nContext, type Lang } from './i18n'
-import { Landing } from './views/Landing'
-import { Commune } from './views/Commune'
-import { Debrief } from './views/Debrief'
+import { Landing }      from './views/Landing'
+import { AuthFlow }     from './views/AuthFlow'
+import { Commune }      from './views/Commune'
+import { InstanceView } from './views/InstanceView'
+import { Debrief }      from './views/Debrief'
+import './views/auth-flow.css'
 
-type Stage = 'landing' | 'commune' | 'debrief'
+type Stage = 'landing' | 'auth' | 'commune' | 'instance' | 'debrief'
 
 const LANG_KEY = 'aborn.lang'
 
@@ -16,28 +19,39 @@ function initialLang(): Lang {
 }
 
 export function App() {
-  const [lang, setLangState] = useState<Lang>(initialLang)
-  const [stage, setStage] = useState<Stage>('landing')
-  const [debriefSecs, setDebriefSecs] = useState(0)
+  const [lang, setLangState]    = useState<Lang>(initialLang)
+  const [stage, setStage]       = useState<Stage>('landing')
+  const [debriefSecs, setDebriefSecs]   = useState(0)
+  const [instanceId, setInstanceId]     = useState<string | null>(null)
+  const [instanceName, setInstanceName] = useState<string | null>(null)
 
   const setLang = (l: Lang) => {
     setLangState(l)
-    try {
-      localStorage.setItem(LANG_KEY, l)
-    } catch {
-      /* ignore storage failures (private mode) */
-    }
+    try { localStorage.setItem(LANG_KEY, l) } catch {}
   }
 
-  useEffect(() => {
-    document.documentElement.lang = lang
-  }, [lang])
+  useEffect(() => { document.documentElement.lang = lang }, [lang])
 
   return (
     <I18nContext.Provider value={{ lang, setLang }}>
       {stage === 'landing' && (
-        <Landing onEnter={() => setStage('commune')} />
+        <Landing
+          onEnter={() => setStage('commune')}
+          onLogin={() => setStage('auth')}
+        />
       )}
+
+      {stage === 'auth' && (
+        <AuthFlow
+          onComplete={(id, name) => {
+            setInstanceId(id)
+            setInstanceName(name)
+            setStage('instance')
+          }}
+          onBack={() => setStage('landing')}
+        />
+      )}
+
       {stage === 'commune' && (
         <Commune
           onLeave={(secs) => {
@@ -46,6 +60,15 @@ export function App() {
           }}
         />
       )}
+
+      {stage === 'instance' && instanceId && instanceName && (
+        <InstanceView
+          instanceId={instanceId}
+          instanceName={instanceName}
+          onLeave={() => setStage('landing')}
+        />
+      )}
+
       {stage === 'debrief' && (
         <Debrief
           secs={debriefSecs}

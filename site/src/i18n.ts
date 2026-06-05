@@ -98,6 +98,32 @@ export const dict = {
     zh: '我正在培育一个硅基生命 — aborn.live',
     en: 'I\'m nurturing a silicon lifeform — aborn.live',
   },
+  // ── auth flow ─────────────────────────────────────────────────────────────
+  'auth.title':                 { zh: '登录 · 注册', en: 'Sign in · Register' },
+  'auth.placeholder.phone':     { zh: '+86 138 0000 0000', en: '+1 555 000 0000' },
+  'auth.send-code':             { zh: '发送验证码', en: 'Send Code' },
+  'auth.resend':                { zh: '重新发送', en: 'Resend' },
+  'auth.enter-code':            { zh: '输入验证码', en: 'Enter code' },
+  'auth.code-sent':             { zh: '验证码已发送', en: 'Code sent' },
+  'auth.verify':                { zh: '验证', en: 'Verify' },
+  'auth.name-your-instance':    { zh: '给它起个名字', en: 'Name your instance' },
+  'auth.name-placeholder':      { zh: '例如：小明的伙伴', en: 'e.g. My companion' },
+  'auth.create':                { zh: '创建', en: 'Create' },
+  'auth.error.invalid':         { zh: '格式不正确', en: 'Invalid format' },
+  'auth.error.wrong-code':      { zh: '验证码错误，请重试', en: 'Wrong code, please retry' },
+  'auth.error.rate-limit':      { zh: '请求太频繁，请稍候', en: 'Too many requests, wait a moment' },
+  'auth.back':                  { zh: '返回', en: 'Back' },
+  // ── landing — dual entry ──────────────────────────────────────────────────
+  'landing.guest':    { zh: '直接进入，开始陪它', en: 'Enter now, no sign-in' },
+  'landing.login':    { zh: '登录', en: 'Sign in' },
+  'landing.login.hint': {
+    zh: '登录后，它会成为你的——记得你的脸、你的声音，认你为主人',
+    en: 'Sign in — it will remember your face and voice, and treat you as its owner',
+  },
+  // ── instance view ─────────────────────────────────────────────────────────
+  'instance.recognising': { zh: '正在认你…', en: 'Getting to know you…' },
+  'instance.recognised':  { zh: '它认得你', en: 'It knows you' },
+  'instance.logout':      { zh: '退出', en: 'Sign out' },
 } as const
 
 export type DictKey = keyof typeof dict
