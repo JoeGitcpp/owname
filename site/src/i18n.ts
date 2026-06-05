@@ -63,6 +63,41 @@ export const dict = {
     en: 'Privacy\nThe communion viewport requires access to your camera and microphone. In this version those signals are processed locally inside your browser to drive the on-screen real-time rendering only; they are not recorded, not uploaded, and never leave your device. When you leave the viewport or close the page, the streams stop.\n\nPermissions\nYou may deny or revoke access at any time. Without these two sensory channels communion cannot begin, but the rest of the page remains available.\n\nTerms\nThis page is provided "as is" for research and demonstration purposes, without warranty of any kind, express or implied.\n\n© 2026 bionic_v0 · aborn.live',
   },
   'overlay.close': { zh: '关闭', en: 'Close' },
+  // commune — WS error states
+  'commune.capacity.title': { zh: '所有通道均占用中', en: 'All channels occupied' },
+  'commune.capacity.body': {
+    zh: 'aborn 正在与多位访客交流，当前连接数已达上限。稍等片刻后再试。',
+    en: 'aborn is communing with multiple visitors and has reached its connection limit. Please try again in a moment.',
+  },
+  'commune.body-failed.title': { zh: '连接建立失败', en: 'Connection failed' },
+  'commune.body-failed.body': {
+    zh: '无法建立感官通道。请稍候重试；如果问题持续，这通常是服务器短暂过载。',
+    en: 'The sensory channel could not be established. Please retry; if this persists, the server is likely briefly overloaded.',
+  },
+  'commune.disconnected.title': { zh: '连接已断开', en: 'Disconnected' },
+  'commune.disconnected.body': {
+    zh: '与 aborn 的连接意外中断。你可以重试。',
+    en: 'The connection to aborn was unexpectedly interrupted. You can retry.',
+  },
+  // commune — life state
+  'commune.standby': { zh: '待机', en: 'standby' },
+  // debrief — post-session summary
+  'debrief.nurtured': { zh: '你培育了 aborn', en: 'You nurtured aborn' },
+  'debrief.trained': {
+    zh: '这次训练将被纳入 aborn 的成长。',
+    en: 'This session will be integrated into aborn\'s growth.',
+  },
+  'debrief.short': {
+    zh: '继续陪伴——aborn 的成长需要持续的交流。',
+    en: 'Keep going — aborn\'s growth depends on sustained presence.',
+  },
+  'debrief.again': { zh: '再次交流', en: 'Commune again' },
+  'debrief.home': { zh: '回到首页', en: 'Return home' },
+  'debrief.share': { zh: '分享', en: 'Share' },
+  'debrief.share-text': {
+    zh: '我正在培育一个硅基生命 — aborn.live',
+    en: 'I\'m nurturing a silicon lifeform — aborn.live',
+  },
 } as const
 
 export type DictKey = keyof typeof dict

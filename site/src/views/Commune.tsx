@@ -9,40 +9,71 @@ import './commune.css'
 // Connects to aborn-gateway via WebSocket. On each Perception.read() tick,
 // packs the Senses struct into a compact binary frame (0x01) and sends it.
 // Receives vocal PCM (0x02) and plays it; receives surface pixels (0x04)
-// and draws them to the surface canvas.
+// and draws them to the surface canvas; receives life-state pulses (0x03)
+// and surfaces them to the UI.
 
 const GATEWAY_WS = (() => {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${location.host}/ws`
 })()
 
-const TAG_SENSES = 0x01
-const TAG_VOCAL  = 0x02
+const TAG_SENSES  = 0x01
+const TAG_VOCAL   = 0x02
+const TAG_STATE   = 0x03
 const TAG_SURFACE = 0x04
-const BANDS      = 12
-const GW         = 32
-const GH         = 24
-// tag(1) + audio_level+audio_flux+12bands+motion+luma (16 × f32 = 64) + grid (768 × f32 = 3072)
-const FRAME_BYTES = 1 + (2 + BANDS + 2) * 4 + GW * GH * 4  // 3137
+const BANDS       = 64
+const GW          = 160
+const GH          = 120
+// tag(1) + (2 + BANDS + 2 + 8)×f32 + GW×GH×3×f32 = 1 + 304 + 230400 = 230705
+const FRAME_BYTES = 1 + (2 + BANDS + 2 + 8) * 4 + GW * GH * 3 * 4  // 230705
+
+export interface LifeState {
+  reserve: number  // 0..1 — energy/vitality level
+  vstate: number   // 0=Alive, 1=Standby
+}
+
+type DisconnectReason = 'capacity' | 'body-failed' | 'session-limit' | 'kicked'
+
+function mapCloseCode(code: number): DisconnectReason {
+  if (code === 1013) return 'capacity'
+  if (code === 1011) return 'body-failed'
+  if (code === 1001) return 'session-limit'
+  return 'kicked'
+}
 
 function packSenses(s: import('../lib/perception').Senses): ArrayBuffer {
   const buf  = new ArrayBuffer(FRAME_BYTES)
   const view = new DataView(buf)
-  let off    = 0
+  let off = 0
   view.setUint8(off++, TAG_SENSES)
-  view.setFloat32(off, s.audioLevel,   true); off += 4
-  view.setFloat32(off, s.audioFlux,    true); off += 4
+  view.setFloat32(off, s.audioLevel, true); off += 4
+  view.setFloat32(off, s.audioFlux,  true); off += 4
   for (let b = 0; b < BANDS; b++) {
     view.setFloat32(off, s.bands[b] ?? 0, true); off += 4
   }
   view.setFloat32(off, s.motion, true); off += 4
   view.setFloat32(off, s.luma,   true); off += 4
-  for (let gy = 0; gy < GH; gy++) {
-    for (let gx = 0; gx < GW; gx++) {
-      const sx = Math.floor(gx * s.gw / GW)
-      const sy = Math.floor(gy * s.gh / GH)
-      view.setFloat32(off, s.grid[sy * s.gw + sx] ?? 0, true); off += 4
-    }
+  // 8 aux features
+  view.setFloat32(off, s.spectralCentroid ?? 0, true); off += 4
+  view.setFloat32(off, s.spectralFlatness  ?? 0, true); off += 4
+  view.setFloat32(off, s.spectralRolloff   ?? 0, true); off += 4
+  view.setFloat32(off, s.spectralSpread    ?? 0, true); off += 4
+  view.setFloat32(off, s.zcr               ?? 0, true); off += 4
+  view.setFloat32(off, s.hnr               ?? 0, true); off += 4
+  view.setFloat32(off, s.onsetStrength     ?? 0, true); off += 4
+  view.setFloat32(off, s.temporalFlux      ?? 0, true); off += 4
+  // RGB grid: R plane, then G plane, then B plane (planar SoA)
+  const gridR = s.gridR ?? s.grid  // fallback to luma if RGB not available
+  const gridG = s.gridG ?? s.grid
+  const gridB = s.gridB ?? s.grid
+  for (let i = 0; i < GW * GH; i++) {
+    view.setFloat32(off, gridR[i] ?? 0, true); off += 4
+  }
+  for (let i = 0; i < GW * GH; i++) {
+    view.setFloat32(off, gridG[i] ?? 0, true); off += 4
+  }
+  for (let i = 0; i < GW * GH; i++) {
+    view.setFloat32(off, gridB[i] ?? 0, true); off += 4
   }
   return buf
 }
@@ -57,11 +88,15 @@ function useBodyBridge(
   running: boolean,
   getSenses: () => import('../lib/perception').Senses,
   surfaceRef: React.RefObject<HTMLCanvasElement | null>,
+  onLifeState: (s: LifeState) => void,
+  onDisconnect: (reason: DisconnectReason) => void,
 ) {
   const wsRef        = useRef<WebSocket | null>(null)
   const audioCtxRef  = useRef<AudioContext | null>(null)
   const nextTimeRef  = useRef(0)
   const xorKeyRef    = useRef<Uint8Array | null>(null)
+  // True while ws is intentionally open; set false before cleanup close.
+  const liveRef      = useRef(false)
 
   useEffect(() => {
     if (!running) return
@@ -69,6 +104,7 @@ function useBodyBridge(
     ws.binaryType = 'arraybuffer'
     wsRef.current  = ws
     xorKeyRef.current = null
+    liveRef.current = true
 
     const Ctor = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
     const actx = new Ctor()
@@ -76,11 +112,8 @@ function useBodyBridge(
     nextTimeRef.current = 0
 
     // iOS Safari creates AudioContext in suspended state — resume immediately.
-    // The permission tap that brought us to 'live' phase is a valid gesture context.
     actx.resume().catch(() => {})
 
-    // Belt-and-suspenders: also resume on first user interaction inside Commune
-    // in case the above attempt is still too late in the gesture chain.
     const unlockAudio = () => {
       audioCtxRef.current?.resume().catch(() => {})
       document.removeEventListener('touchstart', unlockAudio, true)
@@ -117,9 +150,15 @@ function useBodyBridge(
         src.start(when)
         nextTimeRef.current = when + abuf.duration
 
+      } else if (tag === TAG_STATE) {
+        // [0x03][reserve:f32le][vital_state:u8][self_coherence:f32le][...]
+        if (buf.byteLength >= 6) {
+          const reserve = Math.min(1, Math.max(0, view.getFloat32(1, true)))
+          const vstate  = view.getUint8(5)
+          onLifeState({ reserve, vstate })
+        }
+
       } else if (tag === TAG_SURFACE) {
-        // Raw surface pixels from surface_render.rs — apply brightness boost so
-        // low-drive states (pixel values 1-10/255) are visible at full screen scale.
         if (buf.byteLength < 5) return
         const w = view.getUint16(1, true)
         const h = view.getUint16(3, true)
@@ -131,7 +170,7 @@ function useBodyBridge(
         if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h }
         const src = new Uint8Array(buf.buffer, buf.byteOffset + 5, w * h * 4)
         const img = ctx2d.createImageData(w, h)
-        const GAIN = 6  // lift low-drive pixels; saturates naturally at 255
+        const GAIN = 3
         for (let i = 0; i < src.length; i += 4) {
           img.data[i]   = Math.min(255, src[i]   * GAIN)
           img.data[i+1] = Math.min(255, src[i+1] * GAIN)
@@ -140,6 +179,11 @@ function useBodyBridge(
         }
         ctx2d.putImageData(img, 0, 0)
       }
+    }
+
+    ws.onclose = (ev) => {
+      if (!liveRef.current) return  // intentional cleanup close — no error
+      onDisconnect(mapCloseCode(ev.code))
     }
 
     const interval = setInterval(() => {
@@ -151,6 +195,7 @@ function useBodyBridge(
     }, 50)
 
     return () => {
+      liveRef.current = false  // mark intentional before close
       clearInterval(interval)
       ws.close()
       wsRef.current = null
@@ -166,6 +211,7 @@ type Phase =
   | { k: 'live' }
   | { k: 'denied' }
   | { k: 'unsupported' }
+  | { k: 'disconnected'; reason: DisconnectReason }
 
 function useCallTimer(running: boolean) {
   const [secs, setSecs] = useState(0)
@@ -176,14 +222,15 @@ function useCallTimer(running: boolean) {
   }, [running])
   const m = String(Math.floor(secs / 60)).padStart(2, '0')
   const s = String(secs % 60).padStart(2, '0')
-  return `${m}:${s}`
+  return { display: `${m}:${s}`, secs }
 }
 
-export function Commune({ onLeave }: { onLeave: () => void }) {
+export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
   const { t } = useI18n()
   const [phase, setPhase] = useState<Phase>({ k: 'requesting' })
   const [muted, setMuted] = useState(false)
   const [camOff, setCamOff] = useState(false)
+  const [lifeState, setLifeState] = useState<LifeState | null>(null)
 
   const perceptionRef  = useRef<Perception | null>(null)
   const streamRef      = useRef<MediaStream | null>(null)
@@ -193,8 +240,13 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
 
   const timer = useCallTimer(phase.k === 'live')
 
+  const handleDisconnect = (reason: DisconnectReason) => {
+    setPhase({ k: 'disconnected', reason })
+  }
+
   const begin = async () => {
     setPhase({ k: 'requesting' })
+    setLifeState(null)
     const res: MediaResult = await acquireSenses()
     if (!res.ok) {
       setPhase({ k: res.reason === 'unsupported' ? 'unsupported' : 'denied' })
@@ -226,11 +278,12 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
   }, [])
 
   const leave = () => {
+    const secs = timer.secs
     perceptionRef.current?.dispose()
     releaseStream(streamRef.current)
     perceptionRef.current = null
     streamRef.current = null
-    onLeave()
+    onLeave(secs)
   }
 
   const retry = () => {
@@ -257,21 +310,39 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
 
   const read = () => perceptionRef.current ? perceptionRef.current.read() : fallback.current
 
-  useBodyBridge(phase.k === 'live', read, surfaceRef)
+  useBodyBridge(phase.k === 'live', read, surfaceRef, setLifeState, handleDisconnect)
 
   const isLive = phase.k === 'live'
+  const isStandby = lifeState?.vstate === 1
+  const reserve = lifeState?.reserve ?? 1
 
   return (
     <div className="commune">
       {/* Surface canvas — raw body visual from surface_render.rs */}
       <canvas ref={surfaceRef} className="commune__surface" aria-hidden="true" />
 
-      {/* Top-left: minimal live indicator (no internal params) */}
+      {/* Top-left: live indicator with life-state feedback */}
       {isLive && (
         <div className="commune__remote-label fade-in">
-          <span className="commune__remote-dot" />
+          <span
+            className={`commune__remote-dot${isStandby ? ' commune__remote-dot--standby' : ''}`}
+            style={{ '--reserve': reserve } as React.CSSProperties}
+          />
           <span className="commune__remote-name">aborn</span>
-          <span className="commune__timer">{timer}</span>
+          {isStandby && (
+            <span className="commune__standby-badge">{t('commune.standby')}</span>
+          )}
+          <span className="commune__timer">{timer.display}</span>
+        </div>
+      )}
+
+      {/* Reserve bar — subtle energy indicator below the pill */}
+      {isLive && lifeState && (
+        <div className="commune__reserve-bar" aria-hidden="true">
+          <div
+            className={`commune__reserve-fill${isStandby ? ' commune__reserve-fill--standby' : ''}`}
+            style={{ width: `${reserve * 100}%` }}
+          />
         </div>
       )}
 
@@ -281,7 +352,7 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
         {camOff && <div className="commune__self-off-icon"><CamOffIcon /></div>}
       </div>
 
-      {/* Perception hint — nudge toward motion: depth & shape emerge from movement */}
+      {/* Perception hint */}
       {isLive && (
         <p className="commune__hint fade-in">{t('commune.hint')}</p>
       )}
@@ -318,7 +389,34 @@ export function Commune({ onLeave }: { onLeave: () => void }) {
                 {t('commune.retry')}
               </button>
             )}
-            <button className="commune__btn" onClick={leave}>{t('commune.leave')}</button>
+            <button className="commune__btn" onClick={() => onLeave(0)}>{t('commune.leave')}</button>
+          </div>
+        </div>
+      )}
+
+      {phase.k === 'disconnected' && (
+        <div className="commune__modal fade-in">
+          <h2>{t(
+            phase.reason === 'capacity'
+              ? 'commune.capacity.title'
+              : phase.reason === 'body-failed'
+                ? 'commune.body-failed.title'
+                : 'commune.disconnected.title'
+          )}</h2>
+          <p>{t(
+            phase.reason === 'capacity'
+              ? 'commune.capacity.body'
+              : phase.reason === 'body-failed'
+                ? 'commune.body-failed.body'
+                : 'commune.disconnected.body'
+          )}</p>
+          <div className="commune__actions">
+            {phase.reason !== 'kicked' && (
+              <button className="commune__btn commune__btn--primary" onClick={retry}>
+                {t('commune.retry')}
+              </button>
+            )}
+            <button className="commune__btn" onClick={() => onLeave(0)}>{t('commune.leave')}</button>
           </div>
         </div>
       )}

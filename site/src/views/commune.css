@@ -46,9 +46,48 @@
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 8px var(--accent);
+  /* glow scales with reserve (--reserve: 0..1 CSS var, default 1) */
+  box-shadow: 0 0 calc(4px + var(--reserve, 1) * 8px) var(--accent);
+  opacity: calc(0.35 + var(--reserve, 1) * 0.65);
   animation: breathe 2.6s ease-in-out infinite;
   flex-shrink: 0;
+  transition: background-color 0.8s ease, box-shadow 0.8s ease;
+}
+.commune__remote-dot--standby {
+  background: var(--accent-warm);
+  box-shadow: 0 0 6px var(--accent-warm);
+  animation: breathe 5s ease-in-out infinite;
+}
+
+.commune__standby-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--accent-warm);
+  opacity: 0.8;
+  text-transform: uppercase;
+}
+
+/* Reserve bar — 2 px energy strip under the remote-label pill */
+.commune__reserve-bar {
+  position: absolute;
+  top: 56px;
+  left: 22px;
+  width: 140px;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 1px;
+  overflow: hidden;
+  z-index: 3;
+}
+.commune__reserve-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 1px;
+  transition: width 1.2s ease, background-color 0.8s ease;
+}
+.commune__reserve-fill--standby {
+  background: var(--accent-warm);
 }
 
 .commune__remote-name {

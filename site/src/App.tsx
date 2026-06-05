@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { I18nContext, type Lang } from './i18n'
 import { Landing } from './views/Landing'
 import { Commune } from './views/Commune'
+import { Debrief } from './views/Debrief'
 
-type Stage = 'landing' | 'commune'
+type Stage = 'landing' | 'commune' | 'debrief'
 
 const LANG_KEY = 'aborn.lang'
 
@@ -17,6 +18,7 @@ function initialLang(): Lang {
 export function App() {
   const [lang, setLangState] = useState<Lang>(initialLang)
   const [stage, setStage] = useState<Stage>('landing')
+  const [debriefSecs, setDebriefSecs] = useState(0)
 
   const setLang = (l: Lang) => {
     setLangState(l)
@@ -33,10 +35,23 @@ export function App() {
 
   return (
     <I18nContext.Provider value={{ lang, setLang }}>
-      {stage === 'landing' ? (
+      {stage === 'landing' && (
         <Landing onEnter={() => setStage('commune')} />
-      ) : (
-        <Commune onLeave={() => setStage('landing')} />
+      )}
+      {stage === 'commune' && (
+        <Commune
+          onLeave={(secs) => {
+            setDebriefSecs(secs)
+            setStage('debrief')
+          }}
+        />
+      )}
+      {stage === 'debrief' && (
+        <Debrief
+          secs={debriefSecs}
+          onReenter={() => setStage('commune')}
+          onHome={() => setStage('landing')}
+        />
       )}
     </I18nContext.Provider>
   )

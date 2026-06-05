@@ -4537,12 +4537,17 @@ fn write_vib_band_shape_sample(
     low_energy: f64,
     high_energy: f64,
 ) -> f64 {
-    let observed = [
-        low_energy,
-        low_energy * 0.80,
-        high_energy * 0.80,
-        high_energy,
-    ];
+    // Synthesize a band-shape that ramps from low_energy at the bottom band to
+    // high_energy at the top band, spread across all VIB_BANDS.
+    let mut observed = [0.0_f64; VIB_BANDS];
+    for (idx, slot) in observed.iter_mut().enumerate() {
+        let frac = if VIB_BANDS > 1 {
+            idx as f64 / (VIB_BANDS - 1) as f64
+        } else {
+            0.0
+        };
+        *slot = low_energy * (1.0 - frac) + high_energy * frac;
+    }
     let predicted = observed.map(|value| value * 0.75);
     let err = observed.map(|value| value * 0.25);
     let surprise = observed.map(|value| 0.20 + value * 0.40);

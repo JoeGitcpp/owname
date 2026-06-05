@@ -38,13 +38,13 @@ use crate::phot_camera::{CameraFrame, CAM_H, CAM_W};
 
 /// Reconstruction grid (low-res; far cheaper than the 320×240 frame). The field
 /// learns to reconstruct the frame downsampled to this size.
-pub const GAUSS_REC_W: usize = 48;
-pub const GAUSS_REC_H: usize = 36;
+pub const GAUSS_REC_W: usize = 320;
+pub const GAUSS_REC_H: usize = 240;
 pub const GAUSS_PIX: usize = GAUSS_REC_W * GAUSS_REC_H;
 
 /// Pool capacity. A hard upper bound on simultaneously-active Gaussians — the
 /// sparsity bound (a physical "few primitives explain the scene" prior).
-pub const GAUSS_CAP: usize = 64;
+pub const GAUSS_CAP: usize = 512;
 
 // --- Engineering knobs (not theoretical constants) ---
 // These are DAMPING factors on a normalized (Gauss-Newton) local step
@@ -160,29 +160,55 @@ impl GaussianField {
 
     /// Additive RGB splat: reconstruction[c,p] = Σ_k opacity_k · K_k(p) · color_k[c].
     /// Returned grid is NOT clamped (the raw model output, for residual math).
+    /// Rows are processed in parallel via Rayon; each row is independent.
     pub fn splat(&self) -> Vec<f64> {
-        let mut recon = vec![0.0_f64; 3 * GAUSS_PIX];
-        for g in self.gaussians.iter().filter(|g| g.active) {
-            self.splat_one(g, &mut recon);
+        use rayon::prelude::*;
+        let active: Vec<&Gaussian> = self.gaussians.iter().filter(|g| g.active).collect();
+        if active.is_empty() {
+            return vec![0.0f64; 3 * GAUSS_PIX];
+        }
+
+        // Process rows in parallel; each row is independent
+        let rows: Vec<Vec<f64>> = (0..GAUSS_REC_H).into_par_iter().map(|py| {
+            let yn = (py as f64 + 0.5) / GAUSS_REC_H as f64;
+            let mut row_r = vec![0.0f64; GAUSS_REC_W];
+            let mut row_g = vec![0.0f64; GAUSS_REC_W];
+            let mut row_b = vec![0.0f64; GAUSS_REC_W];
+            for g in &active {
+                // Skip row if outside Gaussian footprint
+                let y_lo = g.mu_y - 3.0 * g.sy;
+                let y_hi = g.mu_y + 3.0 * g.sy;
+                if yn < y_lo || yn > y_hi { continue; }
+                let dy = yn - g.mu_y;
+                let ky = (-0.5 * dy * dy / (g.sy * g.sy)).exp();
+                let x_lo = ((g.mu_x - 3.0 * g.sx) * GAUSS_REC_W as f64) as usize;
+                let x_hi = (((g.mu_x + 3.0 * g.sx) * GAUSS_REC_W as f64) as usize + 1).min(GAUSS_REC_W);
+                for px in x_lo..x_hi {
+                    let xn = (px as f64 + 0.5) / GAUSS_REC_W as f64;
+                    let dx = xn - g.mu_x;
+                    let kx = (-0.5 * dx * dx / (g.sx * g.sx)).exp();
+                    let w = g.opacity * ky * kx;
+                    row_r[px] += w * g.color[0];
+                    row_g[px] += w * g.color[1];
+                    row_b[px] += w * g.color[2];
+                }
+            }
+            let mut combined = Vec::with_capacity(3 * GAUSS_REC_W);
+            combined.extend_from_slice(&row_r);
+            combined.extend_from_slice(&row_g);
+            combined.extend_from_slice(&row_b);
+            combined
+        }).collect();
+
+        // Assemble into planar format [R plane][G plane][B plane]
+        let mut recon = vec![0.0f64; 3 * GAUSS_PIX];
+        for (py, row) in rows.iter().enumerate() {
+            let base = py * GAUSS_REC_W;
+            recon[base..base + GAUSS_REC_W].copy_from_slice(&row[0..GAUSS_REC_W]);
+            recon[GAUSS_PIX + base..GAUSS_PIX + base + GAUSS_REC_W].copy_from_slice(&row[GAUSS_REC_W..2*GAUSS_REC_W]);
+            recon[2*GAUSS_PIX + base..2*GAUSS_PIX + base + GAUSS_REC_W].copy_from_slice(&row[2*GAUSS_REC_W..3*GAUSS_REC_W]);
         }
         recon
-    }
-
-    fn splat_one(&self, g: &Gaussian, recon: &mut [f64]) {
-        let (x0, x1, y0, y1) = footprint(g);
-        for py in y0..y1 {
-            let yn = (py as f64 + 0.5) / GAUSS_REC_H as f64;
-            let dy = yn - g.mu_y;
-            for px in x0..x1 {
-                let xn = (px as f64 + 0.5) / GAUSS_REC_W as f64;
-                let dx = xn - g.mu_x;
-                let k = (-0.5 * (dx * dx / (g.sx * g.sx) + dy * dy / (g.sy * g.sy))).exp();
-                let w = g.opacity * k;
-                recon[idx(0, px, py)] += w * g.color[0];
-                recon[idx(1, px, py)] += w * g.color[1];
-                recon[idx(2, px, py)] += w * g.color[2];
-            }
-        }
     }
 
     /// One predictive-coding tick against a pre-downsampled target grid
@@ -202,13 +228,11 @@ impl GaussianField {
         self.recon_mse = mse;
 
         // Local closed-form parameter updates (no backprop).
-        for k in 0..self.gaussians.len() {
-            if !self.gaussians[k].active {
-                continue;
-            }
-            let updated = local_update(self.gaussians[k], &residual);
-            self.gaussians[k] = updated;
-        }
+        use rayon::prelude::*;
+        let updated: Vec<Gaussian> = self.gaussians.par_iter()
+            .map(|g| if g.active { local_update(*g, &residual) } else { *g })
+            .collect();
+        self.gaussians = updated;
 
         self.birth_death(target, &residual);
         self.n_updates += 1;

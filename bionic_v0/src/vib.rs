@@ -69,9 +69,15 @@ impl VibSource {
 // IIR 1st-order LP filter bank
 // ---------------------------------------------------------------------------
 
+// VIB_BANDS bands are produced by a cascade of (VIB_BANDS - 1) 1st-order IIR
+// low-pass filters whose cutoffs are VIB_BAND_CUTOFFS. Band 0 is the lowest LP
+// output, each interior band is the difference between successive LP outputs,
+// and the top band is the residual high-pass (x − last LP output).
+const VIB_LP_STAGES: usize = VIB_BANDS - 1;
+
 struct BandFilter {
-    alpha: [f64; 3],
-    lp: [f64; 3],
+    alpha: [f64; VIB_LP_STAGES],
+    lp: [f64; VIB_LP_STAGES],
     sum_sq: [f64; VIB_BANDS],
     cnt: usize,
     mono_window: usize,
@@ -88,7 +94,7 @@ impl BandFilter {
         });
         Self {
             alpha,
-            lp: [0.0; 3],
+            lp: [0.0; VIB_LP_STAGES],
             sum_sq: [0.0; VIB_BANDS],
             cnt: 0,
             mono_window,
@@ -96,21 +102,21 @@ impl BandFilter {
     }
 
     fn push(&mut self, x: f64) -> Option<[f64; VIB_BANDS]> {
-        let [a0, a1, a2] = self.alpha;
-        self.lp[0] = a0 * x + (1.0 - a0) * self.lp[0];
-        self.lp[1] = a1 * x + (1.0 - a1) * self.lp[1];
-        self.lp[2] = a2 * x + (1.0 - a2) * self.lp[2];
+        // Advance each LP stage.
+        for i in 0..VIB_LP_STAGES {
+            let a = self.alpha[i];
+            self.lp[i] = a * x + (1.0 - a) * self.lp[i];
+        }
 
-        // Band signals: successive differences of LP outputs
-        let b0 = self.lp[0]; // 0–500 Hz
-        let b1 = self.lp[1] - self.lp[0]; // 500–2 kHz
-        let b2 = self.lp[2] - self.lp[1]; // 2–5 kHz
-        let b3 = x - self.lp[2]; // 5 kHz+
-
-        self.sum_sq[0] += b0 * b0;
-        self.sum_sq[1] += b1 * b1;
-        self.sum_sq[2] += b2 * b2;
-        self.sum_sq[3] += b3 * b3;
+        // Band signals: successive differences of LP outputs, plus the
+        // low-pass floor (band 0) and high-pass residual (top band).
+        self.sum_sq[0] += self.lp[0] * self.lp[0];
+        for i in 1..VIB_LP_STAGES {
+            let b = self.lp[i] - self.lp[i - 1];
+            self.sum_sq[i] += b * b;
+        }
+        let top = x - self.lp[VIB_LP_STAGES - 1];
+        self.sum_sq[VIB_BANDS - 1] += top * top;
         self.cnt += 1;
 
         if self.cnt >= self.mono_window {

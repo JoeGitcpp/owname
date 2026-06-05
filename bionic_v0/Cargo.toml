@@ -51,6 +51,7 @@ cpal = "0.15"
 nokhwa = { version = "0.10", features = ["input-avfoundation"] }
 pixels = "0.13"
 winit = "0.28"
+rayon = "1.10"
 
 [profile.release]
 opt-level = 3

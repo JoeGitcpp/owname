@@ -9,70 +9,95 @@
 //! Wire protocol (compact binary, no field names — opaque to sniffers):
 //!
 //! Gateway → body (sensory input), 20 Hz:
-//!   [0x01]                       tag
-//!   [audio_level : f32le]        RMS amplitude 0..1
-//!   [audio_flux  : f32le]        spectral onset energy 0..1
-//!   [bands       : 12×f32le]     coarse frequency bands 0..1
-//!   [motion      : f32le]        mean inter-frame luminance change 0..1
-//!   [luma        : f32le]        mean brightness 0..1
-//!   [grid        : 768×f32le]    32×24 luminance grid 0..1
-//!   Total: 1 + 4+4+48 + 4+4 + 3072 = 3137 bytes
+//!   [0x01]                          tag
+//!   [audio_level : f32le]           RMS amplitude 0..1
+//!   [audio_flux  : f32le]           spectral onset energy 0..1
+//!   [bands       : 64×f32le]        mel frequency bands 0..1
+//!   [motion      : f32le]           mean inter-frame luminance change 0..1
+//!   [luma        : f32le]           mean brightness 0..1
+//!   [aux         : 8×f32le]         spectral_centroid, spectral_flatness,
+//!                                   spectral_rolloff, spectral_spread,
+//!                                   zcr, hnr, onset_strength, temporal_flux
+//!   [grid        : 57600×f32le]     160×120 RGB planar grid 0..1
+//!   Total: 1 + (2+64+2+8)×4 + 57600×4 = 1 + 304 + 230400 = 230705 bytes
 //!
 //! Body → gateway (vocal output), on demand:
 //!   [0x02]                       tag
 //!   [n : u16le]                  sample count
 //!   [samples : n×f32le]          PCM at VOCAL_SAMPLE_RATE Hz, −1..1
 
+use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use crate::adapter::ModalityAdapter;
 use crate::viewport::Viewport;
-use crate::{MOD_VIB, MOD_PHOT, VIB_BANDS, AXIS_VIS_BASE, VIS_AXES_PER_REGION};
+use crate::{MOD_VIB, MOD_PHOT, VIB_BANDS};
 
 /// Sample rate for vocal PCM frames sent to the gateway.
-pub const VOCAL_SAMPLE_RATE: u32 = 22_050;
-/// Vocal frame size in samples per push (~23 ms @ 22 kHz).
+pub const VOCAL_SAMPLE_RATE: u32 = 44_100;
+/// Vocal frame size in samples per push (~11.6 ms @ 44.1 kHz).
 pub const VOCAL_FRAME_SAMPLES: usize = 512;
 
 // ── Input frame constants ────────────────────────────────────────────────────
 const TAG_SENSES: u8 = 0x01;
-const GRID_W: usize = 32;
-const GRID_H: usize = 24;
-const BANDS: usize = 12;
-// 1 tag + (audio_level + audio_flux + BANDS + motion + luma)×f32 + GRID_W*GRID_H×f32
-// = 1 + (2 + 12 + 2) × 4 + 32×24×4 = 1 + 64 + 3072 = 3137
-const FRAME_BYTES: usize = 1 + (2 + BANDS + 2) * 4 + GRID_W * GRID_H * 4;
+const GRID_W: usize = 160;
+const GRID_H: usize = 120;
+const GRID_CHANNELS: usize = 3;
+const GRID_PIXELS: usize = GRID_W * GRID_H;   // 19200
+const GRID_TOTAL: usize = GRID_PIXELS * GRID_CHANNELS;  // 57600
+const BANDS: usize = 64;
+const AUX_FEATURES: usize = 8;
+// 1 tag + (audio_level + audio_flux + BANDS + motion + luma + AUX_FEATURES)×f32 + GRID_TOTAL×f32
+// = 1 + (2 + 64 + 2 + 8) × 4 + 57600×4 = 1 + 304 + 230400 = 230705
+const FRAME_BYTES: usize = 1 + (2 + BANDS + 2 + AUX_FEATURES) * 4 + GRID_TOTAL * 4;
 
 // ── Output frame constants ───────────────────────────────────────────────────
 const TAG_VOCAL: u8   = 0x02;
 const TAG_SURFACE: u8 = 0x04;
-const SURF_W: usize   = 160;
-const SURF_H: usize   = 90;
+const SURF_W: usize   = 320;
+const SURF_H: usize   = 180;
 
 // ── Shared latest-senses buffer ──────────────────────────────────────────────
 #[derive(Clone)]
 struct SensesFrame {
     audio_level: f32,
     audio_flux:  f32,
-    bands:       [f32; BANDS],
+    bands:       [f32; BANDS],       // 64 mel bands
     motion:      f32,
     luma:        f32,
-    grid:        Vec<f32>,   // GRID_W × GRID_H
+    // 8 aux time-frequency features
+    spectral_centroid:  f32,
+    spectral_flatness:  f32,
+    spectral_rolloff:   f32,
+    spectral_spread:    f32,
+    zcr:                f32,
+    hnr:                f32,
+    onset_strength:     f32,
+    temporal_flux:      f32,
+    // RGB grid: [R pixels (GRID_PIXELS)][G pixels][B pixels]
+    grid: Vec<f32>,  // length = GRID_TOTAL (57600)
 }
 
 impl Default for SensesFrame {
     fn default() -> Self {
         Self {
-            audio_level: 0.0,
-            audio_flux:  0.0,
-            bands:       [0.0; BANDS],
-            motion:      0.0,
-            luma:        0.0,
-            grid:        vec![0.0; GRID_W * GRID_H],
+            audio_level:       0.0,
+            audio_flux:        0.0,
+            bands:             [0.0; BANDS],
+            motion:            0.0,
+            luma:              0.0,
+            spectral_centroid: 0.0,
+            spectral_flatness: 0.0,
+            spectral_rolloff:  0.0,
+            spectral_spread:   0.0,
+            zcr:               0.0,
+            hnr:               0.0,
+            onset_strength:    0.0,
+            temporal_flux:     0.0,
+            grid:              vec![0.0; GRID_TOTAL],
         }
     }
 }
@@ -95,9 +120,22 @@ fn parse_frame(buf: &[u8]) -> Option<SensesFrame> {
     for b in &mut bands { *b = rf(&mut off); }
     let motion = rf(&mut off);
     let luma   = rf(&mut off);
-    let mut grid = vec![0.0f32; GRID_W * GRID_H];
+    let spectral_centroid = rf(&mut off);
+    let spectral_flatness = rf(&mut off);
+    let spectral_rolloff  = rf(&mut off);
+    let spectral_spread   = rf(&mut off);
+    let zcr               = rf(&mut off);
+    let hnr               = rf(&mut off);
+    let onset_strength    = rf(&mut off);
+    let temporal_flux     = rf(&mut off);
+    let mut grid = vec![0.0f32; GRID_TOTAL];
     for g in &mut grid { *g = rf(&mut off); }
-    Some(SensesFrame { audio_level, audio_flux, bands, motion, luma, grid })
+    Some(SensesFrame {
+        audio_level, audio_flux, bands, motion, luma,
+        spectral_centroid, spectral_flatness, spectral_rolloff, spectral_spread,
+        zcr, hnr, onset_strength, temporal_flux,
+        grid,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,8 +222,8 @@ impl ModalityAdapter for NetSensesAdapter {
         let frame = self.read_latest();
 
         // ── VIB: push audio bands as hearing axes ───────────────────────────
-        // Map the 12 browser bands to VIB_BANDS (4) by averaging groups.
-        let per = BANDS / VIB_BANDS;
+        // Map the 64 mel bands to VIB_BANDS (16) by averaging groups of 4.
+        let per = BANDS / VIB_BANDS;  // 64/16 = 4
         let mut vib_bands = [0.0f64; VIB_BANDS];
         for b in 0..VIB_BANDS {
             let avg = frame.bands[b*per..(b+1)*per].iter().sum::<f32>() / per as f32;
@@ -214,34 +252,46 @@ impl ModalityAdapter for NetSensesAdapter {
         );
 
         // ── PHOT: push visual signals as vision axes ────────────────────────
-        // Browser sends a 32×24 luma grid.  We map it to the 2×2 spatial
-        // regions the body uses (AXIS_VIS_BASE + region×VIS_AXES_PER_REGION).
-        // Per region: brightness, R(≈luma), G(≈luma), B(≈luma), motion.
-        // (Without colour from browser, R=G=B=luma; colour is a future upgrade.)
-        let rw = GRID_W / 2;  // 16 columns per region
-        let rh = GRID_H / 2;  // 12 rows per region
-        for ry in 0..2usize {
-            for rx in 0..2usize {
-                let region = ry * 2 + rx;
-                let mut sum_luma = 0.0f32;
+        // Browser sends a 160×120 RGB planar grid.  We map it to the 4×4
+        // spatial regions the body uses (AXIS_VIS_BASE + region×VIS_AXES_PER_REGION).
+        // Per region: brightness, R, G, B, saturation, motion, temporal_flux, edge_energy.
+        let rw = GRID_W / 4;  // 40 pixels per region column
+        let rh = GRID_H / 4;  // 30 pixels per region row
+        for ry in 0..4usize {
+            for rx in 0..4usize {
+                let region = ry * 4 + rx;
+                let mut sum_r = 0.0f32; let mut sum_g = 0.0f32; let mut sum_b = 0.0f32;
                 let count = (rw * rh) as f32;
                 for y in ry*rh..(ry+1)*rh {
                     for x in rx*rw..(rx+1)*rw {
-                        sum_luma += frame.grid[y * GRID_W + x];
+                        let i = y * GRID_W + x;
+                        sum_r += frame.grid[i];
+                        sum_g += frame.grid[GRID_PIXELS + i];
+                        sum_b += frame.grid[2 * GRID_PIXELS + i];
                     }
                 }
-                let brightness = sum_luma / count;
-                let base = AXIS_VIS_BASE + region * VIS_AXES_PER_REGION;
-                vp.push_observation(base,     now_us, brightness as f64); // brightness
-                vp.push_observation(base + 1, now_us, brightness as f64); // R ≈ luma
-                vp.push_observation(base + 2, now_us, brightness as f64); // G ≈ luma
-                vp.push_observation(base + 3, now_us, brightness as f64); // B ≈ luma
-                vp.push_observation(base + 4, now_us, frame.motion as f64); // motion
+                let r = sum_r / count;
+                let g = sum_g / count;
+                let b = sum_b / count;
+                let brightness = (r + g + b) / 3.0;
+                let max_rgb = r.max(g).max(b);
+                let min_rgb = r.min(g).min(b);
+                let saturation = if max_rgb > 0.01 { (max_rgb - min_rgb) / max_rgb } else { 0.0 };
+
+                let base = crate::AXIS_VIS_BASE + region * crate::VIS_AXES_PER_REGION;
+                vp.push_observation(base + crate::vis_sub::BRIGHTNESS,    now_us, brightness as f64);
+                vp.push_observation(base + crate::vis_sub::R,             now_us, r as f64);
+                vp.push_observation(base + crate::vis_sub::G,             now_us, g as f64);
+                vp.push_observation(base + crate::vis_sub::B,             now_us, b as f64);
+                vp.push_observation(base + crate::vis_sub::SATURATION,    now_us, saturation as f64);
+                vp.push_observation(base + crate::vis_sub::MOTION,        now_us, frame.motion as f64);
+                vp.push_observation(base + crate::vis_sub::TEMPORAL_FLUX, now_us, frame.temporal_flux as f64);
+                vp.push_observation(base + crate::vis_sub::EDGE_ENERGY,   now_us, brightness as f64 * 0.5);
             }
         }
 
         // ── Gaussian visual field (headless) ────────────────────────────────
-        // Feed the 32×24 luma grid into the Gaussian field so the surface
+        // Feed the 160×120 RGB grid into the Gaussian field so the surface
         // ticker can render a soft, organic splatted reconstruction of what
         // the body currently perceives through the browser camera.
         vp.tick_gaussian_field_from_net(&frame.grid, now_us);
@@ -279,23 +329,17 @@ pub fn send_vocal_frame(
 
 /// Sample the vocal organ and return a PCM frame (headless equivalent of
 /// `vocal_adapter::sample_vocal_waveform`).
+thread_local! {
+    static VOCAL_SYN: RefCell<crate::vocal_synthesis::VocalSynthesizer> =
+        RefCell::new(crate::vocal_synthesis::VocalSynthesizer::new());
+}
+
 pub fn sample_vocal_pcm(vp: &Arc<Viewport>) -> Vec<f32> {
     let organ = vp.read_vocal_organ();
-    let n = VOCAL_FRAME_SAMPLES;
-    if organ.breath_drive < 0.01 {
-        return vec![0.0f32; n];
-    }
-    let pitch = 280.0 + organ.pitch_tension as f64 * 420.0;
-    let resonance = organ.resonance_position as f64 * 3.0;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f64 / n as f64;
-        let f = (t * pitch * 2.0 * std::f64::consts::PI).sin()
-              + (t * pitch * 4.0 * std::f64::consts::PI).sin() * 0.3
-              + (t * pitch * 6.0 * std::f64::consts::PI).sin() * 0.1 * resonance;
-        out.push((organ.breath_drive as f64 * f).clamp(-1.0, 1.0) as f32);
-    }
-    out
+    let reserve = vp.read_vital_core().reserve;
+    VOCAL_SYN.with(|syn| {
+        syn.borrow_mut().synthesize(&organ, reserve, VOCAL_FRAME_SAMPLES)
+    })
 }
 
 // ── Surface pixel sender ─────────────────────────────────────────────────────
@@ -354,7 +398,7 @@ impl SurfaceSender {
         }
         let recon = field.splat();  // 3×GAUSS_PIX planar f64 RGB in [0, 1]
 
-        // Nearest-neighbour upscale 48×36 → SURF_W×SURF_H (160×90).
+        // Nearest-neighbour upscale from Gaussian rec dims → SURF_W×SURF_H (320×180).
         let frame_bytes = 5 + SURF_W * SURF_H * 4;
         let mut buf = Vec::with_capacity(frame_bytes);
         buf.push(TAG_SURFACE);

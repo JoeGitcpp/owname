@@ -14,9 +14,9 @@ const TAG_SENSES   = 0x01
 const BANDS        = 12
 const GW           = 32
 const GH           = 24
-// 1 tag + (audio_level:f32 + audio_flux:f32 + 12×bands:f32 + motion:f32 + luma:f32) + grid:768×f32
-// = 1 + (2+12+2)×4 + 32×24×4 = 1 + 64 + 3072 = 3137
-export const SENSES_FRAME_BYTES = 1 + (2 + BANDS + 2) * 4 + GW * GH * 4   // 3137
+// tag(1) + (audio_level + audio_flux + 64 mel bands + motion + luma + 8 aux) × f32 + 160×120×3 × f32
+// = 1 + (2 + 64 + 2 + 8) × 4 + 57600 × 4 = 1 + 304 + 230400 = 230705
+export const SENSES_FRAME_BYTES = 1 + (2 + 64 + 2 + 8) * 4 + 160 * 120 * 3 * 4   // 230705
 
 /**
  * Validate a binary frame from the browser before forwarding to body.

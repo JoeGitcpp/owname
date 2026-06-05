@@ -58,6 +58,7 @@ pub mod vocal_imitation;
 pub mod vocal_memory;
 pub mod vocal_organ;
 pub mod vocal_reflex;
+pub mod vocal_synthesis;
 pub mod vocal_target;
 pub mod vpc;
 pub mod vpc_cross_layer;
@@ -69,7 +70,7 @@ pub mod virtual_neck;
 
 pub const HISTORY_CAP: usize = 1024;
 
-pub const VIB_BANDS: usize = 4;
+pub const VIB_BANDS: usize = 16;
 
 // --- Unified perception axes (2026-06-01 redesign) ---
 // Vision is no longer a per-slot shadow: it becomes shared perception axes that
@@ -81,12 +82,25 @@ pub const VIB_BANDS: usize = 4;
 //
 // Coarse spatial grid: the frame is split into VIS_REGIONS cells. Each cell
 // carries VIS_AXES_PER_REGION physical-quantity axes: brightness, R, G, B,
-// motion. Region layout is row-major (VIS_GRID_ROWS × VIS_GRID_COLS).
-pub const VIS_GRID_ROWS: usize = 2;
-pub const VIS_GRID_COLS: usize = 2;
-pub const VIS_REGIONS: usize = VIS_GRID_ROWS * VIS_GRID_COLS; // 4
-pub const VIS_AXES_PER_REGION: usize = 5; // brightness, R, G, B, motion
-pub const VIS_AXES: usize = VIS_REGIONS * VIS_AXES_PER_REGION; // 20
+// saturation, motion, temporal_flux, edge_energy. Region layout is row-major
+// (VIS_GRID_ROWS × VIS_GRID_COLS).
+pub const VIS_GRID_ROWS: usize = 4;
+pub const VIS_GRID_COLS: usize = 4;
+pub const VIS_REGIONS: usize = VIS_GRID_ROWS * VIS_GRID_COLS; // 16
+pub const VIS_AXES_PER_REGION: usize = 8; // brightness, R, G, B, saturation, motion, temporal_flux, edge_energy
+pub const VIS_AXES: usize = VIS_REGIONS * VIS_AXES_PER_REGION; // 128
+
+/// Sub-axis index constants for visual regions (use these instead of bare integers).
+pub mod vis_sub {
+    pub const BRIGHTNESS:    usize = 0;
+    pub const R:             usize = 1;
+    pub const G:             usize = 2;
+    pub const B:             usize = 3;
+    pub const SATURATION:    usize = 4;
+    pub const MOTION:        usize = 5;
+    pub const TEMPORAL_FLUX: usize = 6;
+    pub const EDGE_ENERGY:   usize = 7;
+}
 
 // Axis layout in the shared coordinate system:
 //   [0 .. VIB_BANDS)                         = hearing (frequency bands)
@@ -107,8 +121,8 @@ pub const VIS_AXES: usize = VIS_REGIONS * VIS_AXES_PER_REGION; // 20
 //   (surprise, longing, calm) emerge from prediction error patterns over these
 //   axes, not from labels. No absolute positive/negative values are pre-assigned
 //   (推论5: 无绝对正负判断, 感受涌现自预测差值).
-pub const AXIS_VIS_BASE: usize = VIB_BANDS; // 4
-pub const AXIS_INTERO_BASE: usize = VIB_BANDS + VIS_AXES; // 24
+pub const AXIS_VIS_BASE: usize = VIB_BANDS; // 16
+pub const AXIS_INTERO_BASE: usize = VIB_BANDS + VIS_AXES; // 144
 
 // Ten interoceptive axes — the minimal set that covers vital/self/familiar/
 // reasoning dynamics. All are scalars in [0,1] already maintained by existing
@@ -138,7 +152,7 @@ pub const INTERO_AXES: usize = 10;
 //   CODE_STRUCT_ORDER_POS    → byte distribution skew   (struct_order_pos analog)
 //   CODE_STRUCT_ORDER_ORIENT → byte transition energy   (struct_order_orient analog)
 //   CODE_STRUCT_ORDER_PERIOD → sequence recurrence score (struct_order_period analog)
-pub const AXIS_CODE_BASE: usize = VIB_BANDS + VIS_AXES + INTERO_AXES; // 34
+pub const AXIS_CODE_BASE: usize = VIB_BANDS + VIS_AXES + INTERO_AXES; // 154
 pub const CODE_POS: usize             = AXIS_CODE_BASE + 0;
 pub const CODE_SPAN: usize            = AXIS_CODE_BASE + 1;
 pub const CODE_STRUCT_ORDER_POS: usize    = AXIS_CODE_BASE + 2;
@@ -161,22 +175,24 @@ pub const CODE_SPAN_MAX_BYTES: f64 = 65536.0;
 //   GAUSS_ACTIVE_FRAC → active_count / GAUSS_CAP, normalized to [0,1].
 //                        Tracks sparsity health: near 0 = almost nothing active
 //                        (scene absent / all died), near 1 = pool nearly full.
-pub const AXIS_GAUSS_BASE: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES; // 39
+pub const AXIS_GAUSS_BASE: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES; // 159
 pub const GAUSS_RECON_MSE_AXIS: usize  = AXIS_GAUSS_BASE + 0;
 pub const GAUSS_ACTIVE_FRAC_AXIS: usize = AXIS_GAUSS_BASE + 1;
 pub const GAUSS_SUMMARY_AXES: usize = 2;
 
-pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES + GAUSS_SUMMARY_AXES; // 41
+pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES + GAUSS_SUMMARY_AXES; // 161 = 16+128+10+5+2
 
 pub const AXIS_VIB: usize = 0;
 pub const AXIS_SYNTH: usize = 0; // retained for backward compat
 
 /// Per-region visual sub-axis offsets (within a region's VIS_AXES_PER_REGION block).
-pub const VIS_SUB_BRIGHTNESS: usize = 0;
-pub const VIS_SUB_R: usize = 1;
-pub const VIS_SUB_G: usize = 2;
-pub const VIS_SUB_B: usize = 3;
-pub const VIS_SUB_MOTION: usize = 4;
+/// Prefer the `vis_sub` module constants; these flat aliases are retained for
+/// backward compatibility with existing call sites.
+pub const VIS_SUB_BRIGHTNESS: usize = vis_sub::BRIGHTNESS;
+pub const VIS_SUB_R: usize = vis_sub::R;
+pub const VIS_SUB_G: usize = vis_sub::G;
+pub const VIS_SUB_B: usize = vis_sub::B;
+pub const VIS_SUB_MOTION: usize = vis_sub::MOTION;
 
 /// Global axis index for a given visual region's sub-axis.
 #[inline]
@@ -184,7 +200,10 @@ pub const fn vis_axis(region: usize, sub: usize) -> usize {
     AXIS_VIS_BASE + region * VIS_AXES_PER_REGION + sub
 }
 
-pub const VIB_BAND_CUTOFFS: [f64; 3] = [500.0, 2000.0, 5000.0];
+pub const VIB_BAND_CUTOFFS: [f64; 15] = [
+    100.0, 200.0, 350.0, 500.0, 750.0, 1000.0, 1500.0, 2000.0,
+    3000.0, 4000.0, 5000.0, 7000.0, 10000.0, 14000.0, 18000.0,
+];
 
 // --- Phase 2.5: object layer contracts ---
 pub const N_OBJECT_SLOTS: usize = 8;
@@ -508,7 +527,10 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 /// to Viewport; two summary axes GAUSS_RECON_MSE / GAUSS_ACTIVE_FRAC (AXIS_COUNT
 /// 39→41) mirrored onto the unified tier-0 stream; adapter drives the field from
 /// real camera frames; body.rs is already wired through the adapter registry.
-pub const SNAPSHOT_VERSION: u64 = 55;
+/// v56: Maximized CPU spec — VIB_BANDS 4→16, VIS_GRID 2×2→4×4,
+/// VIS_AXES_PER_REGION 5→8 (+saturation/temporal_flux/edge_energy); AXIS_COUNT
+/// 41→161 (16+128+10+5+2). Old axis layout incompatible; v55 snapshots rejected.
+pub const SNAPSHOT_VERSION: u64 = 56;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.
