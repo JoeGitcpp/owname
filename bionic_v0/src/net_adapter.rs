@@ -210,6 +210,12 @@ impl ModalityAdapter for NetSensesAdapter {
                 vp.push_observation(base + 4, now_us, frame.motion as f64); // motion
             }
         }
+
+        // ── Gaussian visual field (headless) ────────────────────────────────
+        // Feed the 32×24 luma grid into the Gaussian field so the surface
+        // ticker can render a soft, organic splatted reconstruction of what
+        // the body currently perceives through the browser camera.
+        vp.tick_gaussian_field_from_net(&frame.grid, now_us);
     }
 }
 
@@ -295,6 +301,50 @@ impl SurfaceSender {
         buf.extend_from_slice(&(SURF_H as u16).to_le_bytes());
         for px in &pixels { buf.extend_from_slice(px); }
 
+        if stream.write_all(&buf).is_err() {
+            *guard = None;
+        }
+    }
+
+    /// Render the viewport's live Gaussian visual field as a surface frame.
+    /// Used in headless mode: the field is populated by `tick_gaussian_field_from_net`
+    /// via NetSensesAdapter every time a senses frame arrives from the browser.
+    ///
+    /// Falls back silently (no frame sent) when the field has no active Gaussians
+    /// yet (i.e. no senses input received since body startup).
+    pub fn send_gauss(
+        &mut self,
+        vp: &Arc<Viewport>,
+        vocal_tx: &Arc<Mutex<Option<UnixStream>>>,
+    ) {
+        use crate::phot_gaussian::{GAUSS_PIX, GAUSS_REC_W, GAUSS_REC_H};
+
+        let field = vp.read_gaussian_field();
+        if field.active_count() == 0 {
+            return;  // field not yet populated — wait for first senses frames
+        }
+        let recon = field.splat();  // 3×GAUSS_PIX planar f64 RGB in [0, 1]
+
+        // Nearest-neighbour upscale 48×36 → SURF_W×SURF_H (160×90).
+        let frame_bytes = 5 + SURF_W * SURF_H * 4;
+        let mut buf = Vec::with_capacity(frame_bytes);
+        buf.push(TAG_SURFACE);
+        buf.extend_from_slice(&(SURF_W as u16).to_le_bytes());
+        buf.extend_from_slice(&(SURF_H as u16).to_le_bytes());
+        for sy in 0..SURF_H {
+            let gy = sy * GAUSS_REC_H / SURF_H;
+            for sx in 0..SURF_W {
+                let gx  = sx * GAUSS_REC_W / SURF_W;
+                let i   = gy * GAUSS_REC_W + gx;
+                let r   = (recon[i].clamp(0.0, 1.0) * 255.0) as u8;
+                let g   = (recon[GAUSS_PIX + i].clamp(0.0, 1.0) * 255.0) as u8;
+                let b   = (recon[2 * GAUSS_PIX + i].clamp(0.0, 1.0) * 255.0) as u8;
+                buf.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+
+        let mut guard = vocal_tx.lock().unwrap();
+        let stream = match guard.as_mut() { Some(s) => s, None => return };
         if stream.write_all(&buf).is_err() {
             *guard = None;
         }

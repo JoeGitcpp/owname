@@ -406,14 +406,17 @@ fn main() {
         h_audio
     };
 
-    // Headless-only: render surface pixels and push to gateway at 10 Hz.
-    // In hardware mode the VocalTx slot is always None so send() is a no-op.
+    // Headless-only: render Gaussian visual field and push to gateway at 30 Hz.
+    // send_gauss() reads the live Gaussian field (populated each senses frame by
+    // NetSensesAdapter::tick → tick_gaussian_field_from_net) and renders a soft
+    // organic splatted image of what the body currently perceives.
+    // Falls back silently to no-op when the field has no Gaussians yet.
     let h_surface = {
         let vt_surf = net_vocal_tx.clone();
-        let snap_path_surf = paths.final_path.clone();
+        let vp_surf = vp.clone();
         let mut sender = bionic_v0::net_adapter::SurfaceSender::new();
         spawn_ticker(30, stop.clone(), move |_| {
-            sender.send(&snap_path_surf, &vt_surf);
+            sender.send_gauss(&vp_surf, &vt_surf);
         })
     };
 

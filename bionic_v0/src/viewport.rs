@@ -4445,4 +4445,38 @@ impl Viewport {
     pub fn read_gaussian_field(&self) -> crate::phot_gaussian::GaussianField {
         self.gaussian_field.read().unwrap().clone()
     }
+
+    /// Feed a browser-side 32×24 luma grid (headless / NetSensesAdapter) into
+    /// the Gaussian visual field.  Upscales to GAUSS_REC_W×GAUSS_REC_H with
+    /// nearest-neighbour and treats luma as R=G=B so the field builds a
+    /// greyscale reconstruction of what the browser camera currently sees.
+    pub fn tick_gaussian_field_from_net(&self, grid: &[f32], now_us: u64) {
+        use crate::phot_gaussian::{GAUSS_PIX, GAUSS_REC_W, GAUSS_REC_H, GAUSS_CAP};
+        const GRID_W: usize = 32;
+        const GRID_H: usize = 24;
+
+        let mut target = vec![0.0f64; 3 * GAUSS_PIX];
+        for ty in 0..GAUSS_REC_H {
+            let sy = ty * GRID_H / GAUSS_REC_H;
+            for tx in 0..GAUSS_REC_W {
+                let sx = tx * GRID_W / GAUSS_REC_W;
+                let luma = *grid.get(sy * GRID_W + sx).unwrap_or(&0.0) as f64;
+                let i = ty * GAUSS_REC_W + tx;
+                target[i]             = luma;  // R
+                target[GAUSS_PIX + i] = luma;  // G
+                target[2 * GAUSS_PIX + i] = luma;  // B (greyscale target)
+            }
+        }
+
+        let mse = {
+            let mut field = self.gaussian_field.write().unwrap();
+            field.tick_grid(&target)
+        };
+        let active_frac = {
+            let field = self.gaussian_field.read().unwrap();
+            field.active_count() as f64 / GAUSS_CAP as f64
+        };
+        self.push_observation(crate::GAUSS_RECON_MSE_AXIS,   now_us, mse.clamp(0.0, 1.0));
+        self.push_observation(crate::GAUSS_ACTIVE_FRAC_AXIS, now_us, active_frac.clamp(0.0, 1.0));
+    }
 }
