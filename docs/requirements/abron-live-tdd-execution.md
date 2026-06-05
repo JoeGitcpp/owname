@@ -790,68 +790,97 @@ bash scripts/run_all_tests.sh
 ## M1.5 — 感知升级 + 生物发声（M1 完成后立即执行）
 
 > 这一阶段纯 CPU，无 GPU 依赖，不改动任何后端路由——只改感知帧格式和声音合成。  
-> **优先级**：生物发声（F9）最快见效（纯 Rust 替换），视觉升级（F7 L1）次之。
+> **优先级**：生物发声（F9）最快见效（纯 Rust 替换，1-2天），视觉升级（F7）约3-4天，听觉升级（F8）约1.5天。三者 M1.5 全部落地，不分阶段，一次到位。
 
 ---
 
-### M1.5-1. `visual_resolution` — 视觉分辨率提升 L1（F7）
+### M1.5-1. `perceptual_upgrade` — 视觉 + 听觉 CPU 最大化（F7 + F8）
+
+**设计决策**：帧格式同时升级视觉和听觉，统一更新三端（browser / gateway / Rust），确保新旧帧不混用。
 
 **改动文件**：
-- `site/src/lib/perception.ts`（画布升 96×72）
-- `site/src/views/Commune.tsx`（帧格式常量更新）
-- `gateway/security.mjs`（`SENSES_FRAME_BYTES` 更新）
-- `bionic_v0/src/net_adapter.rs`（`GRID_W/H`，`FRAME_BYTES`）
-- `bionic_v0/src/phot_gaussian.rs`（`GAUSS_REC_W/H` 升 96×72，`GAUSS_CAP` 升 128）
+- `site/src/lib/perception.ts`（画布 → 160×120，FFT 2048，64 mel 带 + 8 aux 特征，RGB 三通道）
+- `site/src/views/Commune.tsx`（帧格式常量）
+- `gateway/security.mjs`（`SENSES_FRAME_BYTES`）
+- `bionic_v0/src/net_adapter.rs`（`GRID_W/H/CHANNELS`，`BANDS`，`FRAME_BYTES`，VIS 16 区域 × 8 轴）
+- `bionic_v0/src/lib.rs`（`VIB_BANDS=16`，`VIS_REGIONS=16`，`VIS_AXES_PER_REGION=8`，`AXIS_COUNT=161`）
+- `bionic_v0/src/phot_gaussian.rs`（`GAUSS_REC_W=320`，`GAUSS_REC_H=240`，`GAUSS_CAP=512`，Rayon 并行，RGB 三通道）
 
-**新常量**：
+**新常量（唯一目标规格）**：
 ```
-GRID_W = 96,  GRID_H = 72      // 6912 像素，当前 9×
-GAUSS_REC_W = 96, GAUSS_REC_H = 72
-GAUSS_CAP = 128
-FRAME_BYTES = 1 + (2 + BANDS + 2)*4 + 96*72*4 = 27,713 bytes
+GRID_W = 160,  GRID_H = 120,  GRID_CHANNELS = 3  // 57,600 像素 RGB
+BANDS  = 64                                         // mel-scale
+AUX    = 8                                          // 时频特征
+FRAME_BYTES = 1 + (2 + 64 + 2 + 8)×4 + 160×120×3×4
+           = 1 + 304 + 230,400 = 230,705 bytes
+
+GAUSS_REC_W = 320, GAUSS_REC_H = 240  // 76,800 像素（2× 上采样自浏览器）
+GAUSS_CHANNELS = 3                     // RGB
+GAUSS_PIX = 76,800
+GAUSS_CAP = 512
+VIB_BANDS = 16
+VIS_REGIONS = 16 (4×4)
+VIS_AXES_PER_REGION = 8
+AXIS_COUNT = 161
 ```
 
 **测试文件**：
-- `gateway/visual_resolution.test.mjs`（新建，JS 端帧格式验证）
-- `bionic_v0/src/phot_gaussian.rs` 内 `#[cfg(test)]`（Rust 端）
+- `gateway/perceptual_upgrade.test.mjs`（JS 端帧格式 + 带宽验证）
+- `bionic_v0/src/phot_gaussian.rs` `#[cfg(test)]`
+- `bionic_v0/src/lib.rs` 轴常量测试更新
 
-**测试清单**（共 18 个）：
+**测试清单**（共 24 个）：
 
-**JS 端（`visual_resolution.test.mjs`，8 个）**：
-
-| # | 场景 | 期望 |
-|---|------|------|
-| 1 | SENSES_FRAME_BYTES 常量 = 27713 | 新帧大小 |
-| 2 | validateFrame(27713字节,0x01) → true | 通过验证 |
-| 3 | validateFrame(3137字节,0x01) → false（旧帧被拒绝）| 版本门 |
-| 4 | validateFrame(27714字节,0x01) → false（padding 攻击）| 安全 |
-| 5 | packSenses 输出恰好 27713 字节 | 浏览器端 |
-| 6 | grid 字段在帧内偏移正确（= 65）| 布局 |
-| 7 | 升级后 gateway maxPayload ≥ 27713+64 | 不被截断 |
-| 8 | 旧客户端连接（发3137字节）被优雅关闭（不 panic）| 兼容 |
-
-**Rust 端（phot_gaussian 测试，10 个）**：
+**JS / 帧格式（8 个）**：
 
 | # | 场景 | 期望 |
 |---|------|------|
-| 9 | GAUSS_PIX = 96×72 = 6912 | 常量 |
-| 10 | GAUSS_CAP = 128 | 常量 |
-| 11 | GaussianField::new() 创建 128 个 Gaussian slots | 分配 |
-| 12 | tick_luma_grid_raw(96×72 luma) 不 panic | 正常路径 |
-| 13 | tick_grid 运行 10 帧后 active_count > 0 | 场建立 |
-| 14 | tick_grid 运行 100 帧后 active_count > 10（梯度输入）| 精细重建 |
-| 15 | splat() 返回长度 = 3 × 6912 | 输出大小 |
-| 16 | 96×72 场的重建 MSE < 48×36 场（相同输入）| 质量更高 |
-| 17 | 4×4 区域感知（16 区域）推进 VIB/PHOT 轴 push_observation 16×5 = 80 次 | 感知细化 |
-| 18 | 升级后帧解析不 panic（`parse_frame` 适配新 GRID）| 安全 |
+| 1 | `SENSES_FRAME_BYTES` = 230705 | 唯一正确值 |
+| 2 | `validateFrame(230705字节, 0x01)` → true | 通过 |
+| 3 | `validateFrame(3137字节, 0x01)` → false（旧帧被拒绝）| 版本门 |
+| 4 | `validateFrame(230706字节, 0x01)` → false | padding 防御 |
+| 5 | `packSenses` 输出恰好 230705 字节（含 3 通道网格）| 帧构造 |
+| 6 | 帧内 R/G/B 三平面偏移各自正确（305, 77105, 153905）| 通道布局 |
+| 7 | `gateway maxPayload ≥ 230705 + 64` | 不被截断 |
+| 8 | 20Hz × 230705 bytes < 4.7 MB/s（带宽预算内）| 网络可行 |
+
+**Rust Gaussian（11 个）**：
+
+| # | 场景 | 期望 |
+|---|------|------|
+| 9 | `GAUSS_PIX = 320×240 = 76800` | 常量 |
+| 10 | `GAUSS_CAP = 512` | 常量 |
+| 11 | `GaussianField::new()` 分配 512 × 3 通道 | 内存正确 |
+| 12 | `tick_grid_rgb(320×240×3)` 不 panic | 正常路径 |
+| 13 | 10 帧渐变 RGB 输入后 `active_count > 0` | 场启动 |
+| 14 | 100 帧后 `active_count > 32`（512 cap 的 6% 以上）| 丰富重建 |
+| 15 | `splat()` 返回长度 `= 3 × 76800` | 输出维度 |
+| 16 | 320×240 RGB 的 MSE < 48×36 灰度（相同输入）| 质量更高 |
+| 17 | 红色区域和蓝色区域在 splat 输出颜色可区分（ΔE > 20）| 色彩工作 |
+| 18 | Rayon 并行版与串行版输出数值一致（误差 < 1e-6）| 并行正确 |
+| 19 | Rayon 版 tick_grid 速度 > 串行版 3×（12 核期望 ~8-10×）| 性能验证 |
+
+**视觉轴 + 听觉轴（5 个）**：
+
+| # | 场景 | 期望 |
+|---|------|------|
+| 20 | `AXIS_COUNT = 161` | 常量 |
+| 21 | 16 区域感知：`push_observation` 调用 16×8 = 128 次/帧 | 轴充满 |
+| 22 | `VIB_BANDS = 16`；64 mel 带 → 16 VIB 轴映射无重叠 | 映射正确 |
+| 23 | `familiar_objects` 音频指纹维度 = 16 | 指纹升级 |
+| 24 | 升级后 lib tests 全绿（无轴范围越界）| 无回归 |
 
 **运行**：
 ```bash
-cd gateway && node --test visual_resolution.test.mjs 2>&1 | tail -6
-cd bionic_v0 && cargo test --release --lib visual_resolution 2>&1 | tail -5
+cd gateway && node --test perceptual_upgrade.test.mjs 2>&1 | tail -6
+cd bionic_v0 && cargo test --release --lib perceptual_upgrade 2>&1 | tail -6
+cd bionic_v0 && cargo test --release --lib 2>&1 | tail -3  # 全量回归
 ```
 
-**验收**（AC-F7）：body 在有人脸输入时 `active_count` >10 且位置稳定（观察 observer 输出）。
+**验收**（AC-F7/F8）：
+- `active_count > 32` 在有人脸输入时
+- Rayon 并行 > 3× 串行速度
+- 3 实例并发 CPU < 80%（集成测试量实际负载）
 
 ---
 
@@ -893,26 +922,30 @@ pub fn synthesize_biological(
 
 **测试文件**：`bionic_v0/src/vocal_synthesis.rs` 内 `#[cfg(test)]`
 
-**测试清单**（共 16 个）：
+**测试清单**（共 20 个，升级版：5 formants + 44100Hz）：
 
 | # | 场景 | 期望 |
 |---|------|------|
-| 1 | `rosenberg_c(0.0, 0.6)` → 0.0（相位起点）| 正确初值 |
-| 2 | `rosenberg_c` 积分（一个周期）≈ 0.0（无直流偏置）| 无 DC |
-| 3 | `rosenberg_c` 与纯正弦相比，高频谐波更丰富（FFT 能量分布）| 谐波丰富 |
-| 4 | `FormantFilter::new(800, 100, 22050)` 在 800Hz 处增益最大 | 共振峰正确 |
-| 5 | 两个 FormantFilter 串联（F1=800, F2=1800）滤波后频谱有两个峰 | 元音塑形 |
-| 6 | `PinkNoise` 100 个样本均值接近 0（无偏）| 无 DC |
-| 7 | `PinkNoise` 频谱斜率 ≈ -3dB/octave（1/f 特性）| 粉红噪声 |
-| 8 | `synthesize_biological` breath=0.0 → 全零输出 | 静默保护 |
-| 9 | `synthesize_biological` breath=0.5, 不同 pitch_tension → 不同基频 | 音高控制 |
-| 10 | `synthesize_biological` 不同 resonance_position → 频谱重心差 >200Hz | 元音可辨 |
-| 11 | 高 noise_mix → 低信噪比（噪声成分 >30%）| 气息感 |
-| 12 | 低 noise_mix → 高信噪比（噪声成分 <5%）| 清晰发声 |
-| 13 | 颤音存在：pitch 以 ~5Hz 调制（连续帧基频有微变化）| 振幅 |
-| 14 | reserve=0.1（临近 Standby）→ 颤音深度 < reserve=0.8 时的 50% | 生存联动 |
-| 15 | 跨帧相位连续（`phase` 在帧间保持）→ 无爆音 | 帧边界 |
-| 16 | 512 样本帧 at 22050Hz → 正好约 23ms（合理帧时长）| 采样率正确 |
+| 1 | `rosenberg_c(0.0, 0.6)` → 0.0（相位起点）| 初值正确 |
+| 2 | `rosenberg_c` 一周期积分 ≈ 0（无直流偏置）| 无 DC |
+| 3 | `rosenberg_c` FFT：前 8 次谐波各自 > -40dB（vs 正弦只有 1 次）| 谐波丰富 |
+| 4 | `rosenberg_c(t, oq=0.5)` 闭相占比 50%（开商控制有效）| 参数控制 |
+| 5 | `FormantFilter::new(500, 80, 44100)` 在 500Hz 处增益最大 | F1 正确 |
+| 6 | 5 个串联 FormantFilter（F1–F5）后频谱有 5 个峰 | 全声道 |
+| 7 | resonance_pos=0.0 vs 1.0：F1/F2 频率差 > 900Hz | 元音空间宽 |
+| 8 | 相邻元音（Δpos=0.3）频谱重心差 > **400Hz** | 元音可辨 |
+| 9 | `PinkNoise` 均值 ≈ 0，频谱斜率 ≈ -3dB/octave | 1/f 特性 |
+| 10 | `synthesize_biological` breath=0.0 → 全零输出 | 静默保护 |
+| 11 | 不同 pitch_tension → 基频差 > 50Hz | 音高控制 |
+| 12 | 高 noise_mix → 噪声能量占比 > 30% | 气息感 |
+| 13 | 低 noise_mix → 谐波能量占比 > 95% | 清晰发声 |
+| 14 | 颤音：连续 1024 帧基频标准差 > **3Hz** | 有颤音 |
+| 15 | reserve=0.1 颤音深度 < reserve=0.9 的 25% | 生存联动 |
+| 16 | Shimmer：相邻帧 RMS 差 > 0.5%（非恒幅）| 有机纹理 |
+| 17 | 跨帧相位连续（`phase` 保持）→ 帧接缝无爆音（DC offset < 0.001）| 连续性 |
+| 18 | 起音：breath 从 0 升到 0.8 时，前 10ms 输出 < 0.4（指数攻击）| 自然起音 |
+| 19 | 收音：breath→0 后 20ms 内幅度衰减到 < 0.01 | 自然收音 |
+| 20 | 1024 样本帧 at **44100Hz** → 约 23ms（升级后帧时长）| 采样率 |
 
 **运行**：
 ```bash

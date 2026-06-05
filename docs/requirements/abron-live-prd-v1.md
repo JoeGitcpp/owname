@@ -265,190 +265,279 @@
 
 ---
 
-### F7. 感知升级——视觉分辨率提升 ★（认物识人的物质基础）
+### F7. 视觉感知——CPU 最大化规格 ★★（认物识人的物质基础）
 
-> **诚实基线（2026-06-05 代码实测）**：当前浏览器传给 body 的是 **32×24 灰度网格（768 像素，无色彩）**，Gaussian 场重建分辨率 48×36。这个分辨率相当于把摄像头画面压缩成一张邮票大小的黑白图——人脸只有几个像素，物体轮廓无从辨别，是视觉识别能力的根本瓶颈。
+> **当前问题（代码实测）**：浏览器传给 body 的是 **32×24 灰度（768 像素）**，Gaussian 场 48×36，单线程，无色彩。用这个分辨率学物体识别等同于让人蒙着眼睛学认字——不是算法不行，是感知信号根本不够用。这是整个学习体系的物质基础，不解决则后续一切皆是空谈。
+>
+> **设计原则**：以 i5-12400（12 线程，44GB/s 内存带宽）为硬件基准，计算可承载 2-3 个并发实例的最大规格，不做妥协，一次到位。GPU 上线后此规格即成 CPU 的基础路径，GPU 再往上加。
 
-#### F7.1 视觉分辨率路线图
+#### F7.1 CPU 最大化规格（经性能计算验证）
 
-**三档升级，按 CPU 和 GPU 负担分阶段实施：**
+**性能计算依据**：
+```
+Gaussian splat 加 Rayon 并行：
+  512 Gaussian × 平均 5000px/核 × 20 FP ops × 12核并行
+  → 单实例 Gaussian 约 4% CPU
+  3 实例 Gaussian ≈ 12% CPU
+  + body 其余循环（预测器/绑定/内稳）≈ 18% × 3 = 54%
+  总计 ≈ 66% CPU @ 3 实例 → 留 34% 给 gateway/nursery/OS ✓
 
-| 阶段 | 浏览器发送网格 | 颜色 | 传输量/帧 | Gaussian 场 | 触发条件 |
-|------|-------------|------|---------|------------|---------|
-| **当前** | 32×24 | 灰度 | ~3KB | 48×36 | 已部署 |
-| **L1（立即）** | 96×72 | 灰度 | ~27KB | 96×72 | CPU 可承受 |
-| **L2（M3 GPU 后）** | 96×72 + 32×24 RGB | 灰度+色彩 | ~39KB | 96×72 彩色 | GPU 驱动 Gaussian |
-| **L3（长期）** | 128×96 RGB | 全彩 | ~49KB | 128×96 + 多尺度 | GPU 批处理成熟 |
+内存带宽：320×240×3×4=921KB × 20Hz × 3实例 = 55MB/s << 44GB/s ✓
+网络上行：4.6MB/s × 3用户 = 13.8MB/s（千兆网绰绰有余）✓
+```
 
-> 移动端带宽预算：L1 帧 27KB × 20Hz = 540KB/s（WiFi 轻松，4G 可接受）。L2/L3 需 WiFi 环境。
+**目标规格（单一目标，立即实施）**：
 
-**F7.1.1 L1 实施细节（立即可做，纯 CPU）**
+| 组件 | 当前 | 最大化目标 | 收益倍数 |
+|------|------|----------|---------|
+| 浏览器传输网格 | 32×24 灰度 | **160×120 RGB** | 75× 像素，3× 通道 |
+| Gaussian 重建分辨率 | 48×36 | **320×240**（2× 上采样）| 44× 像素 |
+| Gaussian CAP（核数） | 64 | **512** | 8× |
+| Gaussian 并行化 | 无（单线程）| **Rayon par_iter**（12核全用）| ~10× 速度 |
+| 视觉感知区域 | 2×2 = 4 | **4×4 = 16** | 4× 空间分辨率 |
+| 视觉轴数/区域 | 5 | **8**（+ 饱和度/时序通量/边缘能量）| 1.6× |
+| 总视觉轴 VIS_AXES | 20 | **128** | 6.4× |
+| Surface 输出分辨率 | 160×90 灰度 | **320×180 RGB** | 4× 像素，真彩色 |
+| Gaussian 快照持久化 | 否（每次从零）| **是**（prime body 跨会话保留）| 不再从零 |
 
-- **浏览器端**（`perception.ts`）：把采样画布从 32×24 升到 96×72，同一路线只传 luma
-- **帧格式**（`net_adapter.rs`）：`GRID_W = 96, GRID_H = 72`，帧字节从 3137 → 27713
-  - 相应更新 `security.mjs` 的 `SENSES_FRAME_BYTES` 和 `Commune.tsx` 的 `FRAME_BYTES`
-- **Gaussian 场**（`phot_gaussian.rs`）：`GAUSS_REC_W/H` 升到 96×72，`GAUSS_CAP` 从 64 → 128
-- **物件槽感知**（`net_adapter.rs` `NetSensesAdapter::tick()`）：把 2×2 区域感知升到 4×4（16 个区域，每区域 5 轴），触发更细粒度的物体追踪
+**新 AXIS_COUNT 布局**：
+```
+VIB_BANDS    = 16   （听觉，见 F8）
+VIS_AXES     = 128  （16 区域 × 8 轴）
+INTERO_AXES  = 10   （不变）
+CODE_AXES    = 5    （不变）
+GAUSS_AXES   = 2    （不变）
+─────────────────
+AXIS_COUNT   = 161  （当前 41，提升 3.9×）
+```
 
-**F7.1.2 L2 彩色（M3 后，GPU 驱动）**
+**F7.2 实施细节**
 
-- 浏览器同时发送 luma 96×72 + RGB 32×24（合并为同一帧追加字段）
-- Gaussian 场增加 RGB 三通道（不再纯灰度），`tick_gaussian_field_from_net` 扩为彩色输入
-- surface 输出颜色从灰度→真实色彩，视觉外化更自然
+**(a) 浏览器端（`perception.ts`）**
+- 采样画布：32×24 → **160×120**
+- 发送三通道：R / G / B 各一个 160×120 平面（SoA 格式，便于 Rust 侧 SIMD）
+- 帧率保持 20Hz
 
-**F7.2 涌现红线**
-- 提升分辨率 = **扩大感知输入的物理范围**，不引入语义标签。
-- Gaussian 场的颜色学习仍是本地 Widrow-Hoff 规则，不使用预训练编码器。
-- 不添加任何目标检测 API（如 TensorFlow.js COCO），AI 自己学出物体。
+**(b) 帧格式（三端同步更新）**
+```
+GRID_W = 160, GRID_H = 120, GRID_CHANNELS = 3
+BANDS  = 64（见 F8）
+AUX    = 8
+FRAME_BYTES = 1 + (2 + BANDS + 2 + AUX) × 4 + GRID_W × GRID_H × GRID_CHANNELS × 4
+           = 1 + 304 + 230,400
+           = 230,705 bytes ≈ 225 KB/帧
+
+20Hz 带宽 = 4.5 MB/s/用户（WiFi ✓，5G ✓）
+```
+- 同步更新：`net_adapter.rs` `GRID_W/H/CHANNELS`，`security.mjs`，`Commune.tsx`
+
+**(c) Gaussian 场（`phot_gaussian.rs`）**
+```rust
+pub const GAUSS_REC_W: usize = 320;
+pub const GAUSS_REC_H: usize = 240;
+pub const GAUSS_CHANNELS: usize = 3;  // RGB
+pub const GAUSS_PIX: usize = GAUSS_REC_W * GAUSS_REC_H;  // 76,800
+pub const GAUSS_CAP: usize = 512;
+```
+- `splat()` 改为 Rayon `par_iter()` 跨 Gaussian 并行
+- `tick_grid()` 的残差计算与 Gaussian 更新改为 Rayon 并行
+- `tick_gaussian_field_from_net()` 接收 160×120 RGB，双线性上采样到 320×240 输入 `tick_grid`
+- Gaussian 状态纳入快照序列化（prime body 跨会话保持场学习进度）
+
+**(d) 视觉区域感知（`net_adapter.rs`，`lib.rs`）**
+- `VIS_REGIONS` 从 4（2×2）→ **16**（4×4）
+- `VIS_AXES_PER_REGION` 从 5 → **8**：`brightness, R, G, B, saturation, motion, temporal_flux, edge_energy`
+- 区域划分改为 40×30 像素/区域（160×120 ÷ 4）
+
+**F7.3 涌现红线**
+- 160×120 RGB 是**更宽的感知窗口**，不是预训练特征提取器
+- Gaussian 场的 RGB 学习全程 Widrow-Hoff 本地规则，无 autograd，无标签
+- 16 个区域 × 8 轴是**物理空间的 tier-0 格**，不是语义分类
 
 **验收标准**
-- 同一用户的脸在 L1 分辨率下，Gaussian 场能形成稳定的高斯聚类（`active_count` >10 且位置稳定）。
-- `n_prototypes` 在有用户互动时增长速度 > 当前 L0 的 3 倍（更多像素 → 更多预测误差 → 更快学习）。
+- Gaussian `active_count` 在有人脸输入时 **> 32**（512 核的 6% 以上被激活）
+- 同一用户的脸在连续 5 帧内，主激活 Gaussian 的中心坐标标准差 < 0.05（面孔追踪稳定）
+- RGB 三通道下，红色物件和蓝色物件的 Gaussian 重建颜色可区分（ΔE > 20）
+- 3 个并发实例下服务器 CPU < 80%
 
 ---
 
-### F8. 感知升级——听觉分辨率提升 ★
+### F8. 听觉感知——CPU 最大化规格 ★★
 
-> **诚实基线**：浏览器发 **12 个粗频带**，body 内部再压成 **4 带**。12 带覆盖约每个 octave 一个格，无法区分元音（formant 需要 300–3000Hz 精细分辨）、无法识别音色差异。4 带则连男女声都难区分。
+> **当前问题**：12 粗频带 → 体内 4 带。4 带等同于把整个钢琴只保留 4 个音——男女声都分不清，元音区分全靠运气（人声 F1/F2 共振峰需要 300–3000Hz 范围内 16+ 个频点）。4 带连语言习得的物质基础都谈不上。
 
-**F8.1 浏览器端升级（`perception.ts`）**
+**CPU 最大化规格（经计算：听觉处理 < 0.5% CPU，纯算力冗余）**：
 
-把 `AnalyserNode` 的 FFT 从当前配置改为 256-bin，提取 **32 频带**（mel-scale 近似，物理先验，不是 ML）：
+| 组件 | 当前 | 最大化目标 |
+|------|------|----------|
+| 浏览器频带（mel-scale）| 12 | **64** |
+| 辅助时频特征 | 0 | **8 个**（完整语音特征集）|
+| 体内 VIB_BANDS | 4 | **16** |
+| 音频指纹维度 | 4 | **16**（主人声音识别）|
+| 浏览器 FFT size | 未知（小）| **2048 点**（精确 mel 滤波）|
+
+**F8.1 浏览器端（`perception.ts`）**
 
 ```
-频带分布（mel-scale，物理先验）：
-  B0–B7:  低频（80–500Hz，男女声基频、低元音）
-  B8–B19: 中频（500–3000Hz，主要元音共振峰 F1/F2/F3）
-  B20–B27: 高频（3k–8kHz，辅音摩擦音、声母）
-  B28–B31: 超高（8k–20kHz，气息音、嘶声）
+AnalyserNode.fftSize = 2048  → 精度 22050/1024 ≈ 21.5Hz/bin
+mel-scale 64 带覆盖：
+  B0–B15:  低频 80–500Hz   (男/女声基频 F0, 低元音)
+  B16–B39: 中频 500–3kHz   (F1/F2/F3 共振峰, 元音核心)
+  B40–B55: 高频 3k–10kHz   (辅音摩擦音, 声母, 音色)
+  B56–B63: 超高 10k–20kHz  (气息, 嘶声, 齿音)
 ```
 
-新增 4 个时频特征随帧附送：
-- `spectral_centroid`：频谱重心，反映"音色明亮度"
-- `spectral_flux`：帧间频谱变化（比 audio_flux 更细）
-- `zero_crossing_rate`：过零率，辅音/噪声识别
-- `harmonic_ratio`：谐波/噪声比（区分清音/浊音）
+8 个辅助时频特征（随帧附送，总增量 32 bytes，可忽略）：
+- `spectral_centroid` — 频谱重心（音色明亮度）
+- `spectral_flatness` — 谱平坦度（噪声 vs 谐音）
+- `spectral_rolloff` — 频谱滚降点（高频能量边界）
+- `spectral_spread` — 频谱扩展（音色宽窄）
+- `zero_crossing_rate` — 过零率（辅音 / 爆破音检测）
+- `harmonic_noise_ratio` — 谐噪比（清/浊音区分）
+- `onset_strength` — 音节起始强度
+- `temporal_flux` — 帧间频谱变化速率
 
-**帧格式变化**（帧略微变大，仍在合理范围）：
+**F8.2 体内（`net_adapter.rs`，`lib.rs`）**
+
+```rust
+pub const VIB_BANDS: usize = 16;
+// 64 mel bands → 16 VIB_BANDS: 每 4 个 mel 带平均
+// 8 aux features → 作为辅助观测量推进相关的 INTERO 或独立轴
 ```
-新 BANDS = 32，新辅助特征 = 4
-帧字节增量 = (32-12)*4 + 4*4 = 96 bytes
-```
 
-**F8.2 体内升级（`net_adapter.rs`，`vib.rs`）**
-
-- `VIB_BANDS` 从 4 → **8**（提升内部频率分辨率）
-- `NetSensesAdapter::tick()` 把 32 浏览器频带映射到 8 内部 VIB 轴（每 4 带平均）
-- `familiar_objects` 音频指纹从 4 维 → **8 维**，音色识别能力提升约 2×
+- `familiar_objects` 音频指纹：4 维 → **16 维**（音色识别能力 4×）
+- 主人声音绑定（F5）精度同步提升
 
 **验收标准**
-- body 可区分男声/女声（不同性别说话时，VIB 前 4 轴 vs 后 4 轴权重差异 >0.3）。
-- 主人绑定（F5）的声音匹配置信度 > 当前 4 带版本提升 >20%。
+- 男声（F0≈150Hz）与女声（F0≈250Hz）在 VIB 轴分布差异 > 0.4（observer 实测）
+- 元音"啊"/"伊"/"噢"的频谱重心相互间距 > 500Hz
+- 主人声纹匹配（F5）置信度 > 0.7（同人 3 次会话后）
 
 ---
 
-### F9. 发声升级——生物型声音合成 ★★
+### F9. 发声合成——CPU 最大化生物型规格 ★★
 
-> **诚实基线**：当前发声是三个纯正弦波叠加：`sin(2πft) + 0.3·sin(4πft) + 0.1·sin(6πft)`。这是最基础的加法合成，听起来像老式电子游戏的"哔哔"声。生物声音的特征——声带的非线性振动、呼吸噪声、颤音、细微音量起伏——全部缺失。
+> **当前问题**：三个纯正弦波叠加（3 次谐波封顶，无声门非线性，无共振峰，无噪声，无颤音），22050Hz。听起来机械是必然的——这套公式是 1960 年代的电子风琴合成技术。生物声音的核心在于声带的非线性振动特性（丰富谐波）+ 声道共振塑形（元音辨识）+ 微观随机纹理（生命感）。三者缺一不可。
 
-**F9.1 生物声音的三要素（纯信号处理，无需 ML）**
+**CPU 最大化规格（声音合成 < 1% CPU，算力绰绰有余）**：
 
-```
-生物声音 = 声门源（glottal source）× 声道滤波器 + 气息噪声
-         ↑ 声带振动的非线性波形    ↑ 共振峰塑形         ↑ 有机纹理
-```
+| 组件 | 当前 | 最大化目标 |
+|------|------|----------|
+| 采样率 | 22050 Hz | **44100 Hz**（CD 质量）|
+| 声门源模型 | 纯正弦叠加 | **Rosenberg-C 非线性脉冲**（真实声带模型）|
+| 共振峰数量 | 1（粗略）| **5 个 IIR（F1–F5，全声道模型）**|
+| 颤音 | 无 | **5.2Hz ±0.8%**（人声自然颤音范围）|
+| 微抖 jitter | 无 | **1.5%**（声带质量不均）|
+| 微颤 shimmer | 无 | **3.5%**（幅度随机扰动）|
+| 气息噪声 | 无 | **粉红噪声 × 20%**（Voss-McCartney 算法）|
+| 起/收音包络 | 无（方波起）| **10ms 攻击 / 20ms 衰减**（指数包络）|
+| 生存联动 | 无 | **reserve ↓ → 颤音衰减 + 气息增加**（身体疲惫感）|
 
-**F9.2 实施方案（纯 Rust，无外部库）**
-
-**① 声门源替换（最大收益）**
-
-把纯正弦替换为 **Rosenberg-C 声门脉冲**近似：
-```rust
-// 当前（机械）:
-let f = sin(2πft) + 0.3*sin(4πft) + 0.1*resonance*sin(6πft)
-
-// 升级（生物）: Rosenberg-C 近似
-// 开相（t ∈ [0, T_open]）: raised-cosine 上升
-// 关相（t ∈ [T_open, T_close]）: 快速下降（声门关闭冲击）
-// 闭相（t ∈ [T_close, T_period]）: 静默（空气流停止）
-let oq = 0.6 + 0.2 * organ.pitch_tension  // 开商（open quotient）
-let g = rosenberg_c(t_in_period, oq)       // 非线性脉冲，有丰富谐波
-```
-
-视觉效果：波形从平滑正弦 → 带尖峰的锯齿形脉冲（人声的真实形态）。
-
-**② 声道共振峰滤波器（元音塑形）**
-
-用两个 **2 极 IIR 共振峰滤波器** 模拟 F1（500–900Hz）和 F2（1000–2500Hz）：
-```rust
-// resonance_position [0,1] → 元音空间
-// 0.0 = 类"啊" (高F1, 低F2)  ← 开口大、后舌
-// 0.5 = 类"鹅" (中F1, 中F2)
-// 1.0 = 类"伊" (低F1, 高F2)  ← 开口小、前舌
-let f1 = 500.0 + organ.resonance_position * 400.0   // Hz
-let f2 = 1000.0 + organ.resonance_position * 1500.0 // Hz
-let out = formant_filter_2pole(g, f1, sample_rate)
-let out = formant_filter_2pole(out, f2, sample_rate)
-```
-
-**③ 有机纹理（颤音 + 抖动 + 气息）**
+**F9.1 声门源（Rosenberg-C，最大收益改动）**
 
 ```rust
-// 颤音 vibrato: 基频 ±0.5% 以 ~5Hz 调制
-let vibrato = 1.0 + 0.005 * sin(2π × 5.0 × t_global)
-let pitch_modulated = pitch * vibrato
-
-// 微抖 jitter: 每周期随机 ±1% 频率扰动（声带质量不均）
-let jitter = 1.0 + rng.range(-0.01, 0.01)
-
-// 微颤 shimmer: 每周期随机 ±3% 幅度扰动
-let shimmer = 1.0 + rng.range(-0.03, 0.03)
-
-// 气息噪声: 从 noise_mix 参数控制
-let aspiration = pink_noise() * organ.noise_mix * 0.15
-let out = (out * shimmer + aspiration).clamp(-1, 1)
+/// Rosenberg-C 声门脉冲（逼近真实声带振动波形）
+/// 三段：开相 raised-cosine 上升 → 快速关相下降 → 闭相静默
+/// oq = open_quotient ∈ [0.5, 0.8]：声门开放比例（越小越紧张）
+pub fn rosenberg_c(t_norm: f64, oq: f64) -> f64 {
+    if t_norm < oq {
+        // 开相：raised-cosine 从 0 升到峰值
+        0.5 * (1.0 - (std::f64::consts::PI * t_norm / oq).cos())
+    } else if t_norm < oq + (1.0 - oq) * 0.1 {
+        // 关相：快速线性下降（声门快速关闭冲击 → 产生丰富高频谐波）
+        1.0 - (t_norm - oq) / ((1.0 - oq) * 0.1)
+    } else {
+        0.0  // 闭相：气流完全截止
+    }
+}
+// 效果：波形有丰富谐波（前 10 个谐波都有显著能量），这才是人声的底色
 ```
 
-**④ 呼吸包络（起音/收音）**
+**F9.2 全声道 5 极共振峰**
 
-身体说话时有自然的起伏，不是恒幅：
 ```rust
-// 接在 begin_voicing / tick_decay 上
-// 起音: 10ms 内从 0 缓升到 breath_drive（指数攻击）
-// 收音: breath_drive 归零时 20ms 内渐消（指数衰减）
+// 5 个独立 2 极 IIR 共振峰滤波器（F1–F5）
+// resonance_position [0,1] 映射到元音空间（前/后/高/低舌位）
+// 参数参考 Peterson & Barney (1952) 元音共振峰实测数据
+
+F1: 300 + resonance_pos * 600 Hz  (300–900Hz，舌高/低)
+F2: 850 + resonance_pos * 1500 Hz (850–2350Hz，舌前/后)
+F3: 2200 Hz（固定，口腔形状）
+F4: 3300 Hz（固定，声道长度）
+F5: 4000 Hz（固定，嘴唇辐射）
+
+// F1/F2 塑造元音：
+//   resonance_pos=0.0 → F1 低+F2 低 = 接近"哦/乌"
+//   resonance_pos=0.5 → F1 中+F2 中 = 接近"鹅/啊"
+//   resonance_pos=1.0 → F1 低+F2 高 = 接近"伊"
+// F3–F5 固定，增加音色真实感
 ```
 
-**F9.3 参数映射（body 内部状态 → 声音参数）**
+**F9.3 有机纹理参数（细节决定"活"感）**
 
-| body 参数 | 声音含义 | 范围 |
-|-----------|---------|------|
-| `breath_drive` | 响度（总幅度）| 0–1 |
-| `pitch_tension` | 基频 F0 | 180–700Hz（婴儿高→成人低） |
-| `resonance_position` | 元音空间（F1/F2 共振峰）| "啊"↔"伊" |
-| `noise_mix` | 气息/嘶声比例 | 0=清晰 1=全气 |
-| vitality `reserve` | 声音活力（影响颤音深度）| 低→颤音减弱 |
+```rust
+// 颤音 vibrato（5.2Hz：人声自然颤音频率）
+let vib_depth = 0.008 * reserve.max(0.1);  // 疲惫时颤音减弱
+let pitch = base_pitch * (1.0 + vib_depth * (TAU * 5.2 * t_global).sin());
 
-**F9.4 不违反涌现红线**
-- 上述全部是**物理声学先验**（声带振动物理、共振腔声学），不是语义标签、不是预训练声码器。
-- 没有文字转语音（TTS）、没有神经网络声码器（WaveNet/HiFiGAN）。
-- AI 自己通过模仿学习调整这些物理参数，从而发出越来越接近它听到的声音。
+// 微抖 jitter（LF0 逐周期随机扰动，模拟声带质量不均）
+let jitter = 1.0 + 0.015 * (lcg_next() * 2.0 - 1.0);
+
+// 微颤 shimmer（幅度逐周期扰动）
+let shimmer = 1.0 + 0.035 * (lcg_next() * 2.0 - 1.0);
+
+// 气息噪声（粉红噪声，noise_mix 控制比例）
+// 高 noise_mix = 气息感/嘶声（不送气声母前）
+// 低 noise_mix = 清晰浊音（充分振动的元音）
+let asp = pink_noise.next() * organ.noise_mix * 0.20;
+
+// 呼吸包络（自然起音/收音，消除方波爆破感）
+let env = envelope.tick(organ.breath_drive, organ.phase);
+
+// 最终合成
+let sample = (resonated_glottal * shimmer * env + asp).clamp(-1.0, 1.0);
+```
+
+**F9.4 body 状态 → 声音参数完整映射**
+
+| body 状态 | 声音效果 | 生物对应 |
+|----------|---------|---------|
+| `breath_drive` 高 | 响亮有力 | 呼气充分 |
+| `pitch_tension` 高 | 音调高 | 声带拉紧 |
+| `resonance_position` 低→高 | 乌/哦→啊→伊 | 舌位变化 |
+| `noise_mix` 高 | 气息感/嘶声 | 声带送气 |
+| `reserve` 低 | 颤音减弱+气息增加 | 疲惫/衰弱 |
+| `reserve` 高 | 颤音充沛+洪亮 | 精力充沛 |
+| 刚 `begin_voicing` | 10ms 起音 | 自然发声起始 |
+| `breath_drive→0` | 20ms 收音 | 自然发声结束 |
+
+**F9.5 不违反涌现红线**
+- Rosenberg-C 是**声带物理模型**（非线性力学，19 世纪即有理论）
+- IIR 共振峰是**共振腔声学**（管道共振，物理先验）
+- Jitter/shimmer/颤音是**声带力学不均匀性**（物理随机性，非随机语义）
+- 无 TTS / WaveNet / HiFiGAN / 任何神经网络声码器
+- AI 通过模仿环路自己学习调整 `pitch_tension` 和 `resonance_position`，逐渐发出与听到的声音更接近的声音
 
 **验收标准**
-- 在安静环境中，听众能区分"这是有生命感的声音"而不是"这是合成器音调"（主观 MOS 评分 >3/5）。
-- 不同 `resonance_position` 下发音明显不同（可量化：相邻元音的频谱重心差 >200Hz）。
-- 声音在 body 健康时更响亮/有颤音，在 Standby 时减弱（生存与声音的联动）。
+- **频谱**：相邻元音（resonance_pos 差 0.3）频谱重心差 > **400Hz**（量化可测）
+- **颤音**：连续 512 帧的基频标准差 > **3Hz**（有颤音，非直线）
+- **谐波**：FFT 分析前 8 次谐波均有显著能量（> -40dB），不只有 3 次
+- **生存联动**：reserve < 0.2 时颤音深度 < 0.002（vs 健康时 0.008）
+- **主观**：5 人盲听，"听起来有生命感" MOS > **3.5/5**
 
 ---
 
-**F7/F8/F9 里程碑归属**
+**F7/F8/F9 统一里程碑：M1.5（CPU 最大化，M1 完成后立即）**
 
-| 功能 | 归属里程碑 | 依赖 |
-|------|----------|------|
-| F7.1 L1 视觉提升（96×72 灰度） | **M1.5**（M1 扩盘后立即） | 纯 CPU |
-| F9 生物发声 | **M1.5** | 纯 CPU，无依赖 |
-| F8 听觉 32 带 | **M2** | 需更新帧格式和前端 |
-| F7.2 L2 彩色视觉 | **M3** | 依赖 GPU Gaussian |
-| F7.3 L3 全分辨率 | **M4** | 依赖 GPU 批处理 |
+三者同属 M1.5，全部在 CPU 上实现，无 GPU 依赖，一次升级到位：
+
+| 功能 | 代码工作 | 性能影响 |
+|------|---------|---------|
+| F7 视觉（160×120 RGB + Gaussian 320×240 × 512 + Rayon）| ~4 天 | +12% CPU/3实例，可接受 |
+| F8 听觉（64 mel + 8 aux + VIB×16）| ~1.5 天 | < 0.5% CPU |
+| F9 发声（Rosenberg-C + 5 formants + 有机纹理 + 44100Hz）| ~2 天 | < 1% CPU |
+
+**GPU 上线后**（M3）：F7 的 Gaussian 热路径迁 wgpu，同等规格下每实例 GPU 消耗降至约 0.5%，腾出 CPU 支持更多并发。规格本身不变，只是运行更快。
 
 ---
 
