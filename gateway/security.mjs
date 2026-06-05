@@ -15,8 +15,8 @@ const BANDS        = 12
 const GW           = 32
 const GH           = 24
 // 1 tag + (audio_level:f32 + audio_flux:f32 + 12×bands:f32 + motion:f32 + luma:f32) + grid:768×f32
-// = 1 + (2+12)×4 + 32×24×4 = 1 + 56 + 3072 = 3129
-export const SENSES_FRAME_BYTES = 1 + (2 + BANDS) * 4 + GW * GH * 4   // 3129
+// = 1 + (2+12+2)×4 + 32×24×4 = 1 + 64 + 3072 = 3137
+export const SENSES_FRAME_BYTES = 1 + (2 + BANDS + 2) * 4 + GW * GH * 4   // 3137
 
 /**
  * Validate a binary frame from the browser before forwarding to body.

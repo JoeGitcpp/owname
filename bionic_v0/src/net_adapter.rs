@@ -43,8 +43,9 @@ const TAG_SENSES: u8 = 0x01;
 const GRID_W: usize = 32;
 const GRID_H: usize = 24;
 const BANDS: usize = 12;
-// 1 tag + (1+1+BANDS+1+1)×f32 + GRID_W*GRID_H×f32
-const FRAME_BYTES: usize = 1 + (2 + BANDS) * 4 + GRID_W * GRID_H * 4;
+// 1 tag + (audio_level + audio_flux + BANDS + motion + luma)×f32 + GRID_W*GRID_H×f32
+// = 1 + (2 + 12 + 2) × 4 + 32×24×4 = 1 + 64 + 3072 = 3137
+const FRAME_BYTES: usize = 1 + (2 + BANDS + 2) * 4 + GRID_W * GRID_H * 4;
 
 // ── Output frame constants ───────────────────────────────────────────────────
 const TAG_VOCAL: u8   = 0x02;

@@ -8,7 +8,7 @@ import { validateFrame, RateLimiter, SessionGuard } from './security.mjs'
 
 // ── validateFrame ─────────────────────────────────────────────────────────────
 const TAG_SENSES = 0x01
-const FRAME_BYTES = 3129   // 1 + (2+12)*4 + 32*24*4 = 1+56+3072
+const FRAME_BYTES = 3137   // 1 + (2+12+2)*4 + 32*24*4 = 1+64+3072  (includes motion+luma)
 const TAG_VOCAL  = 0x02
 
 describe('validateFrame', () => {

@@ -22,7 +22,8 @@ const TAG_SURFACE = 0x04
 const BANDS      = 12
 const GW         = 32
 const GH         = 24
-const FRAME_BYTES = 1 + (2 + BANDS) * 4 + GW * GH * 4
+// tag(1) + audio_level+audio_flux+12bands+motion+luma (16 × f32 = 64) + grid (768 × f32 = 3072)
+const FRAME_BYTES = 1 + (2 + BANDS + 2) * 4 + GW * GH * 4  // 3137
 
 function packSenses(s: import('../lib/perception').Senses): ArrayBuffer {
   const buf  = new ArrayBuffer(FRAME_BYTES)
