@@ -108,6 +108,10 @@ pub struct NetSensesAdapter {
     latest: Arc<Mutex<SensesFrame>>,
     /// Send half for vocal output frames (written by the body's vocal ticker).
     vocal_tx: Arc<Mutex<Option<UnixStream>>>,
+    /// EMA of VIB band energy — drives event nomination (matches hardware VibAdapter).
+    smoothed_energy: f64,
+    /// EMA of VIB surprise (energy change) — accompanies the nominated event.
+    smoothed_surprise: f64,
 }
 
 impl NetSensesAdapter {
@@ -156,7 +160,12 @@ impl NetSensesAdapter {
             })
             .expect("net_adapter: spawn reader thread");
 
-        let adapter = Self { latest, vocal_tx: vocal_tx.clone() };
+        let adapter = Self {
+            latest,
+            vocal_tx: vocal_tx.clone(),
+            smoothed_energy: 0.0,
+            smoothed_surprise: 0.0,
+        };
         (adapter, vocal_tx)
     }
 
@@ -177,13 +186,32 @@ impl ModalityAdapter for NetSensesAdapter {
         // ── VIB: push audio bands as hearing axes ───────────────────────────
         // Map the 12 browser bands to VIB_BANDS (4) by averaging groups.
         let per = BANDS / VIB_BANDS;
+        let mut vib_bands = [0.0f64; VIB_BANDS];
         for b in 0..VIB_BANDS {
             let avg = frame.bands[b*per..(b+1)*per].iter().sum::<f32>() / per as f32;
+            vib_bands[b] = avg as f64;
             vp.push_observation(b, now_us, avg as f64);
         }
-        // Ambient VIB energy: use the RMS level to nudge the last-observation
-        // timestamp (vital supply depends on sensory continuity).
-        // We already pushed per-axis observations above; that's sufficient.
+
+        // ── VIB event nomination (parity with hardware VibAdapter) ──────────
+        // Without this, ambient VIB candidate_flag stays false forever, so
+        // tick_vocal_target_from_vib always returns early → no vocal target →
+        // no imitation → the body NEVER learns to speak from network audio.
+        // (This was the headless-path gap: NetSensesAdapter pushed band
+        //  observations but never nominated events the way VibAdapter does.)
+        let inst_energy: f64 = vib_bands.iter().map(|b| b * b).sum();
+        let inst_surprise = (inst_energy - self.smoothed_energy).abs();
+        let alpha = 0.1;
+        self.smoothed_energy   = (1.0 - alpha) * self.smoothed_energy   + alpha * inst_energy;
+        self.smoothed_surprise = (1.0 - alpha) * self.smoothed_surprise + alpha * inst_surprise;
+        let is_event = self.smoothed_energy > crate::EVENT_NOMINATION_THRESHOLD;
+        vp.write_ambient_for(
+            crate::MOD_VIB,
+            self.smoothed_energy,
+            self.smoothed_surprise,
+            if is_event { Some(now_us) } else { None },
+            is_event,
+        );
 
         // ── PHOT: push visual signals as vision axes ────────────────────────
         // Browser sends a 32×24 luma grid.  We map it to the 2×2 spatial
