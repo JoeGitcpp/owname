@@ -74,6 +74,20 @@ function useBodyBridge(
     audioCtxRef.current = actx
     nextTimeRef.current = 0
 
+    // iOS Safari creates AudioContext in suspended state — resume immediately.
+    // The permission tap that brought us to 'live' phase is a valid gesture context.
+    actx.resume().catch(() => {})
+
+    // Belt-and-suspenders: also resume on first user interaction inside Commune
+    // in case the above attempt is still too late in the gesture chain.
+    const unlockAudio = () => {
+      audioCtxRef.current?.resume().catch(() => {})
+      document.removeEventListener('touchstart', unlockAudio, true)
+      document.removeEventListener('click',      unlockAudio, true)
+    }
+    document.addEventListener('touchstart', unlockAudio, { once: true, capture: true })
+    document.addEventListener('click',      unlockAudio, { once: true, capture: true })
+
     ws.onmessage = (ev: MessageEvent) => {
       if (!(ev.data instanceof ArrayBuffer)) return
       const raw = new Uint8Array(ev.data)
