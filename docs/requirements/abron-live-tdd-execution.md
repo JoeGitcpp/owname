@@ -20,7 +20,8 @@
 | 里程碑 | 模块数 | 测试数(估) | 对应 PRD |
 |--------|--------|-----------|---------|
 | M1 主体活起来 | 7 | ~85 | F1.1/1.2/1.3/1.4/1.5, F2.1/2.3, I2 |
-| M2 让人参与 | 5 | ~60 | F3, F4.1–4.4 |
+| **M1.5 感知+发声升级** | **3** | **~50** | **F7(L1), F9 生物发声** |
+| M2 让人参与 | 5 | ~60 | F3, F4.1–4.4, F8 听觉 |
 | M3 认主人+规模化 | 4 | ~45 | F5, I1, I3 |
 | M4 能力加速 | 3 | ~30 | F6.2, 空间, 治理器 |
 | **合计** | **19** | **~220** | 全部 |
@@ -780,10 +781,231 @@ bash scripts/run_all_tests.sh
 | AC-I1: GPU 热路径运行，CPU 下降 | gaussian_gpu benchmark #4/5/6 | M3 |
 | AC-I2: `/` 使用率 <50% | storage_layout test assertion | M1 |
 | AC-F6: 探针周维度上行 | probe_dashboard isMonotone 测试 #5 | M4 |
+| AC-F7: Gaussian 聚类稳定 | visual_resolution 测试 #12 | M1.5 |
+| AC-F9: 元音频谱重心差 >200Hz | vocal_synthesis 测试 #14 | M1.5 |
+| AC-F8: 男女声 VIB 差异 >0.3 | hearing_upgrade 测试 #9 | M2 |
 
 ---
 
-## 开放测试决策（对应 PRD §10 开放问题）
+## M1.5 — 感知升级 + 生物发声（M1 完成后立即执行）
+
+> 这一阶段纯 CPU，无 GPU 依赖，不改动任何后端路由——只改感知帧格式和声音合成。  
+> **优先级**：生物发声（F9）最快见效（纯 Rust 替换），视觉升级（F7 L1）次之。
+
+---
+
+### M1.5-1. `visual_resolution` — 视觉分辨率提升 L1（F7）
+
+**改动文件**：
+- `site/src/lib/perception.ts`（画布升 96×72）
+- `site/src/views/Commune.tsx`（帧格式常量更新）
+- `gateway/security.mjs`（`SENSES_FRAME_BYTES` 更新）
+- `bionic_v0/src/net_adapter.rs`（`GRID_W/H`，`FRAME_BYTES`）
+- `bionic_v0/src/phot_gaussian.rs`（`GAUSS_REC_W/H` 升 96×72，`GAUSS_CAP` 升 128）
+
+**新常量**：
+```
+GRID_W = 96,  GRID_H = 72      // 6912 像素，当前 9×
+GAUSS_REC_W = 96, GAUSS_REC_H = 72
+GAUSS_CAP = 128
+FRAME_BYTES = 1 + (2 + BANDS + 2)*4 + 96*72*4 = 27,713 bytes
+```
+
+**测试文件**：
+- `gateway/visual_resolution.test.mjs`（新建，JS 端帧格式验证）
+- `bionic_v0/src/phot_gaussian.rs` 内 `#[cfg(test)]`（Rust 端）
+
+**测试清单**（共 18 个）：
+
+**JS 端（`visual_resolution.test.mjs`，8 个）**：
+
+| # | 场景 | 期望 |
+|---|------|------|
+| 1 | SENSES_FRAME_BYTES 常量 = 27713 | 新帧大小 |
+| 2 | validateFrame(27713字节,0x01) → true | 通过验证 |
+| 3 | validateFrame(3137字节,0x01) → false（旧帧被拒绝）| 版本门 |
+| 4 | validateFrame(27714字节,0x01) → false（padding 攻击）| 安全 |
+| 5 | packSenses 输出恰好 27713 字节 | 浏览器端 |
+| 6 | grid 字段在帧内偏移正确（= 65）| 布局 |
+| 7 | 升级后 gateway maxPayload ≥ 27713+64 | 不被截断 |
+| 8 | 旧客户端连接（发3137字节）被优雅关闭（不 panic）| 兼容 |
+
+**Rust 端（phot_gaussian 测试，10 个）**：
+
+| # | 场景 | 期望 |
+|---|------|------|
+| 9 | GAUSS_PIX = 96×72 = 6912 | 常量 |
+| 10 | GAUSS_CAP = 128 | 常量 |
+| 11 | GaussianField::new() 创建 128 个 Gaussian slots | 分配 |
+| 12 | tick_luma_grid_raw(96×72 luma) 不 panic | 正常路径 |
+| 13 | tick_grid 运行 10 帧后 active_count > 0 | 场建立 |
+| 14 | tick_grid 运行 100 帧后 active_count > 10（梯度输入）| 精细重建 |
+| 15 | splat() 返回长度 = 3 × 6912 | 输出大小 |
+| 16 | 96×72 场的重建 MSE < 48×36 场（相同输入）| 质量更高 |
+| 17 | 4×4 区域感知（16 区域）推进 VIB/PHOT 轴 push_observation 16×5 = 80 次 | 感知细化 |
+| 18 | 升级后帧解析不 panic（`parse_frame` 适配新 GRID）| 安全 |
+
+**运行**：
+```bash
+cd gateway && node --test visual_resolution.test.mjs 2>&1 | tail -6
+cd bionic_v0 && cargo test --release --lib visual_resolution 2>&1 | tail -5
+```
+
+**验收**（AC-F7）：body 在有人脸输入时 `active_count` >10 且位置稳定（观察 observer 输出）。
+
+---
+
+### M1.5-2. `vocal_synthesis` — 生物型发声合成（F9）
+
+**改动文件**：
+- `bionic_v0/src/net_adapter.rs`（`sample_vocal_pcm` 函数替换）
+- 新建 `bionic_v0/src/vocal_synthesis.rs`（Rosenberg + formant + 有机纹理）
+
+**核心新模块 `vocal_synthesis.rs`**：
+
+```rust
+// 声门源：Rosenberg-C 脉冲（非线性，有丰富谐波）
+pub fn rosenberg_c(t_in_period: f64, open_quotient: f64) -> f64
+
+// 两极共振峰 IIR 滤波器
+pub struct FormantFilter { /* a1, a2, b0 系数 */ }
+impl FormantFilter {
+    pub fn new(freq_hz: f64, bandwidth_hz: f64, sample_rate: f64) -> Self
+    pub fn process(&mut self, x: f64) -> f64
+}
+
+// 粉红噪声生成器（1/f 频谱，比白噪声更自然）
+pub struct PinkNoise { /* Voss-McCartney 算法，无外部 RNG 依赖 */ }
+impl PinkNoise { pub fn next(&mut self) -> f64 }
+
+// 主合成函数（替换原 sample_vocal_pcm）
+pub fn synthesize_biological(
+    organ: &VocalOrganState,
+    reserve: f64,
+    phase: &mut f64,        // 相位累积（跨帧连续）
+    f1_filter: &mut FormantFilter,
+    f2_filter: &mut FormantFilter,
+    pink: &mut PinkNoise,
+    n_samples: usize,
+    sample_rate: u32,
+) -> Vec<f32>
+```
+
+**测试文件**：`bionic_v0/src/vocal_synthesis.rs` 内 `#[cfg(test)]`
+
+**测试清单**（共 16 个）：
+
+| # | 场景 | 期望 |
+|---|------|------|
+| 1 | `rosenberg_c(0.0, 0.6)` → 0.0（相位起点）| 正确初值 |
+| 2 | `rosenberg_c` 积分（一个周期）≈ 0.0（无直流偏置）| 无 DC |
+| 3 | `rosenberg_c` 与纯正弦相比，高频谐波更丰富（FFT 能量分布）| 谐波丰富 |
+| 4 | `FormantFilter::new(800, 100, 22050)` 在 800Hz 处增益最大 | 共振峰正确 |
+| 5 | 两个 FormantFilter 串联（F1=800, F2=1800）滤波后频谱有两个峰 | 元音塑形 |
+| 6 | `PinkNoise` 100 个样本均值接近 0（无偏）| 无 DC |
+| 7 | `PinkNoise` 频谱斜率 ≈ -3dB/octave（1/f 特性）| 粉红噪声 |
+| 8 | `synthesize_biological` breath=0.0 → 全零输出 | 静默保护 |
+| 9 | `synthesize_biological` breath=0.5, 不同 pitch_tension → 不同基频 | 音高控制 |
+| 10 | `synthesize_biological` 不同 resonance_position → 频谱重心差 >200Hz | 元音可辨 |
+| 11 | 高 noise_mix → 低信噪比（噪声成分 >30%）| 气息感 |
+| 12 | 低 noise_mix → 高信噪比（噪声成分 <5%）| 清晰发声 |
+| 13 | 颤音存在：pitch 以 ~5Hz 调制（连续帧基频有微变化）| 振幅 |
+| 14 | reserve=0.1（临近 Standby）→ 颤音深度 < reserve=0.8 时的 50% | 生存联动 |
+| 15 | 跨帧相位连续（`phase` 在帧间保持）→ 无爆音 | 帧边界 |
+| 16 | 512 样本帧 at 22050Hz → 正好约 23ms（合理帧时长）| 采样率正确 |
+
+**运行**：
+```bash
+cd bionic_v0 && cargo test --release --lib vocal_synthesis 2>&1 | tail -8
+```
+
+**integration smoke**（Python 验证发出的声音不再是纯正弦）：
+```bash
+ssh server-joe "
+  python3 -c \"
+import socket, struct, numpy as np
+# ... 连接 body socket, 收 512 帧 vocal PCM
+# 计算 FFT 谐波分布：生物声音 >5 个显著谐波
+# 纯正弦只有 2-3 个
+\"
+"
+```
+
+**验收**（AC-F9）：
+- 不同 `resonance_position` 下发音频谱重心差 >200Hz（可测）
+- 有颤音（相邻帧基频标准差 >1Hz）
+- 听感测试：主观评分 >3/5（人工）
+
+---
+
+### M1.5-3. `hearing_upgrade` — 听觉 32 带（F8，归 M2）
+
+> 此模块改动帧格式，需与前端 M2 一起发布，**测试先写，实现在 M2 时一并提交**。
+
+**改动文件**：
+- `site/src/lib/perception.ts`（`BANDS = 32`，升 FFT，mel-scale 滤波）
+- `site/src/views/Commune.tsx`（帧格式：`BANDS = 32`）
+- `gateway/security.mjs`（`SENSES_FRAME_BYTES` 再次更新）
+- `bionic_v0/src/net_adapter.rs`（`BANDS = 32`，`VIB_BANDS = 8`）
+- `bionic_v0/src/lib.rs`（`VIB_BANDS` 常量）
+
+**新帧格式**：
+```
+BANDS = 32（+20），辅助特征 4 个
+帧字节 = 1 + (32 + 2 + 2 + 4)*4 + 96*72*4
+       = 1 + 160 + 27648 = 27,809 bytes（在 L1 基础上增 96 bytes）
+```
+
+**测试清单**（`gateway/hearing_upgrade.test.mjs`，12 个）：
+
+| # | 场景 | 期望 |
+|---|------|------|
+| 1 | `SENSES_FRAME_BYTES` = 27809 | 常量正确 |
+| 2 | validateFrame(27809字节) → true | 新帧通过 |
+| 3 | packSenses 在 `BANDS=32` 下输出 27809 字节 | 浏览器端 |
+| 4 | 辅助特征 spectral_centroid ∈ [0,1] | 范围 |
+| 5 | 辅助特征 zero_crossing_rate ≥ 0 | 非负 |
+| 6 | 高频输入 → spectral_centroid 接近 1 | 正确方向 |
+| 7 | 低频输入 → spectral_centroid 接近 0 | 正确方向 |
+| 8 | Rust VIB_BANDS = 8（更新后）| 常量 |
+| 9 | 32→8 频带映射：男声（低 F0 ~150Hz）集中在 band 0-2 | 区分 |
+| 10 | 女声（高 F0 ~250Hz）集中在 band 3-5 | 区分 |
+| 11 | familiar_objects 指纹从 4→8 维（不破坏已有数据格式）| 兼容 |
+| 12 | 升级后 parse_frame 不 panic（BANDS=32 适配）| 安全 |
+
+---
+
+## 更新后验收矩阵（M1.5 新增行）
+
+| PRD 验收标准 | 对应测试 | 里程碑 |
+|-------------|---------|-------|
+| AC-F7 L1: Gaussian 聚类 active_count>10 | visual_resolution 测试 #13/14 | M1.5 |
+| AC-F7: 帧格式全三端一致（browser/gateway/Rust）| visual_resolution 测试 #1-8 | M1.5 |
+| AC-F9: 元音频谱重心差 >200Hz | vocal_synthesis 测试 #10 | M1.5 |
+| AC-F9: 有颤音（相邻帧基频标准差 >1Hz）| vocal_synthesis 测试 #13 | M1.5 |
+| AC-F9: 生存联动（低 reserve→颤音减弱）| vocal_synthesis 测试 #14 | M1.5 |
+| AC-F8: 男女声 VIB 差异 >0.3 | hearing_upgrade 测试 #9/10 | M2 |
+
+---
+
+## 更新后执行顺序建议
+
+```
+M1（前置）: [同前]
+
+M1.5（M1 完成后立即，纯 CPU）:
+  Day 6:   vocal_synthesis.rs（Rosenberg + formant + 有机纹理）→ 测试绿
+           → sample_vocal_pcm 替换 → 部署 → 人工听感验证
+  Day 7-8: visual_resolution（96×72，三端同步更新帧格式）→ 测试绿
+           → 部署 → observer 验证 active_count 提升
+
+M2（M1.5 完成后）:
+  Day 9:   hearing_upgrade（32 带，与前端 M2 一起）
+  Day 9:   sms_adapter + 选定短信商
+  Day 10-12: 前端 Landing + AuthFlow + InstanceView → 部署
+
+[M3/M4 同前]
+```
 
 | 问题 | 测试待补充 |
 |------|----------|
