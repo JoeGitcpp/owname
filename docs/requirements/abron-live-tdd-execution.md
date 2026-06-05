@@ -17,14 +17,14 @@
 
 ## 阶段总览
 
-| 里程碑 | 模块数 | 测试数(估) | 对应 PRD |
-|--------|--------|-----------|---------|
-| M1 主体活起来 | 7 | ~85 | F1.1/1.2/1.3/1.4/1.5, F2.1/2.3, I2 |
-| **M1.5 感知+发声升级** | **3** | **~50** | **F7(L1), F9 生物发声** |
-| M2 让人参与 | 5 | ~60 | F3, F4.1–4.4, F8 听觉 |
-| M3 认主人+规模化 | 4 | ~45 | F5, I1, I3 |
-| M4 能力加速 | 3 | ~30 | F6.2, 空间, 治理器 |
-| **合计** | **19** | **~220** | 全部 |
+| 里程碑 | 模块数 | 测试数 | 对应 PRD | 说明 |
+|--------|--------|--------|---------|------|
+| M1 主体活起来 | 7 | ~85 | F1, F2, I2 | 主体常驻、训练回收、扩盘 |
+| **M1.5 感知+发声 CPU 最大化** | **3** | **~60** | **F7, F8, F9** | **160×120 RGB / Gaussian 512 / 64带 / 5-formant 44100Hz；全 M1.5 完成，不分阶段** |
+| M2 让人参与 | 5 | ~60 | F3, F4 | 短信认证、前端登录/访客 UI |
+| M3 认主人+规模化 | 4 | ~45 | F5, I1, I3 | 主人绑定、GPU 加速、容量治理 |
+| M4 能力加速 | 3 | ~30 | F6.2, 空间, 探针 | 治理器接线、虚拟脖子、探针面板 |
+| **合计** | **22** | **~280** | 全部 | |
 
 ---
 
@@ -789,8 +789,10 @@ bash scripts/run_all_tests.sh
 
 ## M1.5 — 感知升级 + 生物发声（M1 完成后立即执行）
 
-> 这一阶段纯 CPU，无 GPU 依赖，不改动任何后端路由——只改感知帧格式和声音合成。  
-> **优先级**：生物发声（F9）最快见效（纯 Rust 替换，1-2天），视觉升级（F7）约3-4天，听觉升级（F8）约1.5天。三者 M1.5 全部落地，不分阶段，一次到位。
+> **M1.5 = 感知+发声的物质基础，一次到位，不分阶段**。  
+> 纯 CPU，无 GPU 依赖，不动后端路由。三个模块并行或串行均可，建议顺序：  
+> F9 生物发声（1-2天，最快见效，无依赖）→ F7+F8 感知升级（3-4天，三端同步）→ M1.5 集成测试。  
+> **目标规格**：160×120 RGB / Gaussian 320×240 × 512核 Rayon / 64 mel带 VIB×16 / Rosenberg-C 5-formant 44100Hz。
 
 ---
 
@@ -971,110 +973,144 @@ import socket, struct, numpy as np
 
 ---
 
-### M1.5-3. `hearing_upgrade` — 听觉 32 带（F8，归 M2）
+### M1.5-3. `m1_5_integration` — 感知+发声全量集成验收
 
-> 此模块改动帧格式，需与前端 M2 一起发布，**测试先写，实现在 M2 时一并提交**。
+> 三个模块（perceptual_upgrade + vocal_synthesis）全部绿灯后，跑此集成测试，  
+> 确认在真实服务器上 2-3 个并发实例下实际 CPU 不超标，验收所有 AC。
 
-**改动文件**：
-- `site/src/lib/perception.ts`（`BANDS = 32`，升 FFT，mel-scale 滤波）
-- `site/src/views/Commune.tsx`（帧格式：`BANDS = 32`）
-- `gateway/security.mjs`（`SENSES_FRAME_BYTES` 再次更新）
-- `bionic_v0/src/net_adapter.rs`（`BANDS = 32`，`VIB_BANDS = 8`）
-- `bionic_v0/src/lib.rs`（`VIB_BANDS` 常量）
+**测试文件**：`gateway/m1_5_integration.test.mjs`
 
-**新帧格式**：
+**测试场景（7 个）**：
+
+| # | 验收指标 | 判断方法 |
+|---|---------|---------|
+| 1 | 帧格式三端一致：`SENSES_FRAME_BYTES = 230705`（browser / gateway / Rust 同值）| 读三端常量对比 |
+| 2 | 新帧从浏览器发出后 body 解析不 panic，发回 vocal PCM + surface | Python socket 实测 |
+| 3 | 启动 3 个并发 body，20Hz 各发 5s 测试帧，CPU < 80%（`/proc/stat`）| 服务器实测 |
+| 4 | Gaussian `active_count > 32`（body 接收 160×120 RGB 100帧后）| observer 读 snapshot |
+| 5 | 声音谐波：vocal PCM FFT 前 8 次谐波各自 > -40dB | Python FFT 分析 |
+| 6 | 元音可辨：resonance_pos 差 0.4 时频谱重心差 > 400Hz | 合成两段 vocal 比较 |
+| 7 | 无回归：`cargo test --release --lib` 全绿（新 AXIS_COUNT=161 下）| CI 断言 |
+
+```bash
+# 集成测试运行命令
+cd gateway && node --test m1_5_integration.test.mjs --timeout 120000 2>&1 | tail -12
+cd bionic_v0 && cargo test --release --lib 2>&1 | tail -5
 ```
-BANDS = 32（+20），辅助特征 4 个
-帧字节 = 1 + (32 + 2 + 2 + 4)*4 + 96*72*4
-       = 1 + 160 + 27648 = 27,809 bytes（在 L1 基础上增 96 bytes）
-```
-
-**测试清单**（`gateway/hearing_upgrade.test.mjs`，12 个）：
-
-| # | 场景 | 期望 |
-|---|------|------|
-| 1 | `SENSES_FRAME_BYTES` = 27809 | 常量正确 |
-| 2 | validateFrame(27809字节) → true | 新帧通过 |
-| 3 | packSenses 在 `BANDS=32` 下输出 27809 字节 | 浏览器端 |
-| 4 | 辅助特征 spectral_centroid ∈ [0,1] | 范围 |
-| 5 | 辅助特征 zero_crossing_rate ≥ 0 | 非负 |
-| 6 | 高频输入 → spectral_centroid 接近 1 | 正确方向 |
-| 7 | 低频输入 → spectral_centroid 接近 0 | 正确方向 |
-| 8 | Rust VIB_BANDS = 8（更新后）| 常量 |
-| 9 | 32→8 频带映射：男声（低 F0 ~150Hz）集中在 band 0-2 | 区分 |
-| 10 | 女声（高 F0 ~250Hz）集中在 band 3-5 | 区分 |
-| 11 | familiar_objects 指纹从 4→8 维（不破坏已有数据格式）| 兼容 |
-| 12 | 升级后 parse_frame 不 panic（BANDS=32 适配）| 安全 |
 
 ---
 
-## 更新后验收矩阵（M1.5 新增行）
+## 完整验收矩阵
+
+> 所有 PRD §验收标准到测试的映射，M1.5 规格已更新为 CPU 最大化目标值。
 
 | PRD 验收标准 | 对应测试 | 里程碑 |
 |-------------|---------|-------|
-| AC-F7 L1: Gaussian 聚类 active_count>10 | visual_resolution 测试 #13/14 | M1.5 |
-| AC-F7: 帧格式全三端一致（browser/gateway/Rust）| visual_resolution 测试 #1-8 | M1.5 |
-| AC-F9: 元音频谱重心差 >200Hz | vocal_synthesis 测试 #10 | M1.5 |
-| AC-F9: 有颤音（相邻帧基频标准差 >1Hz）| vocal_synthesis 测试 #13 | M1.5 |
-| AC-F9: 生存联动（低 reserve→颤音减弱）| vocal_synthesis 测试 #14 | M1.5 |
-| AC-F8: 男女声 VIB 差异 >0.3 | hearing_upgrade 测试 #9/10 | M2 |
+| **F7 视觉** | | |
+| 帧格式三端一致（230705 bytes）| perceptual_upgrade 测试 #1–5 | M1.5 |
+| Gaussian active_count > 32（人脸输入）| perceptual_upgrade 测试 #14 | M1.5 |
+| 面孔追踪稳定（中心标准差 < 0.05）| m1_5_integration 测试 #4 | M1.5 |
+| RGB 色彩可区分（ΔE > 20）| perceptual_upgrade 测试 #17 | M1.5 |
+| 3 实例 CPU < 80% | m1_5_integration 测试 #3 | M1.5 |
+| Rayon 并行 > 3× 串行速度 | perceptual_upgrade 测试 #19 | M1.5 |
+| **F8 听觉** | | |
+| VIB_BANDS = 16 / AXIS_COUNT = 161 | perceptual_upgrade 测试 #20–22 | M1.5 |
+| 64 mel 带 → 16 VIB 轴映射无重叠 | perceptual_upgrade 测试 #22 | M1.5 |
+| 音频指纹 16 维 | perceptual_upgrade 测试 #23 | M1.5 |
+| 男/女声 VIB 分布差异 > 0.4 | m1_5_integration 测试 #2（扩展）| M1.5 |
+| **F9 发声** | | |
+| 前 8 次谐波各自 > -40dB | vocal_synthesis 测试 #3 | M1.5 |
+| 元音频谱重心差 > 400Hz | vocal_synthesis 测试 #8 + m1_5 测试 #6 | M1.5 |
+| 颤音：基频标准差 > 3Hz | vocal_synthesis 测试 #14 | M1.5 |
+| 生存联动（reserve 低→颤音衰减）| vocal_synthesis 测试 #15 | M1.5 |
+| 跨帧无爆音（相位连续）| vocal_synthesis 测试 #17 | M1.5 |
+| 采样率 44100 Hz | vocal_synthesis 测试 #20 | M1.5 |
+| **M1 主体** | | |
+| master_learned_bias mtime 滚动 | m1_integration 测试 #4 | M1 |
+| 主体 7 天存活 | prime_manager 测试 #1 + systemd | M1 |
+| 训练池持续进出 | harvest_pipeline 测试 #6/7 | M1 |
+| **M2 前端** | | |
+| ≤30s ≤3次输入注册完成 | auth_flow 测试 #13 | M2 |
+| 访客 0 操作直接开始 | Landing 测试 #7 | M2 |
+| **M3 认主人** | | |
+| attachment 高于陌生人 | owner_binding 测试 #3/4 | M3 |
+| GPU 热路径运行 CPU 显著下降 | gaussian_gpu benchmark | M3 |
+| **M4 能力** | | |
+| 能力探针周维度上行 | probe_dashboard isMonotone | M4 |
 
 ---
 
-## 更新后执行顺序建议
-
-```
-M1（前置）: [同前]
-
-M1.5（M1 完成后立即，纯 CPU）:
-  Day 6:   vocal_synthesis.rs（Rosenberg + formant + 有机纹理）→ 测试绿
-           → sample_vocal_pcm 替换 → 部署 → 人工听感验证
-  Day 7-8: visual_resolution（96×72，三端同步更新帧格式）→ 测试绿
-           → 部署 → observer 验证 active_count 提升
-
-M2（M1.5 完成后）:
-  Day 9:   hearing_upgrade（32 带，与前端 M2 一起）
-  Day 9:   sms_adapter + 选定短信商
-  Day 10-12: 前端 Landing + AuthFlow + InstanceView → 部署
-
-[M3/M4 同前]
-```
+## 开放测试决策
 
 | 问题 | 测试待补充 |
 |------|----------|
-| 国内短信商选定后 | sms_adapter.test.mjs 加真实 mock（不发真短信）|
-| 合并频率定下后 | harvest_pipeline 测试 #13 补具体 intervalMs 值 |
-| 质量门新阈值 | harvest_pipeline 测试 #1/2 参数化 |
-| GPU 容量公式 | 压测后写入 capacity_governor.test.mjs #1 |
-| 推广并发峰值 | 负载测试脚本（scripts/load_test.mjs，M3 后补）|
+| 国内短信商选定后 | `sms_adapter.test.mjs` 加对应 mock |
+| 合并频率定下后 | `harvest_pipeline` 测试 #13 参数化 |
+| 质量门新阈值 | `harvest_pipeline` 测试 #1/2 参数化 |
+| GPU 容量公式压测后 | `capacity_governor.test.mjs` #1 |
+| 推广并发峰值确认后 | `scripts/load_test.mjs`（M3 后补）|
 
 ---
 
-## 执行顺序建议
+## 执行顺序（最终版）
 
 ```
-M1（前置，立即）:
-  Day 1:   I2.1 扩 LVM（ops）→ 验证磁盘释放
-  Day 1-2: reserve_balance Rust 修复 → 测试绿
-  Day 2-3: prime_manager + nursery_adaptive → 测试绿
-  Day 3-4: harvest_pipeline 质量门放宽 → 测试绿
-  Day 4-5: prime_status_api → 测试绿
-  Day 5:   M1 集成测试全绿 → 部署 prime 常驻服务
+Day 1:    I2.1 扩 LVM（ops，半天）→ / 使用率 < 50%
+Day 1-2:  reserve_balance Rust → 测试绿
+Day 2-3:  prime_manager + nursery_adaptive → 测试绿
+Day 3-4:  harvest_pipeline 质量门放宽 + prime_status_api → 测试绿
+Day 5:    M1 集成测试全绿 → 部署 prime 常驻服务
 
-M2（串行）:
-  Day 6:   sms_adapter + 选定短信商
-  Day 7-9: 前端 Landing + AuthFlow + InstanceView → 测试绿
-  Day 9-10: M2 集成验收 → 部署
+--- M1.5（M1 完成后立即，纯 CPU，不分阶段）---
+Day 6-7:  vocal_synthesis.rs
+            Rosenberg-C + 5 IIR formants + 44100Hz + 有机纹理 → 20 测试绿
+            → sample_vocal_pcm 替换 → 部署 → 人工听感验证（5 人 MOS）
+Day 7-9:  perceptual_upgrade
+            160×120 RGB / 64 mel / Gaussian 320×240×512 / Rayon / VIB×16
+            → 24 测试绿（含 Rayon 数值对照 + 速度验证）
+            → 三端同步部署（Rust binary + gateway security.mjs + site dist）
+Day 9:    M1.5 集成测试 → CPU 实测 < 80% → observer active_count > 32
 
-M3（并行可行）:
-  owner_binding (2天)   ‖   GPU benchmark (2天)
-  → capacity_governor (1天)
-  → M3 部署
+--- M2（M1.5 完成后）---
+Day 10:   sms_adapter（选定短信商）
+Day 11-13: 前端 Landing + AuthFlow + InstanceView → 测试绿
+Day 13-14: M2 集成验收 → 部署
 
-M4（持续推进，与推广并行）:
-  capability_governor_wire → virtual_neck_wire → probe_dashboard
+--- M3（并行推进）---
+owner_binding (2天) ‖ GPU benchmark + wgpu splat (3天)
+→ capacity_governor (1天)
+→ M3 集成验收 → GPU 实测承接并发 → 部署
+
+--- M4（持续，与推广并行）---
+capability_governor_wire → virtual_neck_wire → probe_dashboard
+→ 能力探针面板上线 → 持续观察周趋势
+```
+
+**全量测试运行（CI 命令）**：
+```bash
+#!/usr/bin/env bash
+set -e
+# M1
+cd gateway && node --test prime_manager.test.mjs nursery_feeder.test.mjs \
+  harvest_pipeline.test.mjs admin.test.mjs m1_integration.test.mjs
+# M1.5
+node --test perceptual_upgrade.test.mjs m1_5_integration.test.mjs
+cd ../bionic_v0 && cargo test --release --lib vocal_synthesis
+cargo test --release --lib perceptual_upgrade
+cargo test --release --lib  # 全量回归（AXIS_COUNT=161）
+# M2
+cd ../gateway && node --test sms_adapter.test.mjs auth_flow.test.mjs
+cd ../site && npm run test
+# M3
+cd ../gateway && node --test owner_binding.test.mjs capacity_governor.test.mjs
+cd ../bionic_v0 && cargo test --release gaussian_gpu
+# M4
+cd ../gateway && node --test probe_dashboard.test.mjs
+cd ../bionic_v0 && cargo test --release --lib capability_curriculum
+cargo test --release --lib virtual_neck
+echo "ALL TESTS PASSED"
 ```
 
 ---
 
-*关联文档：[abron-live-prd-v1.md](abron-live-prd-v1.md)、[instance-management-tdd-plan.md](instance-management-tdd-plan.md)*
+*关联文档：[abron-live-prd-v1.md](abron-live-prd-v1.md) · [instance-management-tdd-plan.md](instance-management-tdd-plan.md)*
