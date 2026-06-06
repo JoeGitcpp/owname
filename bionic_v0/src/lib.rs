@@ -64,9 +64,8 @@ pub mod phoneme_memory;
 pub mod vpc;
 pub mod vpc_cross_layer;
 
-// Phase A: virtual neck + efference copy + depth observer
+// Phase A: virtual neck + efference copy (Phase 2: depth is per-Gaussian — see phot_gaussian)
 pub mod efference_copy;
-pub mod depth_observer;
 pub mod virtual_neck;
 
 pub const HISTORY_CAP: usize = 1024;

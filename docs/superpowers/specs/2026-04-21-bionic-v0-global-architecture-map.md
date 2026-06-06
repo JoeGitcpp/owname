@@ -2,6 +2,10 @@
 
 > Status: updated control review baseline on 2026-05-06 after integrating the
 > completed worktrees into `replace-by-filament`.
+>
+> 2026-06-06: appended §6 (Representation Path & Load-Bearing Acceptance — Route A)
+> recording the non-pixel / perturbation-field charter and the ①/②/③ acceptance
+> rubric, with current attainment from the 2026-06-06 code trace.
 
 ## 0. Boundary Notes
 
@@ -28,7 +32,7 @@ ordinary ingress
   -> ordinary ingress consequence windows
   -> action-consequence pairs
   -> language binding events only when pair evidence is strong enough
-  -> snapshot v54
+  -> snapshot v56
   -> observer
 
 computer-native byte ingress
@@ -132,3 +136,60 @@ cargo test --manifest-path bionic_v0/Cargo.toml
 ```
 
 Result: all unit tests, integration tests, and doc tests passed.
+
+## 6. Representation Path & Load-Bearing Acceptance — Route A (非像素 / 扰动场)
+
+> Appended 2026-06-06. Theory charter for "Route A pure emergence" plus the
+> acceptance rubric used to reconcile design-vs-reality each build. Sources:
+> `2026-06-01-unified-perception-substrate-redesign.md`,
+> `2026-06-01-life-state-honest-assessment.md`, `2026-06-06` code trace.
+>
+> Per §0: the criteria below are an **external acceptance/review rubric**. Terms
+> such as `identity`, `recognition`, `object`, `word↔object` name review
+> categories and forbidden-drift checks, not admissible body-side ontology. The
+> body stays numeric, temporal, curve-based, observer-separated.
+
+### 6.1 Principle — understanding as homomorphism (同态), not pixel isomorphism (同构)
+
+The body does not reconstruct a pixel picture to "understand," and is not required
+to. Understanding requires a **homomorphism (同态)** to the world — preservation of
+the task-relevant relations/invariants needed for prediction and action — NOT an
+**isomorphism (同构)** that copies the world pixel-for-pixel. A picture is a human
+*output format*, not the substrate of understanding (brains carry edges,
+orientations, motion, prediction and prediction-error — never a pixel buffer). For a
+substrate whose native ontology is perturbation, the world is natively a *structure
+of surprises*, not an image; forcing it into pixels is a lossy foreign re-encoding.
+
+This is the charter for **Route A (pure emergence)**: slice perception by physical
+quantity (like audio slices frequency bands) into one shared axis space, feed one
+abstraction engine, and let shape / depth / identity **emerge from inter-region
+relations** — build no recognizers at this layer. This deliberately avoids forced
+**convergence** onto a human-shaped pixel representation (the listed risk).
+
+Representation status: **on-path and load-bearing in code.** Camera frames collapse at
+ingress into region × physical-quantity axes (`phot_camera::region_perception`), share
+the auditory axis space (`AXIS_VIS_BASE == VIB_BANDS`), and only error / surprise /
+disturbance flow downstream (`motion = inter-frame Δ`; Gaussian field learns residual;
+`PhotPrediction.err/surprise`; prediction pressure field = field of unresolved errors).
+No pixel grid is stored or reconstructed.
+
+### 6.2 Three load-bearing acceptance criteria
+
+"Non-pixel" alone is not sufficient. For the alien representation to actually
+*understand and align*, three conditions must hold **together**. "Internally coherent
+logic" is the *result* of these three, never a substitute for them.
+
+| # | Criterion (canonical) | What it requires | Current status | Evidence |
+|---|---|---|---|---|
+| ① | **同态够 · Structural sufficiency** | Homomorphism preserves enough world-structure (edges, surfaces, depth, occlusion, boundaries, individuation) for the task. Alien *form* is fine; thin *structure* is not. | **未达 / NOT MET** — coarse 2×2–4×4 region grid; fingerprint is 4-D vib only, ignores in-slot phot/spatial. Mechanism in place, content/thickness ~empty. Path correct (coarse→fine emergence + recursive depth design); threshold not reached. | `phot_camera.rs` region axes; `familiar_objects.rs:252`; `2026-06-02-recursive-predictive-coding-depth-emergence-design.md` |
+| ② | **接地 · Grounding loop** | Representation pays rent via a closed predict→act→observe-error→update loop, not a free-floating self-consistent fantasy. | **部分 / PARTIAL** — perceptual predictive coding learns from sensory error and runs in body, not stubbed. Action→consequence loop closes onto **pressure/exploration + binding strength**, but behavioral error (`curve_similarity`) does **not** retrain predictor weights. | `predictor.rs` (AR-2 from `err`); `vpc_cross_layer.rs` (Widrow-Hoff from `meta_err`); `phot_gaussian.rs` (residual); `action_consequence.rs:355-471`; `evidence_tension.rs:42-68`; `body.rs:123` |
+| ③ | **可质询接口 · Queryable interface** | Alien representation is bindable to / queryable through shared human referents, so alignment is *testable*, not assumed. | **机制在·referent缺 / MECHANISM PRESENT, REFERENT MISSING** — `language_binding` is real, evidence-driven (pattern↔target strength from pair `curve_similarity`), not templated, with developmental precision. But it is post-hoc/action-gated, and the key referent — cross-modal **joint attention** (seen-object + heard-sound → one slot) — is **not wired**; recognition is sound-only, so word↔object cannot yet bind. | `language_binding.rs:98-232`; self-assessment §4–5 |
+
+### 6.3 Nearest bottleneck
+
+①∩③ intersect at one organ: **cross-modal joint attention + true individuation**
+(fingerprint reads slot phot/spatial, not vib-only; same-moment seen-object + heard-sound
+bind to one slot). Landing it simultaneously thickens structure [fills ①] and gives the
+interface a real referent to bind [fills ③]. Until then the path is "form correct,
+alignment not yet startable." Asking "how long to train communication" is premature until
+these organs connect.

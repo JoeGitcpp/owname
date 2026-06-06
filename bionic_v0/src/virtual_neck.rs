@@ -23,7 +23,7 @@
 //   2. vp.push_efference_copy(ec)
 //   3. vp.inject_efference_motion_priors()   ← before predictor ticks
 //   4. Push region_perception(frame, prev) observations to vp
-//   5. vp.update_depth_from_efference(obs_motion)
+//   5. (per-Gaussian depth update now runs inside vp.tick_gaussian_field)
 //   6. vp.apply_action_output_event(NeckTranslation Begin, magnitude=|tx|)
 //   7. Optionally: vp.accumulate_ingress_change(t, motion_energy)
 
@@ -325,22 +325,43 @@ pub fn accumulate_neck_visual_consequence(vp: &Arc<Viewport>, motion_energy: f64
     }
 }
 
-/// Full per-tick integration step for the virtual neck + viewport.
-///
-/// Call order:
-///   1. Render (frame, ec) from VirtualNeck::tick.
-///   2. Write ec to viewport.
-///   3. Inject efference priors (before predictor ticks).
-///   4. Caller pushes region_perception observations to viewport.
-///   5. Caller ticks predictors.
-///   6. Caller collects obs_motion and calls update_depth_from_efference.
-///   7. This helper writes the NeckTranslation action-output event.
-///
-/// This function covers step 7 only; steps 2–3 and 6 have dedicated
-/// viewport methods (`push_efference_copy`, `inject_efference_motion_priors`,
-/// `update_depth_from_efference`).
+/// Write the NeckTranslation action-output event for `ec` (action-consequence
+/// pairing). The full per-tick pipeline is `tick_virtual_neck_into_viewport`.
 pub fn tick_neck_action_output(vp: &Arc<Viewport>, ec: &EfferenceCopy) {
     write_neck_translation_event(vp, ec.tx, ec.t_us);
+}
+
+/// Body-side driver: advance the virtual neck one tick and run the FULL
+/// efference → perception → per-Gaussian-depth pipeline into the viewport.
+/// Returns the new per-region brightness baseline (for the next tick's motion
+/// diff). This is the curriculum vision source that makes depth observable in
+/// the live loop: the body commands its OWN lateral eye-movement (a genuine
+/// efference copy), so per-Gaussian parallax depth can update — unlike the
+/// passive real camera, where tt = None and depth stays unobservable.
+///
+/// Call order matches the design contract:
+///   1. push efference copy (the body's record of the motion it commanded)
+///   2. inject motion priors from current per-Gaussian depth (before predictors)
+///   3. push this frame's region physical-quantity axes (same as RealPhotAdapter)
+///   4. tick the Gaussian field (re-fits μ) + per-Gaussian depth update (uses ec)
+///   5. write the NeckTranslation action-output event (action-consequence pairing)
+pub fn tick_virtual_neck_into_viewport(
+    vp: &Arc<Viewport>,
+    neck: &mut VirtualNeck,
+    prev_brightness: &[f64; crate::VIS_REGIONS],
+    t_us: u64,
+) -> [f64; crate::VIS_REGIONS] {
+    let (frame, ec) = neck.tick(t_us);
+    vp.push_efference_copy(ec);
+    vp.inject_efference_motion_priors();
+    let (vis_axes, new_brightness) =
+        crate::phot_camera::region_perception(&frame, prev_brightness);
+    for (i, &v) in vis_axes.iter().enumerate() {
+        vp.push_observation(crate::AXIS_VIS_BASE + i, t_us, v);
+    }
+    vp.tick_gaussian_field(&frame, t_us);
+    write_neck_translation_event(vp, ec.tx, t_us);
+    new_brightness
 }
 
 #[cfg(test)]

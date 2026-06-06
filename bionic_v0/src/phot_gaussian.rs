@@ -63,6 +63,15 @@ const BIRTH_RESIDUAL_MIN: f64 = 0.08; // spawn only where peak residual exceeds 
 const BIRTH_MIN_SEP: f64 = 0.10; // don't spawn within this (normalized) of an active center
 const FOOTPRINT_SIGMAS: f64 = 3.0;
 
+// --- Phase 2: per-Gaussian inverse-depth (ρ) via the SAME local parallax rule
+// the region depth observer used, now re-founded per primitive. ---
+/// Inverse-depth bounds (ρ = 1/z, higher = closer). ρ is recovered only up to a
+/// GLOBAL SCALE (monocular scale ambiguity) — only the near/far RATIO is meaningful.
+pub const DEPTH_RHO_MIN: f64 = 0.01;
+pub const DEPTH_RHO_MAX: f64 = 100.0;
+/// Learning rate for the local depth-from-parallax step.
+pub const DEPTH_LR: f64 = 0.1;
+
 #[inline]
 fn idx(c: usize, px: usize, py: usize) -> usize {
     c * GAUSS_PIX + py * GAUSS_REC_W + px
@@ -83,6 +92,15 @@ pub struct Gaussian {
     /// Opacity (presence) in [0,1].
     pub opacity: f64,
     pub active: bool,
+    /// Inverse depth ρ = 1/z (higher = closer), recovered up to a global scale
+    /// by the local parallax rule under self-motion. Neutral prior 1.0.
+    pub inv_depth: f64,
+    /// Whether depth was observable on the most-recent depth tick (efference
+    /// translation present). False under stillness / pure rotation.
+    pub depth_observable: bool,
+    /// μx at the previous depth tick — lets each primitive measure its OWN
+    /// image-space displacement Δμx (the parallax observation).
+    pub prev_mu_x: f64,
 }
 
 impl Default for Gaussian {
@@ -95,6 +113,9 @@ impl Default for Gaussian {
             color: [0.0; 3],
             opacity: 0.0,
             active: false,
+            inv_depth: 1.0,
+            depth_observable: false,
+            prev_mu_x: 0.5,
         }
     }
 }
@@ -245,6 +266,36 @@ impl GaussianField {
         self.tick_grid(&target)
     }
 
+    /// One per-Gaussian depth-from-parallax tick. For each active Gaussian the
+    /// observed displacement is its OWN Δμx since the last depth tick; the
+    /// expected displacement under self-motion is tt·ρ. The local rule
+    ///   ρ ← ρ + lr·(|Δμx| − tt·ρ)·tt
+    /// has fixed point ρ* = |Δμx|/tt, so a NEAR primitive (more parallax for the
+    /// same tt) settles at a LARGER ρ than a FAR one — depth ordering, up to a
+    /// global scale. `tt = None` (still / pure rotation) → unobservable, ρ is
+    /// NOT updated (world-motion must never masquerade as self-motion).
+    /// `prev_mu_x` is always advanced so the next tick measures a fresh delta.
+    ///
+    /// Call AFTER `tick_grid`/`tick_frame` has re-fit μ to this frame.
+    pub fn update_depth(&mut self, tt: Option<f64>) {
+        for g in self.gaussians.iter_mut() {
+            if !g.active {
+                continue;
+            }
+            match tt {
+                Some(tt) if tt.abs() >= 1e-6 => {
+                    let d_obs = (g.mu_x - g.prev_mu_x).abs();
+                    g.inv_depth = depth_step(g.inv_depth, d_obs, tt.abs());
+                    g.depth_observable = true;
+                }
+                _ => {
+                    g.depth_observable = false;
+                }
+            }
+            g.prev_mu_x = g.mu_x;
+        }
+    }
+
     /// Birth a Gaussian at the peak unexplained residual; kill faded ones.
     fn birth_death(&mut self, target: &[f64], residual: &[f64]) {
         // Death: deactivate any Gaussian whose presence has decayed away.
@@ -294,6 +345,9 @@ impl GaussianField {
             ],
             opacity: OPACITY_INIT,
             active: true,
+            inv_depth: 1.0,
+            depth_observable: false,
+            prev_mu_x: bx,
         };
     }
 }
@@ -307,6 +361,14 @@ fn footprint(g: &Gaussian) -> (usize, usize, usize, usize) {
     let y0 = (((g.mu_y - ry) * GAUSS_REC_H as f64).floor()).clamp(0.0, GAUSS_REC_H as f64) as usize;
     let y1 = (((g.mu_y + ry) * GAUSS_REC_H as f64).ceil()).clamp(0.0, GAUSS_REC_H as f64) as usize;
     (x0, x1.max(x0), y0, y1.max(y0))
+}
+
+/// The local depth-from-parallax step, shared by the per-Gaussian update and
+/// tests. ρ ← ρ + lr·(d_obs − tt·ρ)·tt, clamped to [DEPTH_RHO_MIN, DEPTH_RHO_MAX].
+/// Fixed point ρ* = d_obs/tt. Pure-local, no backprop.
+#[inline]
+fn depth_step(rho: f64, d_obs: f64, tt: f64) -> f64 {
+    (rho + DEPTH_LR * (d_obs - tt * rho) * tt).clamp(DEPTH_RHO_MIN, DEPTH_RHO_MAX)
 }
 
 /// Local NORMALIZED parameter step for one Gaussian against the residual field.
@@ -473,5 +535,72 @@ mod tests {
         let mse = field.tick_grid(&black);
         assert_eq!(mse, 0.0, "no Gaussians + black target = exact");
         assert_eq!(field.active_count(), 0, "black target births nothing");
+    }
+
+    // ── Phase 2: per-Gaussian depth-from-parallax ──────────────────────────────
+
+    #[test]
+    fn depth_step_converges_to_disp_over_tt() {
+        // Fixed point of the parallax rule is ρ* = d_obs / tt.
+        let (tt, d_obs) = (0.5_f64, 0.2_f64);
+        let mut rho = 1.0_f64;
+        for _ in 0..2000 {
+            rho = depth_step(rho, d_obs, tt);
+        }
+        let expected = d_obs / tt; // 0.4
+        assert!(
+            (rho - expected).abs() < 1e-3,
+            "ρ should converge to d_obs/tt={expected}, got {rho}"
+        );
+    }
+
+    #[test]
+    fn near_gaussian_gets_larger_rho_than_far() {
+        // Same self-motion tt; the near primitive shows more parallax (larger
+        // Δμx) so its ρ must settle higher than the far one's.
+        let mut field = GaussianField::new();
+        field.gaussians[0] = Gaussian { active: true, ..Default::default() };
+        field.gaussians[1] = Gaussian { active: true, ..Default::default() };
+        let tt = 0.5_f64;
+        let (disp_near, disp_far) = (0.30_f64, 0.10_f64);
+        for _ in 0..2000 {
+            // Re-impose each primitive's own constant per-tick displacement.
+            field.gaussians[0].prev_mu_x = 0.5;
+            field.gaussians[0].mu_x = 0.5 + disp_near;
+            field.gaussians[1].prev_mu_x = 0.5;
+            field.gaussians[1].mu_x = 0.5 + disp_far;
+            field.update_depth(Some(tt));
+        }
+        let rho_near = field.gaussians[0].inv_depth;
+        let rho_far = field.gaussians[1].inv_depth;
+        assert!(
+            field.gaussians[0].depth_observable && field.gaussians[1].depth_observable,
+            "both must be observable under self-motion"
+        );
+        assert!(rho_near > rho_far, "near ρ={rho_near} must exceed far ρ={rho_far}");
+        assert!((rho_near - disp_near / tt).abs() < 1e-2, "near ρ={rho_near} ≈ {}", disp_near / tt);
+        assert!((rho_far - disp_far / tt).abs() < 1e-2, "far ρ={rho_far} ≈ {}", disp_far / tt);
+    }
+
+    #[test]
+    fn still_camera_leaves_depth_unobservable_and_rho_fixed() {
+        let mut field = GaussianField::new();
+        field.gaussians[0] = Gaussian {
+            active: true,
+            inv_depth: 0.7,
+            mu_x: 0.6,
+            prev_mu_x: 0.4, // a would-be displacement, but no self-motion
+            ..Default::default()
+        };
+        let before = field.gaussians[0].inv_depth;
+        field.update_depth(None); // still / pure rotation → unobservable
+        assert_eq!(
+            field.gaussians[0].inv_depth, before,
+            "ρ must not change when depth is unobservable"
+        );
+        assert!(
+            !field.gaussians[0].depth_observable,
+            "must be marked unobservable when tt = None"
+        );
     }
 }

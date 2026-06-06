@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use crate::viewport::Viewport;
-use crate::{vis_axis, VIS_REGIONS, VIS_SUB_MOTION};
+use crate::{vis_axis, VIS_GRID_COLS, VIS_GRID_ROWS, VIS_REGIONS, VIS_SUB_MOTION};
 
 /// Minimum lateral displacement |tx| (in normalised frame-width units) for
 /// depth to be considered observable.
@@ -100,9 +100,31 @@ impl Viewport {
                 }
             }
             Some(tt) => {
-                let depth = self.depth_observer.read().unwrap();
+                // Phase 2: aggregate per-Gaussian ρ into a per-region expectation.
+                // Each region's expected motion under self-motion tt is tt·ρ_region,
+                // where ρ_region is the mean inverse-depth of the active Gaussians
+                // centered in that region (neutral prior 1.0 where none).
+                let mut rho_sum = [0.0_f64; VIS_REGIONS];
+                let mut rho_n = [0u32; VIS_REGIONS];
+                {
+                    let field = self.gaussian_field.read().unwrap();
+                    for g in field.gaussians.iter() {
+                        if !g.active {
+                            continue;
+                        }
+                        let col = ((g.mu_x * VIS_GRID_COLS as f64) as usize).min(VIS_GRID_COLS - 1);
+                        let row = ((g.mu_y * VIS_GRID_ROWS as f64) as usize).min(VIS_GRID_ROWS - 1);
+                        let region = row * VIS_GRID_COLS + col;
+                        rho_sum[region] += g.inv_depth;
+                        rho_n[region] += 1;
+                    }
+                }
                 for region in 0..VIS_REGIONS {
-                    let rho = depth.inv_depth[region];
+                    let rho = if rho_n[region] > 0 {
+                        rho_sum[region] / rho_n[region] as f64
+                    } else {
+                        1.0
+                    };
                     let expected = (tt * rho).clamp(0.0, 1.0);
                     self.push_prior(vis_axis(region, VIS_SUB_MOTION), expected);
                 }

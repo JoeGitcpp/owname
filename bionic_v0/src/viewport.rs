@@ -17,7 +17,6 @@ use crate::evolution_priors::BiasPriors;
 use crate::framed_byte_egress::FramedByteEgressState;
 use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, LanguageBindingState};
 use crate::learned_bias::{LearnedBiasEventInput, LearnedBiasState};
-use crate::depth_observer::DepthObserver;
 use crate::efference_copy::EfferenceCopyState;
 use crate::mark_disturbance::MarkDisturbanceState;
 use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
@@ -1301,17 +1300,13 @@ pub struct Viewport {
     /// Written by AudioAdapter, read by audio predictors (future).
     pub audio_raw: Arc<AudioRawBuffer>,
 
-    // ── Phase A: virtual neck + efference copy + depth observer ──────────────
+    // ── Phase A: virtual neck + efference copy ───────────────────────────────
 
     /// Most-recently-commanded camera translation (efference copy).
     /// Written by the neck controller each tick; read by
-    /// `inject_efference_motion_priors` and `update_depth_from_efference`.
+    /// `inject_efference_motion_priors`. Phase 2: per-Gaussian inverse-depth ρ
+    /// lives on the Gaussian field (see `gaussian_field`), not a region grid.
     pub efference_copy: RwLock<EfferenceCopyState>,
-
-    /// Per-region inverse-depth estimates (ρ = 1/z).
-    /// Updated each tick via the depth-observer update rule when
-    /// translation_term is Some.  Cleared (observable=false) when still.
-    pub depth_observer: RwLock<DepthObserver>,
 
     // ── Phase 1 (keystone ①): sparse Gaussian visual field ───────────────────
 
@@ -1427,7 +1422,6 @@ impl Viewport {
             mark_disturbance: RwLock::new(MarkDisturbanceState::default()),
             audio_raw: Arc::new(AudioRawBuffer::new()),
             efference_copy: RwLock::new(EfferenceCopyState::default()),
-            depth_observer: RwLock::new(DepthObserver::default()),
             gaussian_field: RwLock::new(crate::phot_gaussian::GaussianField::new()),
             developmental_maturity: RwLock::new(0.0),
             last_self_play_t_us: AtomicU64::new(0),
@@ -4569,9 +4563,15 @@ impl Viewport {
         frame: &crate::phot_camera::CameraFrame,
         now_us: u64,
     ) {
+        let tt = self.read_efference_copy().translation_term();
         let mse = {
             let mut field = self.gaussian_field.write().unwrap();
-            field.tick_frame(frame)
+            let mse = field.tick_frame(frame);
+            // Phase 2: per-Gaussian depth-from-parallax. Uses the body's own
+            // commanded self-motion (efference tt). The real-camera path has no
+            // efference → tt = None → depth marked unobservable, ρ untouched.
+            field.update_depth(tt);
+            mse
         };
         let active_frac = {
             let field = self.gaussian_field.read().unwrap();
@@ -4610,9 +4610,12 @@ impl Viewport {
                 }
             }
         }
+        let tt = self.read_efference_copy().translation_term();
         let mse = {
             let mut field = self.gaussian_field.write().unwrap();
-            field.tick_grid(&target)
+            let mse = field.tick_grid(&target);
+            field.update_depth(tt);
+            mse
         };
         let active_frac = {
             let field = self.gaussian_field.read().unwrap();
