@@ -52,6 +52,18 @@ nokhwa = { version = "0.10", features = ["input-avfoundation"] }
 pixels = "0.13"
 winit = "0.28"
 rayon = "1.10"
+signal-hook = { version = "0.3", default-features = false, features = ["extended-siginfo"] }
+
+[features]
+# Exposes #[cfg(...)]-gated test-only accessors (e.g. VibAdapter::priors,
+# process_frame_for_test) to integration tests in BOTH debug and release.
+# Not a default feature, so production builds never include them.
+test-support = []
+
+[dev-dependencies]
+# Self-dependency enables `test-support` on the lib when building this crate's
+# own integration tests (debug or release), without exposing it in production.
+bionic_v0 = { path = ".", features = ["test-support"] }
 
 [profile.release]
 opt-level = 3

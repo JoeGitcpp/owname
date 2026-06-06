@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use signal_hook::flag as signal_flag;
 use std::time::Duration;
 
 use bionic_v0::action_consequence::tick_all_ingress_accumulation;
@@ -224,6 +225,12 @@ fn main() {
         *vp.self_model.write().unwrap() = state;
     }
     let stop = Arc::new(AtomicBool::new(false));
+    // Register SIGTERM so the OS-level kill causes a graceful flush rather than
+    // instant termination.  signal_flag::register atomically sets `stop` on
+    // SIGTERM delivery, which exits the ticker loops and falls through to the
+    // final checkpoint-write block below.
+    signal_flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stop))
+        .expect("register SIGTERM handler");
 
     let h_master = spawn_master_clock_hz(vp.clone(), stop.clone(), profile.master_clock_hz);
     let h_live_byte = spawn_live_byte_ingress(
@@ -464,8 +471,10 @@ fn main() {
         }
         stop.store(true, Ordering::Relaxed);
     } else {
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
+        // Poll stop flag at 100 ms so a SIGTERM (or any other flag-setter)
+        // is noticed quickly and falls through to the checkpoint flush below.
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 

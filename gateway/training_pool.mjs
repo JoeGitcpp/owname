@@ -29,6 +29,13 @@ const DELTA_THRESHOLD   = 0.005          // minimum meaningful bias change
 const VOCAL_EFF_MIN     = 0.01           // vocal_efficacy must have grown past default
 const MERGE_ALPHA       = 0.05           // how strongly each session nudges master
 
+// ── Relaxed gate (ABORN_HARVEST_RELAXED=1) ───────────────────────────────────
+// Short sessions (60–300s) qualify on bias delta alone — skips recognition and
+// vocal-efficacy checks.  Intended for early deployments where sessions rarely
+// reach 5 min but are still producing real learning signal.
+const RELAXED_GATE      = process.env.ABORN_HARVEST_RELAXED === '1'
+const RELAXED_MIN_SECS  = 60             // 1-minute floor even in relaxed mode
+
 // ── Learned-bias binary layout (v4) ──────────────────────────────────────────
 // Offsets validated against learned_bias.rs
 const MAGIC_OFFSET         = 0   // u64 (8 bytes)
@@ -49,6 +56,25 @@ export function evaluate_session({
   endedAt   = Date.now(),
 }) {
   const sessionSecs = (endedAt - startedAt) / 1000
+
+  // ── Gate 0 (relaxed mode): short sessions qualify on bias delta alone ──────
+  // Only active when ABORN_HARVEST_RELAXED=1.  Sessions ≥ MIN_SESSION_SECS
+  // always use the full strict path below, regardless of this flag.
+  if (RELAXED_GATE && sessionSecs >= RELAXED_MIN_SECS && sessionSecs < MIN_SESSION_SECS) {
+    try {
+      const lb  = readFileSync(join(runtimeDir, 'learned_bias.bin'))
+      const dv  = new DataView(lb.buffer, lb.byteOffset, lb.byteLength)
+      for (let off = 28; off + 8 <= lb.length; off += 8) {
+        const v = Math.abs(dv.getFloat64(off, true))
+        if (v > DELTA_THRESHOLD && v < 1e6) {
+          return { pass: true, score: 0.3, reason: 'delta_relaxed' }
+        }
+      }
+      return { pass: false, score: 0, reason: 'no_delta_relaxed' }
+    } catch {
+      return { pass: false, score: 0, reason: 'no_bias_file' }
+    }
+  }
 
   // ── Gate 1: duration ───────────────────────────────────────────────────────
   if (sessionSecs < MIN_SESSION_SECS) {

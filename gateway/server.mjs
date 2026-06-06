@@ -33,12 +33,30 @@ import { createConnection } from 'node:net'
 import { spawn }            from 'node:child_process'
 import {
   readFileSync, existsSync, mkdirSync, rmSync, copyFileSync,
-  appendFileSync,
+  appendFileSync, readdirSync,
 }                           from 'node:fs'
 import { join, resolve }    from 'node:path'
 import { createReadStream } from 'node:fs'
 import { extname }          from 'node:path'
 import { createHash }       from 'node:crypto'
+
+// ── Local env-file override (gateway.env in the deploy root) ─────────────────
+// Lets operators set/override env vars without editing the systemd unit file.
+// Format: KEY=VALUE, one per line; blank lines and # comments ignored.
+// Lives at <WorkingDirectory>/../gateway.env  (i.e. /home/joe/aborn/gateway.env)
+try {
+  const envFile = new URL('../gateway.env', import.meta.url).pathname
+  const { readFileSync: _rfs } = await import('node:fs')
+  for (const raw of _rfs(envFile, 'utf8').split('\n')) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const eq = line.indexOf('=')
+    if (eq < 1) continue
+    const k = line.slice(0, eq).trim()
+    const v = line.slice(eq + 1).trim()
+    if (k) process.env[k] = v  // gateway.env overrides unit-file defaults
+  }
+} catch { /* gateway.env absent — fine */ }
 
 // ── File logger (StandardOutput=null in systemd, so write to file) ────────────
 // Logs connection events, auth, body lifecycle. Never logs frame content.
@@ -110,6 +128,19 @@ const PERSONAL_FILES = ['familiar_objects.bin', 'vital_core.bin', 'self_model.bi
 
 mkdirSync(SESSIONS_DIR, { recursive: true })
 mkdirSync(USERS_DIR,    { recursive: true })
+
+// Sweep stale session dirs left from a previous crash.
+// Safe at startup: activeSessions is still empty, no live bodies yet.
+try {
+  let swept = 0
+  for (const entry of readdirSync(SESSIONS_DIR, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      rmSync(join(SESSIONS_DIR, entry.name), { recursive: true, force: true })
+      swept++
+    }
+  }
+  if (swept > 0) glog(`[startup] swept ${swept} stale session dir(s)`)
+} catch { /* SESSIONS_DIR empty or unreadable — ignore */ }
 
 // ── Security instances ────────────────────────────────────────────────────────
 const rateLimiter = new RateLimiter({ maxPerMinute: RATE_PER_MIN, windowMs: 60_000 })
@@ -342,7 +373,7 @@ const http = createServer(async (req, res) => {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
-    'Permissions-Policy': 'camera=(), microphone=(self)',
+    'Permissions-Policy': 'camera=(self), microphone=(self)',
   })
   createReadStream(file).pipe(res)
 })
@@ -621,4 +652,5 @@ wss.on('connection', (ws, req) => {
 http.listen(PORT, '127.0.0.1', () => {
   glog(`[aborn-gateway] :${PORT} bound to 127.0.0.1 (tunnel only)`)
   glog(`[aborn-gateway] body=${BODY_BIN} sessions=${SESSIONS_DIR}`)
+  glog(`[aborn-gateway] harvest: relaxed=${process.env.ABORN_HARVEST_RELAXED === '1'} merge_min=${MERGE_INTERVAL_MIN}`)
 })
