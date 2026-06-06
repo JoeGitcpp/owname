@@ -88,39 +88,37 @@ function useBodyBridge(
   running: boolean,
   getSenses: () => import('../lib/perception').Senses,
   surfaceRef: React.RefObject<HTMLCanvasElement | null>,
+  // Pre-created AudioContext from begin() — created inside the user-gesture
+  // promise chain so iOS Safari allows it in running state immediately.
+  audioCtxRef: React.RefObject<AudioContext | null>,
   onLifeState: (s: LifeState) => void,
   onDisconnect: (reason: DisconnectReason) => void,
 ) {
-  const wsRef        = useRef<WebSocket | null>(null)
-  const audioCtxRef  = useRef<AudioContext | null>(null)
-  const nextTimeRef  = useRef(0)
-  const xorKeyRef    = useRef<Uint8Array | null>(null)
+  const wsRef       = useRef<WebSocket | null>(null)
+  const nextTimeRef = useRef(0)
+  const xorKeyRef   = useRef<Uint8Array | null>(null)
   // True while ws is intentionally open; set false before cleanup close.
-  const liveRef      = useRef(false)
+  const liveRef     = useRef(false)
 
   useEffect(() => {
     if (!running) return
+    const actx = audioCtxRef.current
+    if (!actx) return   // begin() must have created this already
+
     const ws = new WebSocket(GATEWAY_WS)
     ws.binaryType = 'arraybuffer'
     wsRef.current  = ws
     xorKeyRef.current = null
     liveRef.current = true
-
-    const Ctor = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
-    const actx = new Ctor()
-    audioCtxRef.current = actx
     nextTimeRef.current = 0
 
-    // iOS Safari creates AudioContext in suspended state — resume immediately.
-    actx.resume().catch(() => {})
-
-    const unlockAudio = () => {
-      audioCtxRef.current?.resume().catch(() => {})
-      document.removeEventListener('touchstart', unlockAudio, true)
-      document.removeEventListener('click',      unlockAudio, true)
-    }
-    document.addEventListener('touchstart', unlockAudio, { once: true, capture: true })
-    document.addEventListener('click',      unlockAudio, { once: true, capture: true })
+    // Belt-and-suspenders: attempt resume again here and on every interaction.
+    // The AudioContext was created in begin() (gesture context) so it should
+    // already be running, but this handles rare races on some iOS builds.
+    void actx.resume()
+    const unlockAudio = () => { void actx.resume() }
+    document.addEventListener('touchstart', unlockAudio, { passive: true })
+    document.addEventListener('click',      unlockAudio, { passive: true })
 
     ws.onmessage = (ev: MessageEvent) => {
       if (!(ev.data instanceof ArrayBuffer)) return
@@ -138,7 +136,8 @@ function useBodyBridge(
 
       if (tag === TAG_VOCAL) {
         const n    = view.getUint16(1, true)
-        const RATE = 44100  // match VOCAL_SAMPLE_RATE in net_adapter.rs
+        if (n === 0) return  // guard: empty frame from Idle vocal organ
+        const RATE = 44100   // match VOCAL_SAMPLE_RATE in net_adapter.rs
         const abuf = actx.createBuffer(1, n, RATE)
         const chan  = abuf.getChannelData(0)
         for (let i = 0; i < n; i++) chan[i] = view.getFloat32(3 + i * 4, true)
@@ -197,11 +196,12 @@ function useBodyBridge(
     return () => {
       liveRef.current = false  // mark intentional before close
       clearInterval(interval)
+      document.removeEventListener('touchstart', unlockAudio)
+      document.removeEventListener('click',      unlockAudio)
       ws.close()
       wsRef.current = null
       xorKeyRef.current = null
-      actx.close()
-      audioCtxRef.current = null
+      // AudioContext lifecycle owned by Commune — do NOT close here.
     }
   }, [running])
 }
@@ -237,6 +237,9 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
   const selfVideoRef   = useRef<HTMLVideoElement>(null)
   const surfaceRef     = useRef<HTMLCanvasElement>(null)
   const fallback       = useRef(idleSenses())
+  // AudioContext owned here so it can be created inside the user-gesture
+  // promise chain in begin(), before React state updates consume the gesture.
+  const audioCtxRef    = useRef<AudioContext | null>(null)
 
   const timer = useCallTimer(phase.k === 'live')
 
@@ -247,6 +250,11 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
   const begin = async () => {
     setPhase({ k: 'requesting' })
     setLifeState(null)
+    // Close any leftover AudioContext from a previous session.
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {})
+      audioCtxRef.current = null
+    }
     const res: MediaResult = await acquireSenses()
     if (!res.ok) {
       setPhase({ k: res.reason === 'unsupported' ? 'unsupported' : 'denied' })
@@ -263,6 +271,13 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
     await perc.attach(res.stream)
     perc.resumeAudio()
     perceptionRef.current = perc
+    // Create AudioContext HERE — still inside the promise chain of the user
+    // gesture (media permission grant), so iOS Safari starts it in running
+    // state and resume() is guaranteed to succeed.
+    const Ctor = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
+    const actx = new Ctor()
+    void actx.resume()
+    audioCtxRef.current = actx
     setPhase({ k: 'live' })
   }
 
@@ -273,6 +288,8 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
       releaseStream(streamRef.current)
       perceptionRef.current = null
       streamRef.current = null
+      audioCtxRef.current?.close().catch(() => {})
+      audioCtxRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -283,6 +300,8 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
     releaseStream(streamRef.current)
     perceptionRef.current = null
     streamRef.current = null
+    audioCtxRef.current?.close().catch(() => {})
+    audioCtxRef.current = null
     onLeave(secs)
   }
 
@@ -310,7 +329,7 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
 
   const read = () => perceptionRef.current ? perceptionRef.current.read() : fallback.current
 
-  useBodyBridge(phase.k === 'live', read, surfaceRef, setLifeState, handleDisconnect)
+  useBodyBridge(phase.k === 'live', read, surfaceRef, audioCtxRef, setLifeState, handleDisconnect)
 
   const isLive = phase.k === 'live'
   const isStandby = lifeState?.vstate === 1
