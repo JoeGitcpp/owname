@@ -123,6 +123,15 @@ export class Perception {
     // video
     if (stream.getVideoTracks().length) {
       this.video.srcObject = stream
+      // Mobile browsers (especially iOS Safari) refuse to decode MediaStream
+      // frames for canvas.drawImage() when the video element is off-DOM.
+      // Pin a 1×1 invisible element to the body so the browser treats it as
+      // "visible" and delivers real frames.  Removed in dispose().
+      if (!this.video.parentNode) {
+        this.video.style.cssText =
+          'position:fixed;top:-1px;left:-1px;width:1px;height:1px;opacity:0.001;pointer-events:none;z-index:-9999'
+        document.body.appendChild(this.video)
+      }
       try {
         await this.video.play()
       } catch {
@@ -366,6 +375,7 @@ export class Perception {
 
   dispose() {
     this.video.srcObject = null
+    if (this.video.parentNode) this.video.parentNode.removeChild(this.video)
     if (this.audioCtx) {
       void this.audioCtx.close()
       this.audioCtx = null

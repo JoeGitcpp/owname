@@ -1320,6 +1320,22 @@ pub struct Viewport {
     /// scalars mirrored onto GAUSS_RECON_MSE_AXIS / GAUSS_ACTIVE_FRAC_AXIS so
     /// they are predicted, produce err, and enter the relation/tower fabric.
     pub gaussian_field: RwLock<crate::phot_gaussian::GaussianField>,
+
+    // ── Developmental precision schedule (2026-06-06) ────────────────────────
+    /// Developmental clock m∈[0,1]. 0 = naive newborn (loosest precision),
+    /// →1 as competence accrues. Drives the precision/tolerance schedule
+    /// (coarse→fine). Runtime-only for now; TODO: persist into learned_bias.bin
+    /// so maturity is inheritable via checkpoint (factory_dna).
+    pub developmental_maturity: RwLock<f64>,
+    /// Rate-limit cursor for vocal self-play closures (see
+    /// VOCAL_SELF_PLAY_MIN_INTERVAL_US).
+    pub last_self_play_t_us: AtomicU64,
+
+    // ── Phoneme prototype memory (4-layer vocal self-learning) ───────────────
+    /// L1-4 vocal learning substrate.  Prototypes accumulate from babble
+    /// self-play and social responses; exploration noise is drawn here before
+    /// each new vocal burst.  Checkpointed to phoneme_memory.bin.
+    pub phoneme_memory: RwLock<crate::phoneme_memory::PhonemeMemory>,
 }
 
 impl Viewport {
@@ -1413,6 +1429,9 @@ impl Viewport {
             efference_copy: RwLock::new(EfferenceCopyState::default()),
             depth_observer: RwLock::new(DepthObserver::default()),
             gaussian_field: RwLock::new(crate::phot_gaussian::GaussianField::new()),
+            developmental_maturity: RwLock::new(0.0),
+            last_self_play_t_us: AtomicU64::new(0),
+            phoneme_memory: RwLock::new(crate::phoneme_memory::PhonemeMemory::new()),
         }
     }
 
@@ -2141,6 +2160,25 @@ impl Viewport {
 
     pub fn push_language_binding_trace(&self, trace: BindingTrace) {
         self.language_binding.write().unwrap().push_trace(trace);
+    }
+
+    /// Developmental clock: 0 = naive newborn, →1 as competence accrues.
+    /// Drives the precision/tolerance schedule (coarse→fine).
+    pub fn developmental_maturity(&self) -> f64 {
+        *self.developmental_maturity.read().unwrap()
+    }
+
+    /// Advance the developmental clock by one earned closure. Saturating:
+    /// m += support·MATURITY_GAIN·(1−m), so maturation is a slow accrual and
+    /// can never exceed 1. No-op for non-positive support. This is the ONE
+    /// chokepoint that matures the body; every other gate reads the clock.
+    pub fn advance_maturity(&self, closure_support: f64) {
+        let c = closure_support.clamp(0.0, 1.0);
+        if c <= 0.0 {
+            return;
+        }
+        let mut m = self.developmental_maturity.write().unwrap();
+        *m = (*m + c * crate::MATURITY_GAIN * (1.0 - *m)).clamp(0.0, 1.0);
     }
 
     pub fn apply_language_binding_event(&self, event: BindingEvent) {
@@ -3542,12 +3580,55 @@ impl Viewport {
         if now_us.saturating_sub(vib.last_event_t_us) > QUIET_WINDOW_US {
             return;
         }
-        // Echo guard: block VIB writes that are self-generated.
+        // Echo guard + vocal self-play. A self-generated VIB return must NOT be
+        // chased as an external target (anti self-excitation) — so it is still
+        // dropped from the vocal_target path below. BUT the reliable motor→sound
+        // contingency it carries IS vocal self-play: the body acts and hears a
+        // predictable consequence with NO caregiver. Route a slow, rate-limited
+        // self-play closure so babble alone can bootstrap vocal_efficacy +
+        // familiarity + the developmental clock — breaking the cold-start
+        // deadlock (a newborn's echo-cancelled babble previously produced no
+        // learnable consequence at all).
         let self_match = self.compute_vib_self_match(now_us);
         if self_match > 0.85 {
+            let last_sp = self.last_self_play_t_us.load(Ordering::Relaxed);
+            if now_us.saturating_sub(last_sp) >= crate::VOCAL_SELF_PLAY_MIN_INTERVAL_US {
+                let support = (self_match * vib.event_energy.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                self.observe_vocal_reflex_closure(now_us, support, true);
+                self.last_self_play_t_us.store(now_us, Ordering::Relaxed);
+            }
+            // L1/L2 (PhonemeMemory): self-echo confirmed → refine acoustic
+            // fingerprint of the most recently voiced proto.  We only have
+            // envelope here (spectral data computed below); spectral fields
+            // will be further refined on subsequent self-play iterations.
+            {
+                use crate::phoneme_memory::AcousticState;
+                let acoustic_obs = AcousticState {
+                    spectral_center: 0.5, // placeholder; spectral data unavailable here
+                    resonance: 0.5,       // placeholder
+                    envelope: vib.event_energy.clamp(0.0, 1.0),
+                };
+                self.phoneme_memory
+                    .write()
+                    .unwrap()
+                    .update_acoustic_latest(acoustic_obs, now_us);
+            }
             let reduced_energy = vib.event_energy * (1.0 - self_match);
             if reduced_energy < crate::VOCAL_TARGET_INGRESS_MIN_ENERGY {
                 return;
+            }
+        }
+
+        // L3/L4 (PhonemeMemory): non-self-echo VIB → social response candidate.
+        // Any external sound arriving within SOCIAL_RESPONSE_WINDOW_US of the
+        // last vocalization is attributed as a response; credit_response
+        // strengthens the social_response_rate of the proto that spoke.
+        if self_match < 0.7 {
+            let mut pm = self.phoneme_memory.write().unwrap();
+            if let Some((proto_idx, confidence)) =
+                pm.observe_vib(Default::default(), self_match, now_us)
+            {
+                pm.credit_response(proto_idx, confidence);
             }
         }
 
@@ -3947,6 +4028,9 @@ impl Viewport {
             bias.action_suppression = (bias.action_suppression + delta_sup).min(1.0);
             bias.vocal_efficacy = (bias.vocal_efficacy + delta_eff).min(1.0);
         }
+        // Developmental clock: an earned vocal closure (self-play or a paired
+        // caregiver response) is competence — advance maturity (coarse→fine).
+        self.advance_maturity(closure_support);
     }
 
     pub fn tick_vocal_reflex_from_pressure(&self, now_us: u64) {
@@ -4151,14 +4235,43 @@ impl Viewport {
 
         self.last_vocal_output_t_us.store(now_us, Ordering::Relaxed);
         let is_active = self.read_vocal_organ().phase == VocalOrganPhase::Active;
-        if is_active {
-            self.adjust_voicing(now_us, combined.breath, combined.pitch, combined.resonance);
+
+        // ── L1/L2 (PhonemeMemory) ─────────────────────────────────────────────
+        // On a new burst: draw exploration motor params (babble-or-practice) and
+        // record the voiced event.  Adjust-voicing continues the existing organ
+        // state and does not re-sample, keeping the articulation stable within
+        // a single utterance.
+        let (final_pitch, final_resonance, final_noise) = if !is_active {
+            use crate::phoneme_memory::{AcousticState, MotorState};
+            let base = MotorState {
+                pitch_tension: combined.pitch,
+                resonance_pos: combined.resonance,
+                noise_mix: combined.noise.clamp(0.0, 1.0),
+            };
+            let mut pm = self.phoneme_memory.write().unwrap();
+            let explore = pm.exploration_motor(base);
+            // Acoustic estimate derived from motor params.  Self-play loop will
+            // refine spectral_center/resonance via update_acoustic_latest once
+            // the mic confirms the echo.
+            let acoustic_est = AcousticState {
+                spectral_center: explore.pitch_tension,
+                resonance: explore.resonance_pos,
+                envelope: combined.breath.clamp(0.0, 1.0),
+            };
+            pm.record_voiced(explore, acoustic_est, now_us);
+            (explore.pitch_tension, explore.resonance_pos, explore.noise_mix)
         } else {
-            self.begin_voicing(now_us, combined.breath, combined.pitch, combined.resonance);
+            (combined.pitch, combined.resonance, combined.noise)
+        };
+
+        if is_active {
+            self.adjust_voicing(now_us, combined.breath, final_pitch, final_resonance);
+        } else {
+            self.begin_voicing(now_us, combined.breath, final_pitch, final_resonance);
         }
-        if combined.noise > 0.0 {
+        if final_noise > 0.0 {
             let mut organ = self.vocal_organ.write().unwrap();
-            organ.noise_mix = organ.noise_mix.max(combined.noise);
+            organ.noise_mix = organ.noise_mix.max(final_noise);
         }
     }
 

@@ -138,7 +138,7 @@ function useBodyBridge(
 
       if (tag === TAG_VOCAL) {
         const n    = view.getUint16(1, true)
-        const RATE = 22050
+        const RATE = 44100  // match VOCAL_SAMPLE_RATE in net_adapter.rs
         const abuf = actx.createBuffer(1, n, RATE)
         const chan  = abuf.getChannelData(0)
         for (let i = 0; i < n; i++) chan[i] = view.getFloat32(3 + i * 4, true)

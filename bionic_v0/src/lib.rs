@@ -60,6 +60,7 @@ pub mod vocal_organ;
 pub mod vocal_reflex;
 pub mod vocal_synthesis;
 pub mod vocal_target;
+pub mod phoneme_memory;
 pub mod vpc;
 pub mod vpc_cross_layer;
 
@@ -551,6 +552,44 @@ pub const BINDING_PAIR_ALIGN_MIN: f64 = 0.70;
 /// Low values may oppose an existing binding trace; this is not a naming gate
 /// and does not create an internal concept or object class.
 pub const BINDING_PAIR_DEVIATE_MAX: f64 = 0.30;
+
+// --- Developmental precision schedule (2026-06-06) ---
+//
+// A single developmental clock m∈[0,1] (Viewport::developmental_maturity) makes
+// the system's quality thresholds developmental: loose when naive, tight when
+// mature. The point is to break the bootstrap deadlock — a newborn's rough,
+// low-competence output must yield SOME learning signal (else 0×x=0 forever),
+// while a mature body keeps fine discrimination. These are engineering knobs
+// over curve dynamics, not naming/concept gates.
+
+/// How much one earned closure advances the developmental clock. Saturating
+/// (·(1−m)) so maturation is a slow accrual that can never exceed 1. Small →
+/// developmental timescale (hundreds of strong closures to mature).
+pub const MATURITY_GAIN: f64 = 0.01;
+
+/// Minimum spacing between vocal self-play closures, so continuous babble
+/// accrues efficacy/maturity at a developmental pace rather than per-tick.
+pub const VOCAL_SELF_PLAY_MIN_INTERVAL_US: u64 = 250_000;
+
+/// Newborn-neutral midpoint for pair-evidence classification. At maturity 0 the
+/// align/deviate thresholds collapse to this midpoint (no dead zone), so a rough
+/// match still yields a weak signal; they widen to the strict ALIGN_MIN /
+/// DEVIATE_MAX as the clock matures (coarse→fine precision).
+pub const BINDING_PAIR_NEUTRAL: f64 = 0.50;
+
+/// Maturity-scaled lower bound for an Align classification: NEUTRAL at m=0,
+/// strict BINDING_PAIR_ALIGN_MIN at m=1.
+pub fn binding_align_min(maturity: f64) -> f64 {
+    let m = maturity.clamp(0.0, 1.0);
+    BINDING_PAIR_NEUTRAL + (BINDING_PAIR_ALIGN_MIN - BINDING_PAIR_NEUTRAL) * m
+}
+
+/// Maturity-scaled upper bound for a Deviate classification: NEUTRAL at m=0,
+/// strict BINDING_PAIR_DEVIATE_MAX at m=1.
+pub fn binding_deviate_max(maturity: f64) -> f64 {
+    let m = maturity.clamp(0.0, 1.0);
+    BINDING_PAIR_NEUTRAL - (BINDING_PAIR_NEUTRAL - BINDING_PAIR_DEVIATE_MAX) * m
+}
 
 // --- Endogenous Activity Laws (spec 2026-04-20) ---
 

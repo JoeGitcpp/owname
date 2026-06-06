@@ -121,7 +121,11 @@ impl VocalReflexState {
         // Modulo first to keep the f64 argument within precision range.
         // UNIX epoch µs (~1.7e15) would otherwise lose 6+ decimal digits
         // in f64, randomising the sine phase.
-        let period_us: u64 = 25_000_000;
+        // Reduced from 25 s → 5 s: faster heartbeat gives the newborn body many
+        // more opportunities per minute to attempt a vocalization and hear itself
+        // back, accelerating the L1 babble→self-play bootstrap.  Once the
+        // phoneme pool is stable, `exploration_drive` falls toward 0 anyway.
+        let period_us: u64 = 5_000_000;
         let phase = ((now_us % period_us) as f64 / period_us as f64)
             * 2.0 * std::f64::consts::PI;
         let rhythm = phase.sin() * 0.5 + 0.5; // [0, 1]

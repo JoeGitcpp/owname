@@ -1,0 +1,799 @@
+//! Phoneme prototype memory — 4-layer vocal self-learning scaffold.
+//!
+//! # Why this module exists
+//!
+//! A silicon life form cannot speak before it knows **what it sounds like**.
+//! This module implements the minimal substrate for that bootstrapping loop:
+//!
+//! ```text
+//! L1  Self-exploration / babbling
+//!       endogenous_baseline fires → vocal burst → speaker → mic
+//!       The body hears itself.  Motor params (pitch/resonance/noise) are
+//!       stamped against the acoustic outcome (spectral centre / resonance /
+//!       envelope) in a PhonemeProto.  Pool grows up to PROTO_CAP entries.
+//!
+//! L2  Fast-path memory
+//!       Repeatedly voiced motor states crystallise into prototypes via EMA.
+//!       When exploration_motor() selects the least-recently-rehearsed stable
+//!       proto, voicing converges on the body's existing repertoire rather than
+//!       wandering randomly — this is "practicing" rather than "babbling".
+//!
+//! L3  Directed causal binding ("I spoke → something changed")
+//!       observe_vib() scans recent_vocal for a vocalization within
+//!       SOCIAL_RESPONSE_WINDOW_US. A low-self-match VIB arriving in that
+//!       window is attributed as a response, not coincidence.
+//!
+//! L4  Social fast-path / naming seeds
+//!       credit_response() increments social_response_rate on the proto that
+//!       spoke.  A proto with high social_response_rate is the seed of a name /
+//!       greeting — voiced again when attachment pressure is high (future
+//!       tick_vocal_drive_field weighting; not yet wired).
+//! ```
+//!
+//! # Integration points (all in viewport.rs)
+//!
+//! | Call site | Method | Layer |
+//! |---|---|---|
+//! | `tick_vocal_drive_field` on `begin_voicing` | `exploration_motor` + `record_voiced` | L1/L2 |
+//! | `tick_vocal_target_from_vib` on self-play (self_match>0.85) | `update_acoustic_latest` | L1/L2 |
+//! | `tick_vocal_target_from_vib` on external VIB (self_match<0.7) | `observe_vib` + `credit_response` | L3/L4 |
+//!
+//! # Persistence
+//!
+//! `serialize()` / `deserialize()` produce a version-tagged flat binary that
+//! body.rs checkpoints to `phoneme_memory.bin` in the runtime dir alongside
+//! `learned_bias.bin`.  No serde dependency; layout documented below.
+//!
+//! # No external crates
+//!
+//! LCG RNG is self-contained (same pattern as `vocal_synthesis.rs`).
+
+use std::collections::VecDeque;
+
+// ─── Capacity constants ────────────────────────────────────────────────────────
+
+/// Maximum simultaneously-active phoneme prototypes.
+/// 32 slots comfortably covers the phoneme inventory of most languages plus
+/// room for blends, filler sounds and novel explorations.
+pub const PROTO_CAP: usize = 32;
+
+/// Minimum rehearsal count before a proto is considered "stable" and eligible
+/// for the exploit-vs-explore tradeoff in `exploration_motor`.
+pub const PROTO_MIN_REHEARSALS: u64 = 6;
+
+/// Time window (µs) in which an external VIB event following own vocalization
+/// counts as a potential social response (Layer 3).
+pub const SOCIAL_RESPONSE_WINDOW_US: u64 = 3_000_000; // 3 s
+
+/// Ring-buffer depth for recent vocal events (causal attribution window).
+const RECENT_VOCAL_CAP: usize = 16;
+
+// ─── Motor state ──────────────────────────────────────────────────────────────
+
+/// Compact motor-space fingerprint: the three free articulation parameters of
+/// the vocal organ.  `breath_drive` is excluded — it is loudness/amplitude, not
+/// articulation identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MotorState {
+    pub pitch_tension: f64, // [0, 1] — controls F0 (180–700 Hz)
+    pub resonance_pos: f64, // [0, 1] — shapes vowel formants
+    pub noise_mix: f64,     // [0, 1] — voiced-to-noisy ratio
+}
+
+impl MotorState {
+    /// Euclidean distance in motor space.
+    #[inline]
+    pub fn dist(&self, other: &MotorState) -> f64 {
+        let dp = self.pitch_tension - other.pitch_tension;
+        let dr = self.resonance_pos - other.resonance_pos;
+        let dn = self.noise_mix - other.noise_mix;
+        (dp * dp + dr * dr + dn * dn).sqrt()
+    }
+
+    #[inline]
+    pub fn clamp01(self) -> Self {
+        Self {
+            pitch_tension: self.pitch_tension.clamp(0.0, 1.0),
+            resonance_pos: self.resonance_pos.clamp(0.0, 1.0),
+            noise_mix: self.noise_mix.clamp(0.0, 1.0),
+        }
+    }
+}
+
+// ─── Acoustic state ───────────────────────────────────────────────────────────
+
+/// Three-dimensional acoustic footprint of a phoneme observed at the
+/// microphone.  Initially estimated from motor params; refined by self-play.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AcousticState {
+    pub spectral_center: f64, // [0, 1] — normalized frequency gravity
+    pub resonance: f64,       // [0, 1] — high-band / total-band ratio
+    pub envelope: f64,        // [0, 1] — loudness / attack strength
+}
+
+impl AcousticState {
+    /// Euclidean distance in acoustic space.
+    #[inline]
+    pub fn dist(&self, other: &AcousticState) -> f64 {
+        let dc = self.spectral_center - other.spectral_center;
+        let dr = self.resonance - other.resonance;
+        let de = self.envelope - other.envelope;
+        (dc * dc + dr * dr + de * de).sqrt()
+    }
+}
+
+// ─── Phoneme prototype ────────────────────────────────────────────────────────
+
+/// One entry in the phoneme pool.  Accumulates evidence from both self-play
+/// (motor-acoustic binding) and social interactions (social_response_rate).
+#[derive(Clone, Debug)]
+pub struct PhonemeProto {
+    /// Motor-space centroid (EMA-updated at each rehearsal).
+    pub motor: MotorState,
+    /// Acoustic outcome centroid (EMA-updated from self-play observations).
+    pub acoustic: AcousticState,
+    /// How many times this proto has been actively voiced.
+    pub rehearsal_count: u64,
+    /// Wall-clock µs of last vocalization.
+    pub last_voiced_us: u64,
+    /// EMA fraction of vocalizations that received a social response within
+    /// SOCIAL_RESPONSE_WINDOW_US.  0 = never elicits reply; 1 = always.
+    pub social_response_rate: f64,
+    /// Raw count of confirmed social responses (Layer 4 credit events).
+    pub social_response_count: u32,
+    /// Whether this slot is occupied.
+    pub active: bool,
+}
+
+impl Default for PhonemeProto {
+    fn default() -> Self {
+        Self {
+            motor: MotorState::default(),
+            acoustic: AcousticState::default(),
+            rehearsal_count: 0,
+            last_voiced_us: 0,
+            social_response_rate: 0.0,
+            social_response_count: 0,
+            active: false,
+        }
+    }
+}
+
+// ─── Recent-vocal ring-buffer entry ──────────────────────────────────────────
+
+/// One entry in the causal attribution ring buffer.
+/// Pushed by `record_voiced`; consumed by `observe_vib`.
+#[derive(Clone, Debug)]
+struct RecentVocal {
+    t_us: u64,
+    proto_idx: Option<usize>,
+    #[allow(dead_code)]
+    motor: MotorState,
+}
+
+// ─── LCG RNG (no external crate) ─────────────────────────────────────────────
+
+struct LcgRng {
+    state: u64,
+}
+
+impl LcgRng {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed ^ 0x9e37_79b9_7f4a_7c15,
+        }
+    }
+
+    #[inline]
+    fn next_u64(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.state
+    }
+
+    /// Uniform in [0, 1).
+    #[inline]
+    fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 52) as f64
+    }
+
+    /// Uniform in [-1, 1).
+    #[inline]
+    fn next_f64_signed(&mut self) -> f64 {
+        self.next_f64() * 2.0 - 1.0
+    }
+}
+
+// ─── PhonemeMemory ────────────────────────────────────────────────────────────
+
+pub struct PhonemeMemory {
+    /// Fixed-size pool of phoneme prototypes.
+    pub protos: Vec<PhonemeProto>,
+    /// Ring buffer of recent vocal events for causal attribution.
+    recent_vocal: VecDeque<RecentVocal>,
+    rng: LcgRng,
+}
+
+impl Default for PhonemeMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhonemeMemory {
+    pub fn new() -> Self {
+        Self {
+            protos: vec![PhonemeProto::default(); PROTO_CAP],
+            recent_vocal: VecDeque::with_capacity(RECENT_VOCAL_CAP),
+            rng: LcgRng::new(0xdead_beef_cafe_babe),
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // L1/L2: record a voiced event
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Called when the body starts a new vocal burst (`begin_voicing`).
+    ///
+    /// Finds or creates the nearest `PhonemeProto` and updates it via EMA.
+    /// Pushes to the recent-vocal ring buffer so that a subsequent social
+    /// response can be attributed to this proto.
+    ///
+    /// Returns the proto index for potential external use.
+    pub fn record_voiced(
+        &mut self,
+        motor: MotorState,
+        acoustic: AcousticState,
+        now_us: u64,
+    ) -> usize {
+        /// Motor-space radius within which two productions are considered the
+        /// "same phoneme" and merge rather than birth a new proto.
+        const MATCH_RADIUS: f64 = 0.25;
+        const EMA_ALPHA: f64 = 0.10;
+
+        // Find nearest active prototype.
+        let best_idx = self
+            .protos
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.active)
+            .min_by(|(_, a), (_, b)| {
+                a.motor
+                    .dist(&motor)
+                    .partial_cmp(&b.motor.dist(&motor))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i);
+
+        let idx = match best_idx {
+            Some(i) if self.protos[i].motor.dist(&motor) < MATCH_RADIUS => {
+                // ── Merge into existing proto via EMA ──────────────────────
+                let p = &mut self.protos[i];
+                p.motor.pitch_tension =
+                    p.motor.pitch_tension * (1.0 - EMA_ALPHA) + motor.pitch_tension * EMA_ALPHA;
+                p.motor.resonance_pos =
+                    p.motor.resonance_pos * (1.0 - EMA_ALPHA) + motor.resonance_pos * EMA_ALPHA;
+                p.motor.noise_mix =
+                    p.motor.noise_mix * (1.0 - EMA_ALPHA) + motor.noise_mix * EMA_ALPHA;
+                p.acoustic.spectral_center = p.acoustic.spectral_center * (1.0 - EMA_ALPHA)
+                    + acoustic.spectral_center * EMA_ALPHA;
+                p.acoustic.resonance =
+                    p.acoustic.resonance * (1.0 - EMA_ALPHA) + acoustic.resonance * EMA_ALPHA;
+                p.acoustic.envelope =
+                    p.acoustic.envelope * (1.0 - EMA_ALPHA) + acoustic.envelope * EMA_ALPHA;
+                p.rehearsal_count += 1;
+                p.last_voiced_us = now_us;
+                i
+            }
+            _ => {
+                // ── Birth or evict ─────────────────────────────────────────
+                let slot = self.protos.iter().position(|p| !p.active);
+                match slot {
+                    Some(i) => {
+                        self.protos[i] = PhonemeProto {
+                            motor,
+                            acoustic,
+                            rehearsal_count: 1,
+                            last_voiced_us: now_us,
+                            social_response_rate: 0.0,
+                            social_response_count: 0,
+                            active: true,
+                        };
+                        i
+                    }
+                    None => {
+                        // Pool full — evict the weakest (least rehearsed,
+                        // fewest social responses).
+                        let evict = self
+                            .protos
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| p.active)
+                            .min_by(|(_, a), (_, b)| {
+                                let sa = a.rehearsal_count as f64
+                                    + a.social_response_count as f64 * 10.0;
+                                let sb = b.rehearsal_count as f64
+                                    + b.social_response_count as f64 * 10.0;
+                                sa.partial_cmp(&sb)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        self.protos[evict] = PhonemeProto {
+                            motor,
+                            acoustic,
+                            rehearsal_count: 1,
+                            last_voiced_us: now_us,
+                            social_response_rate: 0.0,
+                            social_response_count: 0,
+                            active: true,
+                        };
+                        evict
+                    }
+                }
+            }
+        };
+
+        // Push to causal ring buffer.
+        if self.recent_vocal.len() >= RECENT_VOCAL_CAP {
+            self.recent_vocal.pop_front();
+        }
+        self.recent_vocal.push_back(RecentVocal {
+            t_us: now_us,
+            proto_idx: Some(idx),
+            motor,
+        });
+        idx
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // L1/L2: refine acoustic fingerprint from self-play echo
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Called when the body confirms it heard its own recent vocalization back
+    /// (self_match > 0.85 in `tick_vocal_target_from_vib`).
+    ///
+    /// Refines the acoustic fingerprint of the most recently voiced proto using
+    /// the **actual observed** VIB data — overriding the initial motor-derived
+    /// estimate.  Uses a faster EMA alpha so the fingerprint converges quickly
+    /// through repeated babble iterations.
+    pub fn update_acoustic_latest(&mut self, acoustic: AcousticState, now_us: u64) {
+        const EMA_ALPHA_FAST: f64 = 0.20;
+        const WINDOW_US: u64 = 2_000_000; // 2 s
+
+        let proto_idx = self
+            .recent_vocal
+            .iter()
+            .rev()
+            .find(|rv| now_us.saturating_sub(rv.t_us) <= WINDOW_US)
+            .and_then(|rv| rv.proto_idx);
+
+        let Some(idx) = proto_idx else { return };
+        let Some(proto) = self.protos.get_mut(idx) else {
+            return;
+        };
+        if !proto.active {
+            return;
+        }
+        proto.acoustic.spectral_center = proto.acoustic.spectral_center * (1.0 - EMA_ALPHA_FAST)
+            + acoustic.spectral_center * EMA_ALPHA_FAST;
+        proto.acoustic.resonance = proto.acoustic.resonance * (1.0 - EMA_ALPHA_FAST)
+            + acoustic.resonance * EMA_ALPHA_FAST;
+        proto.acoustic.envelope = proto.acoustic.envelope * (1.0 - EMA_ALPHA_FAST)
+            + acoustic.envelope * EMA_ALPHA_FAST;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // L3/L4: observe an incoming (non-self) VIB event
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Called when an external VIB event arrives with `self_match < 0.7`.
+    ///
+    /// Checks whether a recent vocalization falls within the social-response
+    /// window.  If so, returns `(proto_idx, confidence)` so the caller can
+    /// invoke `credit_response`.
+    ///
+    /// `confidence` ∈ [0, 1]: immediate responses score ≈ 1.0; responses near
+    /// the window edge score ≈ 0.0.
+    pub fn observe_vib(
+        &mut self,
+        _acoustic: AcousticState, // reserved for future acoustic-similarity gating
+        self_match: f64,
+        now_us: u64,
+    ) -> Option<(usize, f64)> {
+        // Only attribute external responses, not own echo.
+        if self_match >= 0.7 {
+            return None;
+        }
+
+        // Find the most recent vocal event inside the social-response window.
+        let candidate = self
+            .recent_vocal
+            .iter()
+            .rev()
+            .find(|rv| {
+                let elapsed = now_us.saturating_sub(rv.t_us);
+                elapsed > 0 && elapsed <= SOCIAL_RESPONSE_WINDOW_US
+            })?;
+
+        let proto_idx = candidate.proto_idx?;
+        let elapsed_us = now_us.saturating_sub(candidate.t_us);
+
+        // Confidence: linear decay from 1.0 (immediate) → 0.0 (window edge).
+        let confidence =
+            (1.0 - elapsed_us as f64 / SOCIAL_RESPONSE_WINDOW_US as f64).clamp(0.0, 1.0);
+
+        Some((proto_idx, confidence))
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // L4: social credit assignment
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Strengthen the `social_response_rate` of the proto that received a
+    /// social response.  Uses a slow EMA (α=0.05) so the rate only increases
+    /// meaningfully with repeated consistent responses.
+    pub fn credit_response(&mut self, proto_idx: usize, confidence: f64) {
+        let Some(proto) = self.protos.get_mut(proto_idx) else {
+            return;
+        };
+        if !proto.active {
+            return;
+        }
+        proto.social_response_count += 1;
+        // Nudge social_response_rate toward 1.0 by confidence, and gently
+        // decay it toward 0.0 on every call — so the rate reflects the RECENT
+        // frequency of responses, not an all-time peak.
+        proto.social_response_rate =
+            proto.social_response_rate * 0.95 + confidence * 0.05;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // L1/L2: exploration motor selection
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Returns the motor parameters for the next exploratory vocal burst.
+    ///
+    /// **Strategy**:
+    /// - Pool empty / no stable protos → **pure exploration**: uniform random
+    ///   sample across motor space (large sigma → wide babble).
+    /// - Stable protos exist → **exploit-with-fine-perturbation**: pick the
+    ///   least-recently-rehearsed stable proto and add small Gaussian noise
+    ///   (σ=0.08) so the body practices the neighbourhood of known sounds.
+    ///
+    /// `base` is the drive-field's suggested pitch/resonance/noise; used only
+    /// when no stable proto exists (it becomes the perturbation centre for
+    /// the noisy pure-exploration case).
+    pub fn exploration_motor(&mut self, base: MotorState) -> MotorState {
+        let stable: Vec<usize> = self
+            .protos
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.active && p.rehearsal_count >= PROTO_MIN_REHEARSALS)
+            .map(|(i, _)| i)
+            .collect();
+
+        if stable.is_empty() {
+            // Pure exploration: sample broadly but keep noise_mix low so
+            // early babble is mostly voiced (more informative self-play).
+            let sigma = 0.35_f64;
+            return MotorState {
+                pitch_tension: (base.pitch_tension + sigma * self.rng.next_f64_signed())
+                    .clamp(0.0, 1.0),
+                resonance_pos: (base.resonance_pos + sigma * self.rng.next_f64_signed())
+                    .clamp(0.0, 1.0),
+                noise_mix: (base.noise_mix + sigma * 0.3 * self.rng.next_f64_signed())
+                    .clamp(0.0, 0.5),
+            };
+        }
+
+        // Fine-tune: pick least-recently-rehearsed stable proto.
+        let oldest = stable
+            .iter()
+            .min_by_key(|&&i| self.protos[i].last_voiced_us)
+            .copied()
+            .unwrap();
+        let target = self.protos[oldest].motor;
+
+        const SIGMA_FINE: f64 = 0.08;
+        MotorState {
+            pitch_tension: (target.pitch_tension + SIGMA_FINE * self.rng.next_f64_signed())
+                .clamp(0.0, 1.0),
+            resonance_pos: (target.resonance_pos + SIGMA_FINE * self.rng.next_f64_signed())
+                .clamp(0.0, 1.0),
+            noise_mix: (target.noise_mix + SIGMA_FINE * 0.5 * self.rng.next_f64_signed())
+                .clamp(0.0, 1.0),
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Aggregate metrics
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Returns [0, 1]: overall vocal competence.
+    /// Saturates at PROTO_CAP * 50 total rehearsals across the pool.
+    pub fn vocal_efficacy(&self) -> f64 {
+        let total: u64 = self.protos.iter().filter(|p| p.active).map(|p| p.rehearsal_count).sum();
+        let max = (PROTO_CAP as u64) * 50;
+        (total as f64 / max as f64).min(1.0)
+    }
+
+    /// Number of stable (well-rehearsed) prototypes.
+    pub fn stable_count(&self) -> usize {
+        self.protos
+            .iter()
+            .filter(|p| p.active && p.rehearsal_count >= PROTO_MIN_REHEARSALS)
+            .count()
+    }
+
+    /// Number of active (any rehearsals) prototypes.
+    pub fn active_count(&self) -> usize {
+        self.protos.iter().filter(|p| p.active).count()
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Serialization / deserialization
+    // ──────────────────────────────────────────────────────────────────────────
+    //
+    // Binary layout (version 1):
+    //
+    //   [0..4]   magic  = [0xFE, 0xED, 0xBA, 0xBE]
+    //   [4]      version = 1 (u8)
+    //   [5..7]   n_protos (u16 LE) = PROTO_CAP
+    //   per slot (77 bytes each):
+    //     [0]    active (u8, 0 or 1)
+    //     [1..25] motor: pitch_tension(f64) resonance_pos(f64) noise_mix(f64)
+    //     [25..49] acoustic: spectral_center(f64) resonance(f64) envelope(f64)
+    //     [49..57] rehearsal_count (u64 LE)
+    //     [57..65] last_voiced_us (u64 LE)
+    //     [65..73] social_response_rate (f64 LE)
+    //     [73..77] social_response_count (u32 LE)
+
+    const MAGIC: [u8; 4] = [0xFE, 0xED, 0xBA, 0xBE];
+    const VERSION: u8 = 1;
+    const BYTES_PER_PROTO: usize = 1 + 3 * 8 + 3 * 8 + 8 + 8 + 8 + 4; // 77
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut out =
+            Vec::with_capacity(7 + Self::BYTES_PER_PROTO * PROTO_CAP);
+        out.extend_from_slice(&Self::MAGIC);
+        out.push(Self::VERSION);
+        out.extend_from_slice(&(PROTO_CAP as u16).to_le_bytes());
+        for p in &self.protos {
+            out.push(u8::from(p.active));
+            for v in &[
+                p.motor.pitch_tension,
+                p.motor.resonance_pos,
+                p.motor.noise_mix,
+                p.acoustic.spectral_center,
+                p.acoustic.resonance,
+                p.acoustic.envelope,
+            ] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&p.rehearsal_count.to_le_bytes());
+            out.extend_from_slice(&p.last_voiced_us.to_le_bytes());
+            out.extend_from_slice(&p.social_response_rate.to_le_bytes());
+            out.extend_from_slice(&p.social_response_count.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        if data.len() < 7 {
+            return None;
+        }
+        if data[0..4] != Self::MAGIC {
+            return None;
+        }
+        if data[4] != Self::VERSION {
+            return None;
+        }
+        let n = u16::from_le_bytes(data[5..7].try_into().ok()?) as usize;
+        if n > PROTO_CAP {
+            return None;
+        }
+        if data.len() < 7 + n * Self::BYTES_PER_PROTO {
+            return None;
+        }
+
+        let mut mem = Self::new();
+        let mut off = 7usize;
+
+        macro_rules! rf64 {
+            () => {{
+                let v = f64::from_le_bytes(match data[off..off + 8].try_into() {
+                    Ok(b) => b,
+                    Err(_) => return None,
+                });
+                off += 8;
+                v
+            }};
+        }
+        macro_rules! ru64 {
+            () => {{
+                let v = u64::from_le_bytes(match data[off..off + 8].try_into() {
+                    Ok(b) => b,
+                    Err(_) => return None,
+                });
+                off += 8;
+                v
+            }};
+        }
+        macro_rules! ru32 {
+            () => {{
+                let v = u32::from_le_bytes(match data[off..off + 4].try_into() {
+                    Ok(b) => b,
+                    Err(_) => return None,
+                });
+                off += 4;
+                v
+            }};
+        }
+
+        for i in 0..n {
+            let active = data[off] == 1;
+            off += 1;
+            let pitch_tension = rf64!();
+            let resonance_pos = rf64!();
+            let noise_mix = rf64!();
+            let spectral_center = rf64!();
+            let resonance = rf64!();
+            let envelope = rf64!();
+            let rehearsal_count = ru64!();
+            let last_voiced_us = ru64!();
+            let social_response_rate = rf64!();
+            let social_response_count = ru32!();
+            if i < PROTO_CAP {
+                mem.protos[i] = PhonemeProto {
+                    motor: MotorState {
+                        pitch_tension,
+                        resonance_pos,
+                        noise_mix,
+                    },
+                    acoustic: AcousticState {
+                        spectral_center,
+                        resonance,
+                        envelope,
+                    },
+                    rehearsal_count,
+                    last_voiced_us,
+                    social_response_rate,
+                    social_response_count,
+                    active,
+                };
+            }
+        }
+        Some(mem)
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_voiced_births_proto() {
+        let mut pm = PhonemeMemory::new();
+        let motor = MotorState {
+            pitch_tension: 0.5,
+            resonance_pos: 0.4,
+            noise_mix: 0.1,
+        };
+        let acoustic = AcousticState {
+            spectral_center: 0.5,
+            resonance: 0.4,
+            envelope: 0.6,
+        };
+        pm.record_voiced(motor, acoustic, 1_000_000);
+        assert_eq!(pm.active_count(), 1);
+        assert_eq!(pm.protos[0].rehearsal_count, 1);
+    }
+
+    #[test]
+    fn nearby_motor_merges() {
+        let mut pm = PhonemeMemory::new();
+        let m1 = MotorState { pitch_tension: 0.5, resonance_pos: 0.4, noise_mix: 0.1 };
+        let m2 = MotorState { pitch_tension: 0.52, resonance_pos: 0.38, noise_mix: 0.09 };
+        let ac = AcousticState::default();
+        pm.record_voiced(m1, ac, 1_000_000);
+        pm.record_voiced(m2, ac, 2_000_000);
+        assert_eq!(pm.active_count(), 1, "nearby motors should merge");
+        assert_eq!(pm.protos[0].rehearsal_count, 2);
+    }
+
+    #[test]
+    fn distant_motor_births_new_proto() {
+        let mut pm = PhonemeMemory::new();
+        let m1 = MotorState { pitch_tension: 0.1, resonance_pos: 0.1, noise_mix: 0.0 };
+        let m2 = MotorState { pitch_tension: 0.9, resonance_pos: 0.9, noise_mix: 0.5 };
+        let ac = AcousticState::default();
+        pm.record_voiced(m1, ac, 1_000_000);
+        pm.record_voiced(m2, ac, 2_000_000);
+        assert_eq!(pm.active_count(), 2, "distant motors should birth separate protos");
+    }
+
+    #[test]
+    fn social_response_attribution() {
+        let mut pm = PhonemeMemory::new();
+        let m = MotorState { pitch_tension: 0.5, resonance_pos: 0.4, noise_mix: 0.1 };
+        pm.record_voiced(m, AcousticState::default(), 1_000_000);
+        // External VIB arrives 1 second later with low self_match
+        let result = pm.observe_vib(AcousticState::default(), 0.1, 2_000_000);
+        assert!(result.is_some(), "should detect social response");
+        let (idx, confidence) = result.unwrap();
+        assert_eq!(idx, 0);
+        assert!(confidence > 0.5, "confidence at 1s / 3s window = ~0.67");
+        pm.credit_response(idx, confidence);
+        assert!(pm.protos[0].social_response_count == 1);
+    }
+
+    #[test]
+    fn no_attribution_for_self_echo() {
+        let mut pm = PhonemeMemory::new();
+        let m = MotorState { pitch_tension: 0.5, resonance_pos: 0.4, noise_mix: 0.1 };
+        pm.record_voiced(m, AcousticState::default(), 1_000_000);
+        // High self_match = own echo → no attribution
+        let result = pm.observe_vib(AcousticState::default(), 0.9, 2_000_000);
+        assert!(result.is_none(), "self-echo must not credit");
+    }
+
+    #[test]
+    fn no_attribution_outside_window() {
+        let mut pm = PhonemeMemory::new();
+        let m = MotorState { pitch_tension: 0.5, resonance_pos: 0.4, noise_mix: 0.1 };
+        pm.record_voiced(m, AcousticState::default(), 1_000_000);
+        // VIB arrives 5 seconds later (beyond 3s window)
+        let result = pm.observe_vib(AcousticState::default(), 0.1, 6_000_000);
+        assert!(result.is_none(), "outside window = no attribution");
+    }
+
+    #[test]
+    fn exploration_motor_pure_when_empty() {
+        let mut pm = PhonemeMemory::new();
+        let base = MotorState { pitch_tension: 0.5, resonance_pos: 0.5, noise_mix: 0.1 };
+        let m = pm.exploration_motor(base);
+        assert!(m.pitch_tension >= 0.0 && m.pitch_tension <= 1.0);
+        assert!(m.resonance_pos >= 0.0 && m.resonance_pos <= 1.0);
+    }
+
+    #[test]
+    fn exploration_motor_fine_when_stable() {
+        let mut pm = PhonemeMemory::new();
+        let motor = MotorState { pitch_tension: 0.3, resonance_pos: 0.7, noise_mix: 0.05 };
+        let ac = AcousticState::default();
+        // Rehearse enough to become stable
+        for t in 0..PROTO_MIN_REHEARSALS {
+            pm.record_voiced(motor, ac, (t + 1) * 1_000_000);
+        }
+        let base = MotorState::default();
+        let m = pm.exploration_motor(base);
+        // Should be close to the stable proto (±0.08 per dimension)
+        assert!(
+            (m.pitch_tension - motor.pitch_tension).abs() < 0.20,
+            "fine exploration should stay near the stable proto"
+        );
+    }
+
+    #[test]
+    fn serialize_roundtrip() {
+        let mut pm = PhonemeMemory::new();
+        let m = MotorState { pitch_tension: 0.42, resonance_pos: 0.58, noise_mix: 0.11 };
+        let ac = AcousticState { spectral_center: 0.3, resonance: 0.6, envelope: 0.7 };
+        pm.record_voiced(m, ac, 5_000_000);
+        pm.protos[0].social_response_count = 3;
+        pm.protos[0].social_response_rate = 0.12;
+        let bytes = pm.serialize();
+        let pm2 = PhonemeMemory::deserialize(&bytes).expect("deserialize failed");
+        let p0 = &pm2.protos[0];
+        assert!(p0.active);
+        assert!((p0.motor.pitch_tension - 0.42).abs() < 1e-10);
+        assert!((p0.acoustic.envelope - 0.7).abs() < 1e-10);
+        assert_eq!(p0.social_response_count, 3);
+        assert!((p0.social_response_rate - 0.12).abs() < 1e-10);
+    }
+}

@@ -224,6 +224,14 @@ fn main() {
     {
         *vp.self_model.write().unwrap() = state;
     }
+    // Phoneme memory: restore vocal proto pool so learned sound→motor mappings
+    // survive across restarts (babble sessions are cumulative, not per-run).
+    let phoneme_memory_path = runtime_dir.join("phoneme_memory.bin");
+    if let Ok(bytes) = std::fs::read(&phoneme_memory_path) {
+        if let Some(pm) = bionic_v0::phoneme_memory::PhonemeMemory::deserialize(&bytes) {
+            *vp.phoneme_memory.write().unwrap() = pm;
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     // Register SIGTERM so the OS-level kill causes a graceful flush rather than
     // instant termination.  signal_flag::register atomically sets `stop` on
@@ -435,6 +443,7 @@ fn main() {
         let fam_cp = bionic_v0::familiar_objects::FamiliarObjectsCheckpointPaths::new(&runtime_dir);
         let vital_cp = bionic_v0::vital_core::VitalCoreCheckpointPaths::new(&runtime_dir);
         let self_cp = bionic_v0::self_model::SelfModelCheckpointPaths::new(&runtime_dir);
+        let phoneme_cp = runtime_dir.join("phoneme_memory.bin");
         spawn_ticker(profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
             let _ = write_learned_bias_checkpoint(&state, &paths_checkpoint);
@@ -450,6 +459,8 @@ fn main() {
                 &vp_checkpoint.read_self_model(),
                 &self_cp,
             );
+            let pm_bytes = vp_checkpoint.phoneme_memory.read().unwrap().serialize();
+            let _ = std::fs::write(&phoneme_cp, &pm_bytes);
         })
     };
 
@@ -512,6 +523,11 @@ fn main() {
         &vp.read_self_model(),
         &self_model_paths,
     );
+    // L1-4: persist phoneme proto pool (vocal repertoire survives restart).
+    {
+        let pm_bytes = vp.phoneme_memory.read().unwrap().serialize();
+        let _ = std::fs::write(&phoneme_memory_path, &pm_bytes);
+    }
 
     std::process::exit(0);
 }
