@@ -34,7 +34,7 @@ fn axis_ranges_are_non_overlapping_and_cover_axis_count() {
     // Gaussian summary [AXIS_GAUSS_BASE .. AXIS_COUNT)
     assert_eq!(AXIS_COUNT, VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES + GAUSS_SUMMARY_AXES, "AXIS_COUNT = all five bands");
     // No gap between bands
-    assert_eq!(AXIS_COUNT, 41, "expected 4+20+10+5+2=41 axes total");
+    assert_eq!(AXIS_COUNT, 161, "expected 16+128+10+5+2=161 axes total");
 }
 
 /// All ten interoceptive axis indices fall in [AXIS_INTERO_BASE, AXIS_COUNT).

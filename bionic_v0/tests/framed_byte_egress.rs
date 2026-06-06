@@ -117,7 +117,7 @@ fn snapshot_roundtrip_preserves_framed_byte_egress_trace() {
     let frame = vp.begin_framed_byte_egress(1_000_000, 7, &[1, 2, 3], 0.4);
     vp.observe_framed_byte_return(1_020_000, 7, &[1, 2, 4], 0.3, 0.2);
 
-    let dir = std::env::temp_dir().join("bionic_v0_framed_byte_egress_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_framed_byte_egress_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

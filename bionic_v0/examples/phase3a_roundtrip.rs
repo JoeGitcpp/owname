@@ -23,11 +23,12 @@ fn main() {
 
     // --- Slot round-trip ---
     let slot = vp.allocate_slot(MOD_VIB, now, 7).expect("alloc");
-    let obs = [0.1f64, 0.2, 0.3, 0.4];
-    let pred = [0.05f64, 0.15, 0.25, 0.35];
-    let err = [0.01f64, 0.02, 0.03, 0.04];
-    let prec = [1.0f64, 1.1, 1.2, 1.3];
-    assert_eq!(VIB_BANDS, 4);
+    // Tile 4-band patterns across the 16 VIB bands (M1.5 widened VIB_BANDS 4→16).
+    let obs: [f64; VIB_BANDS] = std::array::from_fn(|i| [0.1, 0.2, 0.3, 0.4][i % 4]);
+    let pred: [f64; VIB_BANDS] = std::array::from_fn(|i| [0.05, 0.15, 0.25, 0.35][i % 4]);
+    let err: [f64; VIB_BANDS] = std::array::from_fn(|i| [0.01, 0.02, 0.03, 0.04][i % 4]);
+    let prec: [f64; VIB_BANDS] = std::array::from_fn(|i| [1.0, 1.1, 1.2, 1.3][i % 4]);
+    assert_eq!(VIB_BANDS, 16);
     vp.write_slot_vib(slot, now, &obs, &pred, &err, &prec);
     let phot_obs = vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
     vp.write_slot_phot(
@@ -99,7 +100,7 @@ fn main() {
     let rs = &re.slots[slot];
     assert!(rs.active);
     assert_eq!(rs.source_modality, MOD_VIB | MOD_PHOT);
-    assert_eq!(rs.vib.as_ref().unwrap().n_bands, 4);
+    assert_eq!(rs.vib.as_ref().unwrap().n_bands, 16);
     assert_eq!(rs.phot.as_ref().unwrap().n_bands, 7);
     assert!(rs.mech.is_none());
     let sp = rs.spatial.as_ref().expect("spatial present");

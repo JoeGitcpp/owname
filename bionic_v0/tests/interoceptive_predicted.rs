@@ -68,5 +68,5 @@ fn predictor_count_matches_axis_count() {
         (0..AXIS_COUNT).map(Ar2Predictor::new).collect();
     assert_eq!(predictors.len(), AXIS_COUNT,
         "must build exactly AXIS_COUNT predictors, got {}", predictors.len());
-    assert_eq!(AXIS_COUNT, 41, "AXIS_COUNT must be 41 (4 hearing + 20 vision + 10 intero + 5 code + 2 gauss-summary)");
+    assert_eq!(AXIS_COUNT, 161, "AXIS_COUNT must be 161 (16 hearing + 128 vision + 10 intero + 5 code + 2 gauss-summary)");
 }

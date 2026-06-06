@@ -250,7 +250,7 @@ fn snapshot_roundtrip_preserves_fused_slot_state() {
     let f_before = snap_before.fusion.expect("fusion must exist");
 
     // Write and read snapshot.
-    let dir = std::env::temp_dir().join("bionic_v0_phase5a_fusion_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_phase5a_fusion_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

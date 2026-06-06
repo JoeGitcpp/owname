@@ -7,6 +7,11 @@ use std::sync::Arc;
 use bionic_v0::viewport::Viewport;
 use bionic_v0::{MOD_VIB, VIB_BANDS};
 
+/// Tile a 4-band contour across the 16 VIB bands (M1.5 widened VIB_BANDS 4→16).
+fn vib16(p: [f64; 4]) -> [f64; VIB_BANDS] {
+    std::array::from_fn(|i| p[i % 4])
+}
+
 fn write_object(vp: &Arc<Viewport>, slot: usize, t: u64, shape: [f64; VIB_BANDS]) {
     let pred = shape.map(|v| v * 0.9);
     let err = shape.map(|v| v * 0.1);
@@ -21,7 +26,7 @@ fn reappearing_object_is_re_recognized_through_viewport() {
     let a = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc");
 
     // Same spectral contour appears repeatedly in the slot.
-    let contour = [0.6, 0.2, 0.15, 0.05];
+    let contour = vib16([0.6, 0.2, 0.15, 0.05]);
     let mut t = t0;
     for _ in 0..6 {
         write_object(&vp, a, t, contour);
@@ -52,8 +57,8 @@ fn consistent_object_emerges_as_most_familiar() {
     let t0 = 5_000_000u64;
     let a = vp.allocate_slot(MOD_VIB, t0, 0).expect("alloc a");
 
-    let caregiver = [0.5, 0.3, 0.15, 0.05];
-    let stranger = [0.05, 0.15, 0.3, 0.5];
+    let caregiver = vib16([0.5, 0.3, 0.15, 0.05]);
+    let stranger = vib16([0.05, 0.15, 0.3, 0.5]);
     let mut t = t0;
     // caregiver present often; stranger briefly.
     for k in 0..10 {

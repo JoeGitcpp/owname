@@ -91,7 +91,7 @@ fn snapshot_and_observer_expose_vpc_contract_as_trace_not_world_truth() {
     vp.push_observation(0, 20_000, 0.20);
     p.tick(&vp);
 
-    let dir = std::env::temp_dir().join("bionic_v0_vpc_contract_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_vpc_contract_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

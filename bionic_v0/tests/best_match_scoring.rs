@@ -156,7 +156,7 @@ fn observer_sees_best_match_metadata_via_snapshot() {
     let claim = vp.claim_slot_for_event(&ev(MOD_VIB, t0 + 1_000, None, 1e-3, 0.0));
     assert!(matches!(claim, SlotClaim::Reused(_)));
 
-    let dir = std::env::temp_dir().join("bionic_v0_phase3d_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_phase3d_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).unwrap();

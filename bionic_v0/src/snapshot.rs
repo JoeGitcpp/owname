@@ -268,6 +268,12 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
     // plus language-binding traces.
 
     {
+        // Robustness: ensure the parent dir exists right before the write, so a
+        // concurrent test's cleanup (remove_dir_all) or a never-created dir can't
+        // produce a spurious ENOENT under heavy parallel load.
+        if let Some(parent) = paths.tmp_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut f = File::create(&paths.tmp_path)?;
         f.write_all(&buf)?;
         f.sync_data()?;

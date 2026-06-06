@@ -288,7 +288,7 @@ fn snapshot_roundtrip_preserves_memory_summary() {
 
     let mem_before = vp.read_global_reasoning_memory_summary();
 
-    let dir = std::env::temp_dir().join("bionic_v0_5g_history_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_5g_history_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

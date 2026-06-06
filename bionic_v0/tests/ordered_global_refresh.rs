@@ -104,7 +104,7 @@ fn snapshot_captures_post_refresh_state() {
     vp.refresh_global_attention(t_cycle);
     vp.refresh_global_relations(t_cycle);
 
-    let dir = std::env::temp_dir().join("bionic_v0_5d1_post_refresh_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_5d1_post_refresh_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");
@@ -246,7 +246,7 @@ fn observer_still_renders_snapshot_truth_only() {
         vp.refresh_global_relations(t);
     }
 
-    let dir = std::env::temp_dir().join("bionic_v0_5d1_observer_truth_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_5d1_observer_truth_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

@@ -120,7 +120,7 @@ fn language_binding_snapshot_carries_binding_traces_not_concepts() {
     let vp = Arc::new(Viewport::new());
     vp.apply_language_binding_event(sample_binding_event(BindingFeedback::Align, 29, 500));
 
-    let dir = std::env::temp_dir().join("bionic_v0_language_binding_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_language_binding_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

@@ -83,7 +83,7 @@ fn snapshot_carries_action_output_write_state() {
         event_t_us: 1000,
     });
 
-    let dir = std::env::temp_dir().join("bionic_v0_action_output_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_action_output_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");
@@ -201,7 +201,7 @@ fn snapshot_roundtrip_carries_write_epoch_history() {
     });
     let seq2 = vp.read_action_output().channels[0].current_write_seq;
 
-    let dir = std::env::temp_dir().join("bionic_v0_epoch_history_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_epoch_history_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

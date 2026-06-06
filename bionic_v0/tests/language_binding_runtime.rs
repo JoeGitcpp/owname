@@ -193,12 +193,18 @@ fn pair_evidence_does_not_bind_inactive_slot_target() {
 }
 
 #[test]
-fn ambiguous_pair_similarity_does_not_force_binding_feedback() {
+fn ambiguous_pair_similarity_is_developmental() {
+    // sim = 1 - |0.6 - 0.25| = 0.65 — between the strict DEVIATE_MAX (0.30) and
+    // ALIGN_MIN (0.70). Under the developmental precision schedule its handling
+    // depends on the developmental clock.
+
+    // Newborn (maturity 0): the dead zone collapses to the neutral midpoint, so
+    // a rough 0.65 match yields graded credit and forms a (weak) binding — this
+    // is exactly what breaks the bootstrap deadlock (0×x=0 no longer holds).
     let vp = Arc::new(Viewport::new());
     let slot_id = claim_vib_slot(&vp, 1_000);
     let (write_seq, window_id) = paired_write_and_window(&vp, 2_000, 0.6, 0.25);
-
-    let formed = vp.try_form_binding_event_from_pair(
+    let formed_newborn = vp.try_form_binding_event_from_pair(
         PatternKind::SymbolSeq,
         0xC0FFEE,
         BindingTargetRef::ObjectSlot {
@@ -207,9 +213,34 @@ fn ambiguous_pair_similarity_does_not_force_binding_feedback() {
         write_seq,
         window_id,
     );
+    assert!(
+        formed_newborn,
+        "newborn precision gives graded credit to a rough match (no dead zone)"
+    );
 
-    assert!(!formed);
-    assert_eq!(vp.read_language_binding().n_bindings, 0);
+    // Mature (maturity →1): precision tightens to the strict [0.30, 0.70] dead
+    // zone, so the same ambiguous 0.65 is (correctly) not forced into a binding.
+    let vp2 = Arc::new(Viewport::new());
+    for _ in 0..400 {
+        vp2.advance_maturity(1.0);
+    }
+    assert!(vp2.developmental_maturity() > 0.9, "clock should be near mature");
+    let slot_id2 = claim_vib_slot(&vp2, 1_000);
+    let (w2, win2) = paired_write_and_window(&vp2, 2_000, 0.6, 0.25);
+    let formed_mature = vp2.try_form_binding_event_from_pair(
+        PatternKind::SymbolSeq,
+        0xC0FFEE,
+        BindingTargetRef::ObjectSlot {
+            slot_id: slot_id2 as u8,
+        },
+        w2,
+        win2,
+    );
+    assert!(
+        !formed_mature,
+        "mature precision dead-zones an ambiguous 0.65 match"
+    );
+    assert_eq!(vp2.read_language_binding().n_bindings, 0);
 }
 
 #[test]

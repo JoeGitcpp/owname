@@ -189,14 +189,14 @@ impl VibAdapter {
     }
 
     /// Test-only accessor for the priors reference.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     pub fn priors(&self) -> &BiasPriors {
         &self.priors
     }
 
     /// Test-only entry point for process_frame that bypasses the mic stream.
     /// Exposes the same logic to integration tests.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     pub fn process_frame_for_test(
         &mut self,
         vp: &Arc<Viewport>,

@@ -227,7 +227,7 @@ fn snapshot_roundtrip_preserves_global_attention_state() {
     let ga_before = vp.read_global_attention();
     let snap_before = vp.read_slot(slot_id).unwrap();
 
-    let dir = std::env::temp_dir().join("bionic_v0_phase5c_ga_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_phase5c_ga_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

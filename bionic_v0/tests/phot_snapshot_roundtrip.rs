@@ -27,7 +27,7 @@ fn phot_snapshot_roundtrip_preserves_health_ambient_slot_and_spatial() {
     vp.write_slot_spatial(slot, MOD_PHOT, t, 0.3, 0.4, 0.1, 0.15, 0.55);
 
     // --- write & re-read ---
-    let dir = std::env::temp_dir().join("bionic_v0_phase3b_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_phase3b_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).unwrap();

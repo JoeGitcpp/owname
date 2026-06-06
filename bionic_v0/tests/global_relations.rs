@@ -222,7 +222,7 @@ fn snapshot_roundtrip_preserves_relation_state() {
 
     let gr_before = vp.read_global_relations();
 
-    let dir = std::env::temp_dir().join("bionic_v0_phase5d_rel_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_phase5d_rel_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");
@@ -290,7 +290,7 @@ fn observer_sees_relation_state() {
         vp.refresh_global_relations(t);
     }
 
-    let dir = std::env::temp_dir().join("bionic_v0_phase5d_obs_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_phase5d_obs_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

@@ -15,7 +15,9 @@ runtime_life/
 /runtime/
 /runtime_full30/
 /runtime_silent30/
+/runtime_nursery_20260604/
 /logs/
+/project_eval_report.html
 
 # Accidental dirs from misdirected output redirection (e.g. `... > --help`)
 /--help/

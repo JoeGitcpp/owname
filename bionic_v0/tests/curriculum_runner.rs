@@ -11,7 +11,7 @@ use bionic_v0::viewport::Viewport;
 #[test]
 fn single_object_motion_course_produces_worldline_evidence() {
     let vp = Arc::new(Viewport::new());
-    let dir = std::env::temp_dir().join("bionic_v0_curriculum_single_motion");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_curriculum_single_motion_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
 

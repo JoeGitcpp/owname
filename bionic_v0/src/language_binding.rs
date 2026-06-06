@@ -189,9 +189,17 @@ impl crate::viewport::Viewport {
             return false;
         };
 
-        let feedback = if pair.curve_similarity >= crate::BINDING_PAIR_ALIGN_MIN {
+        // Developmental precision: the align/deviate bar is loose for a naive
+        // body (no dead zone at m=0, so a rough match still gives graded credit)
+        // and tightens to the strict thresholds as the developmental clock
+        // matures. Breaks the bootstrap deadlock without sacrificing mature
+        // discrimination.
+        let maturity = self.developmental_maturity();
+        let align_min = crate::binding_align_min(maturity);
+        let deviate_max = crate::binding_deviate_max(maturity);
+        let feedback = if pair.curve_similarity >= align_min {
             BindingFeedback::Align
-        } else if pair.curve_similarity <= crate::BINDING_PAIR_DEVIATE_MAX {
+        } else if pair.curve_similarity <= deviate_max {
             BindingFeedback::Deviate
         } else {
             return false;
@@ -215,6 +223,11 @@ impl crate::viewport::Viewport {
             evidence_ref: write_seq.rotate_left(32) ^ window_id,
             event_t_us: pair.pair_t_us,
         });
+        // Developmental clock: a confirmed Align from real pair evidence is
+        // earned competence — advance maturity so precision tightens over time.
+        if feedback == BindingFeedback::Align {
+            self.advance_maturity(pair.curve_similarity);
+        }
         true
     }
 

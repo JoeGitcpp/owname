@@ -279,7 +279,7 @@ fn observer_sees_joint_slot_through_snapshot() {
         phot.tick(&vp, t);
     }
 
-    let dir = std::env::temp_dir().join("bionic_v0_phase3c_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_phase3c_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).unwrap();

@@ -94,7 +94,7 @@ fn snapshot_preserves_spatial_worldline_and_spatial_relation_projection() {
     vp.refresh_global_attention(20_000);
     vp.refresh_global_relations(20_000);
 
-    let dir = std::env::temp_dir().join("bionic_v0_spacetime_worldline_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_spacetime_worldline_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

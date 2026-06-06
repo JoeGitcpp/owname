@@ -87,7 +87,7 @@ fn code_ingress_adapter_drains_dedicated_framed_carrier_into_viewport() {
 
 #[test]
 fn snapshot_roundtrip_preserves_code_ingress_traces() {
-    let dir = std::env::temp_dir().join("bionic_v0_code_ingress_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_code_ingress_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = SnapshotPaths::new(&dir);
     let vp = Arc::new(Viewport::new());

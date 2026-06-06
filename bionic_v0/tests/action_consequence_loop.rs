@@ -102,7 +102,7 @@ fn snapshot_carries_action_consequence_windows_and_pairs() {
     let wid = vp.read_action_consequence().windows[0].window_id;
     vp.pair_action_consequence(write_seq, wid, 40);
 
-    let dir = std::env::temp_dir().join("bionic_v0_action_consequence_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_action_consequence_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");
@@ -478,7 +478,7 @@ fn snapshot_carries_window_lifecycle_fields() {
     vp.extend_action_consequence_window(wid, 350, 320);
     vp.close_action_consequence_window(wid, 360);
 
-    let dir = std::env::temp_dir().join("bionic_v0_lifecycle_snap");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_lifecycle_snap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let paths = SnapshotPaths::new(&dir);
     write_snapshot(&vp, &paths).expect("write ok");

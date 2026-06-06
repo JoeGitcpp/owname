@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 #[test]
 fn snapshot_roundtrip_preserves_vocal_substrate_state() {
-    let dir = std::env::temp_dir().join("bionic_v0_vocal_snap_test");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_vocal_snap_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = SnapshotPaths::new(&dir);
     let vp = Arc::new(Viewport::new());
@@ -40,7 +40,7 @@ fn repeated_target_exposure_drives_organ_toward_target_and_strengthens_memory() 
 
 #[test]
 fn observer_visible_snapshot_contains_vocal_activity_fields() {
-    let dir = std::env::temp_dir().join("bionic_v0_vocal_observer_test");
+    let dir = std::env::temp_dir().join(format!("bionic_v0_vocal_observer_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = SnapshotPaths::new(&dir);
     let vp = Arc::new(Viewport::new());
@@ -116,6 +116,11 @@ fn vocal_imitation_loop_records_action_epoch_when_target_starts_voicing() {
     assert_eq!(out.write_epoch_history[0].start_t_us, 2_000);
 }
 
+/// Tile a 4-band pattern across the 16 VIB bands (M1.5 widened VIB_BANDS 4→16).
+fn vib16(p: [f64; 4]) -> [f64; VIB_BANDS] {
+    std::array::from_fn(|i| p[i % 4])
+}
+
 fn push_vib_frame(vp: &Arc<Viewport>, t_us: u64, bands: [f64; VIB_BANDS]) {
     for axis in 0..VIB_BANDS {
         vp.push_observation(axis, t_us, bands[axis]);
@@ -128,7 +133,7 @@ fn push_vib_frame(vp: &Arc<Viewport>, t_us: u64, bands: [f64; VIB_BANDS]) {
 fn vib_ingress_populates_vocal_target_when_no_recent_body_write_exists() {
     let vp = Arc::new(Viewport::new());
 
-    push_vib_frame(&vp, 10_000, [0.05, 0.12, 0.34, 0.18]);
+    push_vib_frame(&vp, 10_000, vib16([0.05, 0.12, 0.34, 0.18]));
     vp.tick_vocal_target_from_vib(10_000);
 
     let target = vp.read_vocal_target();
@@ -143,7 +148,7 @@ fn recent_body_write_coupled_vib_does_not_overwrite_vocal_target() {
     let vp = Arc::new(Viewport::new());
 
     vp.begin_voicing(20_000, 0.7, 0.3, 0.4);
-    push_vib_frame(&vp, 20_050, [0.06, 0.15, 0.28, 0.16]);
+    push_vib_frame(&vp, 20_050, vib16([0.06, 0.15, 0.28, 0.16]));
     vp.tick_vocal_target_from_vib(20_050);
 
     let target = vp.read_vocal_target();
