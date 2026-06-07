@@ -32,7 +32,7 @@ import { createConnection } from 'node:net'
 import {
   existsSync, mkdirSync, copyFileSync, readFileSync, rmSync,
 }                           from 'node:fs'
-import { join }             from 'node:path'
+import { dirname, join }    from 'node:path'
 
 // ── Frame format (must match net_adapter.rs / security.mjs) ───────────────────
 // net_adapter.rs layout (v2):
@@ -70,6 +70,8 @@ const HARVEST_S    = parseInt(arg('harvest', '120'), 10) // copy→master every 
 function log(...a) {
   console.log(`[nursery ${new Date().toISOString()}] ${a.join(' ')}`)
 }
+
+const fmt = (v) => v == null ? 'n/a' : v.toFixed(5)
 
 // ── Frame builder ─────────────────────────────────────────────────────────────
 // Compute 8 auxiliary acoustic features from spectral bands.
@@ -211,36 +213,112 @@ function* glide(c0, c1, durMs, energy = 0.4) {
 }
 
 // One full curriculum pass. Each utterance repeated REPS× so the imitation loop
-// can hit converge_count≥3. Foundational acoustic phases only — analytic, no TTS.
+// can hit converge_count≥3. Phases 1–4: foundational vowels; 5–6: finer targets
+// and turn-taking bursts. Analytic synthesis only — no TTS.
 const REPS = 4
-const REST_MS = 15000   // quiet window between passes so reserve recovers
-function* curriculumPass() {
-  const centers = [0.2, 0.5, 0.8, 0.35, 0.65]   // "vowel" spectral targets
+const REST_MS = 25000   // base quiet window between passes (was 15s; reserve was starving)
+const RESERVE_LOW = 0.10
+const RESERVE_MED = 0.20
+
+function passRestMs(getReserve) {
+  const reserve = getReserve()
+  if (reserve == null) return REST_MS
+  if (reserve < RESERVE_LOW) return REST_MS + 15000
+  if (reserve < RESERVE_MED) return REST_MS + 8000
+  return REST_MS
+}
+
+function* adaptiveRest(getReserve, phaseLabel = '') {
+  const reserve = getReserve()
+  if (reserve == null || reserve >= RESERVE_MED) return
+  const extra = reserve < RESERVE_LOW ? 10000 : 5000
+  if (phaseLabel) log(`adaptive_rest phase=${phaseLabel} reserve=${reserve.toFixed(4)} extra_ms=${extra}`)
+  yield* silence(extra)
+}
+
+function* curriculumPass(getReserve = () => null) {
+  const centers = [0.2, 0.5, 0.8, 0.35, 0.65]   // Phase 1–4: broad vowel targets
 
   // Phase 1 — single tones (hold a target, repeat)
   for (const c of centers) {
     for (let r = 0; r < REPS; r++) { yield* tone(c, 700); yield* silence(350) }
   }
+  yield* adaptiveRest(getReserve, '1')
+
   // Phase 2 — tone pairs (two targets in sequence, repeat)
   const pairs = [[0.2, 0.6], [0.7, 0.3], [0.4, 0.8]]
   for (const [a, b] of pairs) {
     for (let r = 0; r < REPS; r++) { yield* tone(a, 450); yield* tone(b, 450); yield* silence(400) }
   }
+  yield* adaptiveRest(getReserve, '2')
+
   // Phase 3 — rhythmic pulses (timing, repeat)
   for (let r = 0; r < REPS; r++) {
     for (let k = 0; k < 4; k++) { yield* tone(0.5, 180, 0.5); yield* silence(180) }
     yield* silence(500)
   }
-  // Phase 4 — glides / call-and-response (rising then echo, built-in repetition)
+  yield* adaptiveRest(getReserve, '3')
+
+  // Phase 4 — glides / echo (rising then repeat, built-in repetition)
   const glides = [[0.2, 0.8], [0.8, 0.2]]
   for (const [a, b] of glides) {
     for (let r = 0; r < REPS; r++) { yield* glide(a, b, 600); yield* silence(300); yield* glide(a, b, 600); yield* silence(500) }
   }
+  yield* adaptiveRest(getReserve, '4')
 
-  // Rest between passes — a long quiet window so the body stops voicing and
-  // vital reserve recovers (voicing costs 0.5 drain/tick; only quiet lets
-  // drain fall back to the 0.2 base so supply can lift reserve again).
-  yield* silence(REST_MS)
+  // Phase 5 — fine formant targets (narrow bands, new spectral centers)
+  const fineCenters = [0.1, 0.15, 0.45, 0.55, 0.85, 0.9]
+  const FINE_WIDTH = 0.10
+  const FINE_REPS = 3
+  for (const c of fineCenters) {
+    for (let r = 0; r < FINE_REPS; r++) {
+      yield* tone(c, 600, 0.35, FINE_WIDTH)
+      yield* silence(400)
+    }
+  }
+  yield* adaptiveRest(getReserve, '5')
+
+  // Phase 6 — burst / silence turn-taking (short triplets, long response window)
+  const burstCenters = [0.3, 0.5, 0.7]
+  const BURST_REPS = 3
+  for (let r = 0; r < BURST_REPS; r++) {
+    for (const c of burstCenters) {
+      yield* tone(c, 120, 0.35, 0.14)
+      yield* silence(200)
+    }
+    yield* silence(8000)
+  }
+  yield* adaptiveRest(getReserve, '6')
+
+  // Rest between passes — quiet window so vital reserve recovers.
+  const restMs = passRestMs(getReserve)
+  if (restMs > REST_MS) log(`pass_rest reserve=${fmt(getReserve())} rest_ms=${restMs}`)
+  yield* silence(restMs)
+}
+
+// ── Master seed / harvest (learned_bias + phoneme memory persist across restarts)
+const MASTER_DIR = MASTER_BIAS ? dirname(MASTER_BIAS) : null
+const MASTER_ARTIFACTS = [
+  ['learned_bias.bin',    MASTER_BIAS],
+  ['phoneme_memory.bin',  MASTER_DIR ? join(MASTER_DIR, 'master_phoneme_memory.bin') : null],
+  ['familiar_objects.bin', MASTER_DIR ? join(MASTER_DIR, 'master_familiar_objects.bin') : null],
+  ['vital_core.bin',      MASTER_DIR ? join(MASTER_DIR, 'master_vital_core.bin') : null],
+]
+
+function harvestMasterArtifacts(runtimeDir) {
+  for (const [name, dest] of MASTER_ARTIFACTS) {
+    if (!dest) continue
+    const src = join(runtimeDir, name)
+    if (!existsSync(src)) continue
+    try { copyFileSync(src, dest) } catch {}
+  }
+}
+
+function seedFromMaster(runtimeDir) {
+  for (const [name, src] of MASTER_ARTIFACTS) {
+    if (!src || !existsSync(src)) continue
+    try { copyFileSync(src, join(runtimeDir, name)) } catch {}
+  }
 }
 
 // ── vocal_efficacy = last 8 bytes of learned_bias.bin (final write_f64) ───────
@@ -272,8 +350,8 @@ if (SEED_DIR) {
     const src = join(SEED_DIR, f)
     if (existsSync(src)) { try { copyFileSync(src, join(RUNTIME_DIR, f)) } catch {} }
   }
-} else if (MASTER_BIAS && existsSync(MASTER_BIAS)) {
-  try { copyFileSync(MASTER_BIAS, biasPath) } catch {}
+} else {
+  seedFromMaster(RUNTIME_DIR)
 }
 
 // sandbox_runner reads live_bytes/out.frames (body's bytecode output), executes
@@ -311,7 +389,7 @@ async function feedLoop() {
   let lastHarvest = Date.now()
   let lastReport  = Date.now()
   while (!stopped) {
-    for (const tick of curriculumPass()) {
+    for (const tick of curriculumPass(() => readReserve(RUNTIME_DIR))) {
       if (stopped || !sock || sock.destroyed) return
       const frame = buildAcousticSyncFrame(tick)
       sock.write(frame)
@@ -324,7 +402,12 @@ async function feedLoop() {
       }
       if (MASTER_BIAS && now - lastHarvest >= HARVEST_S * 1000) {
         lastHarvest = now
-        if (existsSync(biasPath)) { try { copyFileSync(biasPath, MASTER_BIAS); log(`harvested learned_bias → master`) } catch {} }
+        if (existsSync(biasPath)) {
+          try {
+            harvestMasterArtifacts(RUNTIME_DIR)
+            log('harvested runtime artifacts → master')
+          } catch {}
+        }
       }
       if (!FOREVER && now - startMs >= DURATION_S * 1000) { finish(); return }
     }
@@ -335,13 +418,14 @@ function finish() {
   stopped = true
   const endEff = readVocalEfficacy(biasPath)
   log(`DONE start_eff=${fmt(startEff)} end_eff=${fmt(endEff)} delta=${fmt((endEff ?? 0) - (startEff ?? 0))}`)
-  if (MASTER_BIAS && existsSync(biasPath)) { try { copyFileSync(biasPath, MASTER_BIAS); log('final harvest → master') } catch {} }
+  if (MASTER_BIAS && existsSync(biasPath)) {
+    try { harvestMasterArtifacts(RUNTIME_DIR); log('final harvest → master') } catch {}
+  }
   sock?.end()
   setTimeout(() => { sandbox.kill('SIGTERM'); child.kill('SIGTERM'); process.exit(0) }, 500)
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
-const fmt = (v) => v == null ? 'n/a' : v.toFixed(5)
 
 process.on('SIGINT',  finish)
 process.on('SIGTERM', finish)
