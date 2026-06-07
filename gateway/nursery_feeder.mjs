@@ -215,23 +215,23 @@ function* glide(c0, c1, durMs, energy = 0.4) {
 // One full curriculum pass. Each utterance repeated REPS× so the imitation loop
 // can hit converge_count≥3. Phases 1–4: foundational vowels; 5–6: finer targets
 // and turn-taking bursts. Analytic synthesis only — no TTS.
-const REPS = 4
-const REST_MS = 25000   // base quiet window between passes (was 15s; reserve was starving)
+const REPS = 3
+const REST_MS = 30000   // base quiet window between passes
 const RESERVE_LOW = 0.10
-const RESERVE_MED = 0.20
+const RESERVE_MED = 0.25   // trigger adaptive rest earlier while reserve is still thin
 
 function passRestMs(getReserve) {
   const reserve = getReserve()
   if (reserve == null) return REST_MS
-  if (reserve < RESERVE_LOW) return REST_MS + 15000
-  if (reserve < RESERVE_MED) return REST_MS + 8000
+  if (reserve < RESERVE_LOW) return REST_MS + 20000
+  if (reserve < RESERVE_MED) return REST_MS + 12000
   return REST_MS
 }
 
 function* adaptiveRest(getReserve, phaseLabel = '') {
   const reserve = getReserve()
   if (reserve == null || reserve >= RESERVE_MED) return
-  const extra = reserve < RESERVE_LOW ? 10000 : 5000
+  const extra = reserve < RESERVE_LOW ? 15000 : 8000
   if (phaseLabel) log(`adaptive_rest phase=${phaseLabel} reserve=${reserve.toFixed(4)} extra_ms=${extra}`)
   yield* silence(extra)
 }
@@ -252,10 +252,10 @@ function* curriculumPass(getReserve = () => null) {
   }
   yield* adaptiveRest(getReserve, '2')
 
-  // Phase 3 — rhythmic pulses (timing, repeat)
+  // Phase 3 — rhythmic pulses (timing, repeat; gentler energy)
   for (let r = 0; r < REPS; r++) {
-    for (let k = 0; k < 4; k++) { yield* tone(0.5, 180, 0.5); yield* silence(180) }
-    yield* silence(500)
+    for (let k = 0; k < 3; k++) { yield* tone(0.5, 160, 0.32); yield* silence(220) }
+    yield* silence(700)
   }
   yield* adaptiveRest(getReserve, '3')
 
@@ -269,24 +269,24 @@ function* curriculumPass(getReserve = () => null) {
   // Phase 5 — fine formant targets (narrow bands, new spectral centers)
   const fineCenters = [0.1, 0.15, 0.45, 0.55, 0.85, 0.9]
   const FINE_WIDTH = 0.10
-  const FINE_REPS = 3
+  const FINE_REPS = 2
   for (const c of fineCenters) {
     for (let r = 0; r < FINE_REPS; r++) {
-      yield* tone(c, 600, 0.35, FINE_WIDTH)
-      yield* silence(400)
+      yield* tone(c, 550, 0.30, FINE_WIDTH)
+      yield* silence(500)
     }
   }
   yield* adaptiveRest(getReserve, '5')
 
   // Phase 6 — burst / silence turn-taking (short triplets, long response window)
   const burstCenters = [0.3, 0.5, 0.7]
-  const BURST_REPS = 3
+  const BURST_REPS = 2
   for (let r = 0; r < BURST_REPS; r++) {
     for (const c of burstCenters) {
-      yield* tone(c, 120, 0.35, 0.14)
-      yield* silence(200)
+      yield* tone(c, 100, 0.28, 0.14)
+      yield* silence(280)
     }
-    yield* silence(8000)
+    yield* silence(12000)
   }
   yield* adaptiveRest(getReserve, '6')
 
