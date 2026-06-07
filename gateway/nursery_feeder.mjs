@@ -35,11 +35,22 @@ import {
 import { join }             from 'node:path'
 
 // ── Frame format (must match net_adapter.rs / security.mjs) ───────────────────
-const BANDS       = 12
-const GRID        = 32 * 24
-const FRAME_BYTES = 1 + (2 + BANDS + 2) * 4 + GRID * 4   // 3137
-const SEND_HZ     = 50
-const DT_MS       = 1000 / SEND_HZ
+// net_adapter.rs layout (v2):
+//   [0x01 tag][level:f32][flux:f32][bands×64:f32][motion:f32][luma:f32]
+//   [spectral_centroid:f32][spectral_flatness:f32][spectral_rolloff:f32]
+//   [spectral_spread:f32][zcr:f32][hnr:f32][onset_strength:f32][temporal_flux:f32]
+//   [grid:160×120×3 f32 planar RGB]
+// Total: 1 + (2+64+2+8)×4 + 57600×4 = 230705 bytes
+const BANDS        = 64
+const AUX_FEATURES = 8          // spectral_centroid…temporal_flux
+const GRID_W       = 160
+const GRID_H       = 120
+const GRID_CH      = 3          // RGB planar
+const GRID_PIXELS  = GRID_W * GRID_H          // 19200
+const GRID_TOTAL   = GRID_PIXELS * GRID_CH    // 57600
+const FRAME_BYTES  = 1 + (2 + BANDS + 2 + AUX_FEATURES) * 4 + GRID_TOTAL * 4  // 230705
+const SEND_HZ      = 50
+const DT_MS        = 1000 / SEND_HZ
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2)
@@ -48,6 +59,7 @@ function arg(name, def = null) {
   return i !== -1 && i + 1 < args.length ? args[i + 1] : def
 }
 const BODY_BIN     = arg('body', '../bionic_v0/target/release/body')
+const SANDBOX_BIN  = arg('sandbox', '../sandbox_runner')
 const RUNTIME_DIR  = arg('runtime', '/tmp/aborn-nursery')
 const MASTER_BIAS  = arg('master', null)         // copy learned_bias here periodically
 const SEED_DIR     = arg('seed', null)           // dir with learned_bias/vital_core to seed from
@@ -60,7 +72,40 @@ function log(...a) {
 }
 
 // ── Frame builder ─────────────────────────────────────────────────────────────
-function buildFrame(level, flux, bands, motion, luma, gridVal) {
+// Compute 8 auxiliary acoustic features from spectral bands.
+// These fill the AUX_FEATURES slot that net_adapter.rs reads after luma.
+function computeAux(bands, flux) {
+  const N = bands.length
+  let totalE = 0, wFreq = 0
+  for (let i = 0; i < N; i++) { totalE += bands[i]; wFreq += bands[i] * (i / (N - 1)) }
+  const centroid = totalE > 1e-8 ? wFreq / totalE : 0.5
+  let spread = 0
+  for (let i = 0; i < N; i++) {
+    const d = i / (N - 1) - centroid
+    spread += bands[i] * d * d
+  }
+  spread = totalE > 1e-8 ? Math.sqrt(spread / totalE) : 0.1
+  let logSum = 0, cnt = 0
+  for (let i = 0; i < N; i++) { if (bands[i] > 1e-10) { logSum += Math.log(bands[i]); cnt++ } }
+  const gm = cnt > 0 ? Math.exp(logSum / cnt) : 0
+  const am = totalE / N
+  const flatness = am > 1e-10 ? Math.min(gm / am, 1) : 0
+  let cum = 0, rolloff = 1.0
+  for (let i = 0; i < N; i++) { cum += bands[i]; if (cum >= 0.85 * totalE) { rolloff = i / (N-1); break } }
+  return [
+    centroid,                       // spectral_centroid
+    flatness,                       // spectral_flatness
+    rolloff,                        // spectral_rolloff
+    spread,                         // spectral_spread
+    0.0,                            // zcr  (not meaningful at frame level)
+    Math.max(0, 1 - flatness * 2),  // hnr  (1=pure tone, 0=noise)
+    Math.max(0, flux),              // onset_strength
+    Math.abs(flux),                 // temporal_flux
+  ]
+}
+
+// Build a silent/uniform frame (used during REST between curriculum passes).
+function buildFrame(level, flux, bands, motion, luma, gridValUnused) {
   const buf = Buffer.alloc(FRAME_BYTES)
   let off = 0
   buf.writeUInt8(0x01, off); off += 1
@@ -69,8 +114,59 @@ function buildFrame(level, flux, bands, motion, luma, gridVal) {
   for (let b = 0; b < BANDS; b++) { buf.writeFloatLE(bands[b] ?? 0, off); off += 4 }
   buf.writeFloatLE(motion, off); off += 4
   buf.writeFloatLE(luma,   off); off += 4
-  // Dim ambient visual presence keeps the body's vital state alive without motion.
-  for (let g = 0; g < GRID; g++) { buf.writeFloatLE(gridVal, off); off += 4 }
+  const aux = computeAux(bands, flux)
+  for (const a of aux) { buf.writeFloatLE(a, off); off += 4 }
+  // Dim uniform grey grid — no spatial structure, just ambient presence.
+  for (let g = 0; g < GRID_TOTAL; g++) { buf.writeFloatLE(luma, off); off += 4 }
+  return buf
+}
+
+// Build a frame with a spatially-structured 160×120 RGB visual field that
+// tracks the acoustic level. Fixes the stable_recurrence = 0.006 floor:
+//
+//   Problem diagnosed: nursery_feeder was sending 3137-byte frames (32×24
+//   grayscale, no AUX) while net_adapter.rs expects 230497-byte frames
+//   (160×120 RGB + 8 AUX features). The body's read_exact(230497) had to
+//   consume ~73 feeder frames to fill one body frame → sensory update rate
+//   ~0.68Hz, visual grid entirely garbage. Spatial structure never formed.
+//
+//   Fix: correct FRAME_BYTES + a centred Gaussian blob (160×120 RGB) that
+//   brightens during acoustic events. During silence level=0 → blob vanishes
+//   → natural onset/offset creates phot event_energy. Slot persistence while
+//   the tone is held drives routing_stability > 0.10 and breaks the floor.
+function buildAcousticSyncFrame(tick) {
+  const buf = Buffer.alloc(FRAME_BYTES)
+  let off = 0
+  const luma   = 0.06 + tick.level * 0.10   // 0.06 quiet → 0.16 at peak tone
+  const motion = tick.flux * 0.50            // onset/offset transitions
+  buf.writeUInt8(0x01, off); off += 1
+  buf.writeFloatLE(tick.level, off); off += 4
+  buf.writeFloatLE(tick.flux,  off); off += 4
+  for (let b = 0; b < BANDS; b++) { buf.writeFloatLE(tick.bands[b] ?? 0, off); off += 4 }
+  buf.writeFloatLE(motion, off); off += 4
+  buf.writeFloatLE(luma,   off); off += 4
+  const aux = computeAux(tick.bands, tick.flux)
+  for (const a of aux) { buf.writeFloatLE(a, off); off += 4 }
+
+  // 160×120 RGB planar: [R×19200][G×19200][B×19200]
+  // Centred Gaussian blob, sigma ≈ 1/6 of frame. Background 0.04.
+  // All 3 channels identical (neutral white blob).
+  const cx = GRID_W / 2 - 0.5, cy = GRID_H / 2 - 0.5
+  const sx = GRID_W / 6, sy = GRID_H / 6   // sigma ~27px × ~20px
+  // Pre-compute pixel values for one channel, then copy to R/G/B.
+  const pix = new Float32Array(GRID_PIXELS)
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      const dx = (x - cx) / sx, dy = (y - cy) / sy
+      const blob = Math.exp(-0.5 * (dx * dx + dy * dy))
+      pix[y * GRID_W + x] = Math.min(0.04 + blob * tick.level * 0.40, 1.0)
+    }
+  }
+  for (let ch = 0; ch < GRID_CH; ch++) {   // R then G then B
+    for (let p = 0; p < GRID_PIXELS; p++) {
+      buf.writeFloatLE(pix[p], off); off += 4
+    }
+  }
   return buf
 }
 
@@ -172,7 +268,7 @@ const biasPath   = join(RUNTIME_DIR, 'learned_bias.bin')
 rmSync(RUNTIME_DIR, { recursive: true, force: true })
 mkdirSync(RUNTIME_DIR, { recursive: true })
 if (SEED_DIR) {
-  for (const f of ['learned_bias.bin', 'vital_core.bin', 'familiar_objects.bin', 'self_model.bin']) {
+  for (const f of ['learned_bias.bin', 'vital_core.bin', 'familiar_objects.bin', 'self_model.bin', 'phoneme_memory.bin']) {
     const src = join(SEED_DIR, f)
     if (existsSync(src)) { try { copyFileSync(src, join(RUNTIME_DIR, f)) } catch {} }
   }
@@ -180,9 +276,19 @@ if (SEED_DIR) {
   try { copyFileSync(MASTER_BIAS, biasPath) } catch {}
 }
 
+// sandbox_runner reads live_bytes/out.frames (body's bytecode output), executes
+// it in a stack VM, and writes results back to live_bytes/in.frames. Without it
+// running, action_consequence.n_windows stays at 0 forever — the body never
+// forms return windows and the live_io gate can never pass.
+mkdirSync(join(RUNTIME_DIR, 'live_bytes'), { recursive: true })
+log(`spawning sandbox_runner: ${SANDBOX_BIN} ${RUNTIME_DIR}`)
+const sandbox = spawn(SANDBOX_BIN, [RUNTIME_DIR], { stdio: 'ignore' })
+sandbox.on('error', (e) => log(`sandbox_runner spawn error (non-fatal): ${e.message}`))
+sandbox.on('exit', (code) => log(`sandbox_runner exited code=${code}`))
+
 log(`spawning body: ${BODY_BIN} ${RUNTIME_DIR} --headless ${socketPath}`)
 const child = spawn(BODY_BIN, [RUNTIME_DIR, '--headless', socketPath], { stdio: 'ignore' })
-child.on('exit', (code) => { log(`body exited code=${code}`); process.exit(code ?? 0) })
+child.on('exit', (code) => { log(`body exited code=${code}`); sandbox.kill('SIGTERM'); process.exit(code ?? 0) })
 
 const startEff = readVocalEfficacy(biasPath)
 log(`seed vocal_efficacy=${startEff ?? 'n/a'} reserve=${readReserve(RUNTIME_DIR) ?? 'n/a'}`)
@@ -207,7 +313,7 @@ async function feedLoop() {
   while (!stopped) {
     for (const tick of curriculumPass()) {
       if (stopped || !sock || sock.destroyed) return
-      const frame = buildFrame(tick.level, tick.flux, tick.bands, 0, 0.08, 0.08)
+      const frame = buildAcousticSyncFrame(tick)
       sock.write(frame)
       await sleep(DT_MS)
 
@@ -231,7 +337,7 @@ function finish() {
   log(`DONE start_eff=${fmt(startEff)} end_eff=${fmt(endEff)} delta=${fmt((endEff ?? 0) - (startEff ?? 0))}`)
   if (MASTER_BIAS && existsSync(biasPath)) { try { copyFileSync(biasPath, MASTER_BIAS); log('final harvest → master') } catch {} }
   sock?.end()
-  setTimeout(() => { child.kill('SIGTERM'); process.exit(0) }, 500)
+  setTimeout(() => { sandbox.kill('SIGTERM'); child.kill('SIGTERM'); process.exit(0) }, 500)
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))

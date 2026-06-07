@@ -62,6 +62,24 @@ const OPACITY_DEATH: f64 = 0.02; // opacity below this → deactivate
 const BIRTH_RESIDUAL_MIN: f64 = 0.08; // spawn only where peak residual exceeds this
 const BIRTH_MIN_SEP: f64 = 0.10; // don't spawn within this (normalized) of an active center
 const FOOTPRINT_SIGMAS: f64 = 3.0;
+/// Maximum Gaussians to birth in one tick.
+/// Three independent peak-residual sites are claimed per tick instead of one,
+/// so multi-object scenes build coverage in 1/3 the ticks.
+const BIRTH_PER_TICK: usize = 3;
+/// Minimum separation between CANDIDATE birth sites in the greedy scan.
+/// Must be large enough that multiple candidates never fall inside the same
+/// object's footprint (where they would create heavily-overlapping Gaussians
+/// that interfere via additive splat and prevent convergence).
+///
+/// With SIGMA_INIT = 0.12 and a typical blob radius ≈ 0.18, a point at
+/// 0.40 from the blob centre falls at ~2.2σ where the Gaussian value is
+/// ~exp(-2.4) ≈ 0.09 ≈ BIRTH_RESIDUAL_MIN — right at the noise floor.
+/// So BIRTH_CANDIDATE_SEP = 0.40 guarantees that a second candidate within
+/// the same single-blob footprint has residual < BIRTH_RESIDUAL_MIN and is
+/// never selected, giving effectively 1 birth/tick for single-blob scenes
+/// (preserving convergence) while allowing 3 births/tick when three distinct
+/// objects are ≥ 0.40 apart (the multi-object speed-up the feature targets).
+const BIRTH_CANDIDATE_SEP: f64 = BIRTH_MIN_SEP * 4.0; // 0.40 in normalised coords
 
 // --- Phase 2: per-Gaussian inverse-depth (ρ) via the SAME local parallax rule
 // the region depth observer used, now re-founded per primitive. ---
@@ -296,7 +314,25 @@ impl GaussianField {
         }
     }
 
-    /// Birth a Gaussian at the peak unexplained residual; kill faded ones.
+    /// Birth up to BIRTH_PER_TICK Gaussians at the highest unexplained residual
+    /// peaks; kill any whose opacity has faded below OPACITY_DEATH.
+    ///
+    /// Multi-birth algorithm (greedy, BIRTH_PER_TICK rounds):
+    ///   Round k: scan all pixels for the highest-magnitude residual that is
+    ///     ≥ BIRTH_CANDIDATE_SEP away from all previously selected candidates.
+    ///   After all rounds: for each selected peak, attempt a birth, checking
+    ///     BIRTH_MIN_SEP against active Gaussians (including ones born this tick).
+    ///
+    /// Two separate thresholds:
+    ///   BIRTH_CANDIDATE_SEP (0.40) — inter-candidate gap in greedy scan.
+    ///     Large enough that candidates always come from distinct objects.
+    ///   BIRTH_MIN_SEP (0.10) — gap vs ACTIVE Gaussians when birthing.
+    ///     Finer grain, prevents redundant spawning within an explained object.
+    ///
+    /// This produces up to BIRTH_PER_TICK births per tick on multi-object scenes,
+    /// while falling back to 1 birth per tick on single-object scenes (preserving
+    /// convergence quality) — reducing scene-coverage latency without violating the
+    /// pool cap or the spatial non-max suppression prior.
     fn birth_death(&mut self, target: &[f64], residual: &[f64]) {
         // Death: deactivate any Gaussian whose presence has decayed away.
         for g in self.gaussians.iter_mut() {
@@ -305,50 +341,84 @@ impl GaussianField {
                 g.opacity = 0.0;
             }
         }
-        // Birth: find the pixel with the largest residual magnitude (summed over
-        // channels) and, if it is unexplained enough and a slot is free, seed a
-        // Gaussian there colored like the target.
-        let mut best_mag = BIRTH_RESIDUAL_MIN;
-        let mut best_p: Option<usize> = None;
-        for p in 0..GAUSS_PIX {
-            let mag = residual[p].abs() + residual[GAUSS_PIX + p].abs() + residual[2 * GAUSS_PIX + p].abs();
-            if mag > best_mag {
-                best_mag = mag;
-                best_p = Some(p);
+
+        // Birth: greedy selection of up to BIRTH_PER_TICK spatially-separated
+        // peak-residual pixels.  We run BIRTH_PER_TICK rounds; each round finds
+        // the global argmax of the residual that is ≥ BIRTH_MIN_SEP from all
+        // previously selected candidates.  This is O(BIRTH_PER_TICK × GAUSS_PIX)
+        // ≈ 3 × 76 800 iterations per tick at 30 Hz — negligible.
+        let mut selected: Vec<(f64, usize)> = Vec::with_capacity(BIRTH_PER_TICK);
+
+        for _ in 0..BIRTH_PER_TICK {
+            let mut round_best_mag = BIRTH_RESIDUAL_MIN;
+            let mut round_best_p: Option<usize> = None;
+            for p in 0..GAUSS_PIX {
+                let mag = residual[p].abs()
+                    + residual[GAUSS_PIX + p].abs()
+                    + residual[2 * GAUSS_PIX + p].abs();
+                if mag <= round_best_mag {
+                    continue;
+                }
+                let px = p % GAUSS_REC_W;
+                let py = p / GAUSS_REC_W;
+                let bx = (px as f64 + 0.5) / GAUSS_REC_W as f64;
+                let by = (py as f64 + 0.5) / GAUSS_REC_H as f64;
+                // Must be ≥ BIRTH_CANDIDATE_SEP away from every already-selected
+                // candidate.  BIRTH_CANDIDATE_SEP > BIRTH_MIN_SEP so that the
+                // multiple candidates come from truly distinct objects rather than
+                // from overlapping peaks within the same object's footprint.
+                let sep_ok = selected.iter().all(|(_, q)| {
+                    let qx = (*q % GAUSS_REC_W) as f64 / GAUSS_REC_W as f64;
+                    let qy = (*q / GAUSS_REC_W) as f64 / GAUSS_REC_H as f64;
+                    (bx - qx).powi(2) + (by - qy).powi(2)
+                        >= BIRTH_CANDIDATE_SEP * BIRTH_CANDIDATE_SEP
+                });
+                if sep_ok {
+                    round_best_mag = mag;
+                    round_best_p = Some(p);
+                }
+            }
+            match round_best_p {
+                Some(p) => selected.push((round_best_mag, p)),
+                None => break, // no more qualifying peaks
             }
         }
-        let Some(p) = best_p else { return };
-        let px = p % GAUSS_REC_W;
-        let py = p / GAUSS_REC_W;
-        let bx = (px as f64 + 0.5) / GAUSS_REC_W as f64;
-        let by = (py as f64 + 0.5) / GAUSS_REC_H as f64;
-        // Spatial non-max suppression: do not spawn where an active Gaussian
-        // already sits — prevents redundant additive stacking (a minimal
-        // competition prior; full lateral inhibition is increment 2).
-        if self.gaussians.iter().any(|g| {
-            g.active && ((g.mu_x - bx).powi(2) + (g.mu_y - by).powi(2)) < BIRTH_MIN_SEP * BIRTH_MIN_SEP
-        }) {
-            return;
+
+        // Attempt to birth each selected candidate.
+        for (_, p) in selected {
+            let px = p % GAUSS_REC_W;
+            let py = p / GAUSS_REC_W;
+            let bx = (px as f64 + 0.5) / GAUSS_REC_W as f64;
+            let by = (py as f64 + 0.5) / GAUSS_REC_H as f64;
+            // Spatial non-max suppression vs ACTIVE Gaussians (including those
+            // born this tick): prevents redundant additive stacking.
+            if self.gaussians.iter().any(|g| {
+                g.active
+                    && (g.mu_x - bx).powi(2) + (g.mu_y - by).powi(2)
+                        < BIRTH_MIN_SEP * BIRTH_MIN_SEP
+            }) {
+                continue;
+            }
+            let Some(slot) = self.gaussians.iter().position(|g| !g.active) else {
+                break; // pool full → sparsity bound holds, stop all births
+            };
+            self.gaussians[slot] = Gaussian {
+                mu_x: bx,
+                mu_y: by,
+                sx: SIGMA_INIT,
+                sy: SIGMA_INIT,
+                color: [
+                    target[idx(0, px, py)],
+                    target[idx(1, px, py)],
+                    target[idx(2, px, py)],
+                ],
+                opacity: OPACITY_INIT,
+                active: true,
+                inv_depth: 1.0,
+                depth_observable: false,
+                prev_mu_x: bx,
+            };
         }
-        let Some(slot) = self.gaussians.iter().position(|g| !g.active) else {
-            return; // pool full → sparsity bound holds, no birth
-        };
-        self.gaussians[slot] = Gaussian {
-            mu_x: bx,
-            mu_y: by,
-            sx: SIGMA_INIT,
-            sy: SIGMA_INIT,
-            color: [
-                target[idx(0, px, py)],
-                target[idx(1, px, py)],
-                target[idx(2, px, py)],
-            ],
-            opacity: OPACITY_INIT,
-            active: true,
-            inv_depth: 1.0,
-            depth_observable: false,
-            prev_mu_x: bx,
-        };
     }
 }
 
@@ -601,6 +671,67 @@ mod tests {
         assert!(
             !field.gaussians[0].depth_observable,
             "must be marked unobservable when tt = None"
+        );
+    }
+
+    // ── P3: multi-birth per tick ───────────────────────────────────────────────
+
+    /// A target with 3 well-separated blobs (distance >> BIRTH_MIN_SEP = 0.10)
+    /// must produce at least 3 active Gaussians after a single tick, NOT just 1.
+    ///
+    /// Before the fix, birth_death births at most ONE Gaussian per tick.
+    /// After the fix (BIRTH_PER_TICK = 3), all three peaks are claimed at once.
+    #[test]
+    fn multi_birth_per_tick_populates_multiple_gaussians() {
+        // Three blobs at normalized positions with pairwise distance > 0.50,
+        // far beyond BIRTH_MIN_SEP = 0.10.
+        let b1 = blob_target(0.20, 0.20, 0.06, [0.9, 0.1, 0.1]);
+        let b2 = blob_target(0.50, 0.80, 0.06, [0.1, 0.9, 0.1]);
+        let b3 = blob_target(0.80, 0.30, 0.06, [0.1, 0.1, 0.9]);
+        let mut target = b1;
+        for i in 0..target.len() {
+            target[i] = (target[i] + b2[i] + b3[i]).min(1.0);
+        }
+
+        let mut field = GaussianField::new();
+        field.tick_grid(&target);
+
+        assert!(
+            field.active_count() >= 3,
+            "3 well-separated blobs must produce ≥3 Gaussians in one tick \
+             (multi-birth), got {}",
+            field.active_count()
+        );
+    }
+
+    /// When two candidate peaks are within BIRTH_MIN_SEP of each other, the
+    /// second must be suppressed. Only the dominant one of the close pair plus
+    /// any far blobs should be born.
+    #[test]
+    fn multi_birth_suppresses_adjacent_candidates() {
+        // b1 at (0.50,0.50), b2 at (0.55,0.50) → distance = 0.05 < BIRTH_MIN_SEP.
+        // b3 at (0.90,0.10) → far from both (distance ≈ 0.57).
+        let b1 = blob_target(0.50, 0.50, 0.04, [0.9, 0.1, 0.1]);
+        let b2 = blob_target(0.55, 0.50, 0.04, [0.9, 0.1, 0.1]); // too close to b1
+        let b3 = blob_target(0.90, 0.10, 0.04, [0.1, 0.1, 0.9]); // far
+        let mut target = b1;
+        for i in 0..target.len() {
+            target[i] = (target[i] + b2[i] + b3[i]).min(1.0);
+        }
+
+        let mut field = GaussianField::new();
+        field.tick_grid(&target);
+
+        // The close pair (b1,b2) contributes only ONE Gaussian. b3 contributes another.
+        // Total must be < 3 (i.e., the close-pair suppression works).
+        assert!(
+            field.active_count() < 3,
+            "blobs within BIRTH_MIN_SEP must be suppressed; expected <3 Gaussians, got {}",
+            field.active_count()
+        );
+        assert!(
+            field.active_count() >= 1,
+            "at least one Gaussian must be born"
         );
     }
 }

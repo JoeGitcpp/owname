@@ -386,6 +386,40 @@ impl Viewport {
             });
         }
 
+        // ── P1: Direct Gaussian visual-surprise injection ─────────────────────
+        // The Gaussian reconstruction error (recon_mse) measures what the
+        // visual model currently fails to explain.  Rather than waiting for
+        // the long indirect chain (push_observation → slot error → evidence
+        // tension → this function), inject a PREDICTION_WAVE_EVENT immediately
+        // when MSE exceeds the perceptibility threshold.  This gives the active
+        // surface a direct, low-latency "something interesting is happening
+        // visually" signal that keeps aperture_pressure non-zero on novel scenes.
+        //
+        // Amplitude = unit(mse * 2.5) so that mse=0.04 → amp≈0.10 (gentle) and
+        // mse=0.40 → amp≈1.0 (saturated).  Closure_affordance = 1 - mse: high
+        // error = scene not yet explained = low closure.  Write_risk scales with
+        // mse to gate probe output on uncertain representations.
+        let (gauss_mse, gauss_active_frac) = {
+            let field = self.gaussian_field.read().unwrap();
+            (
+                field.recon_mse,
+                field.active_count() as f64 / crate::phot_gaussian::GAUSS_CAP as f64,
+            )
+        };
+        if gauss_mse > 0.04 {
+            inputs.push(PredictionWaveInput {
+                source_kind: PREDICTION_WAVE_EVENT,
+                slot_id: gap.focus_slot_id,
+                edge_id: gap.focus_edge_id,
+                window_start_us: now_us.saturating_sub(33_333), // one visual frame (30 Hz)
+                window_end_us: now_us,
+                amplitude: unit(gauss_mse * 2.5),
+                resonance: gauss_active_frac,                   // more Gaussians = more resonance
+                closure_affordance: unit(1.0 - gauss_mse),      // low MSE = high closure
+                write_risk: unit(gauss_mse * 0.4),
+            });
+        }
+
         self.refresh_prediction_pressure_field(now_us, &inputs);
     }
 

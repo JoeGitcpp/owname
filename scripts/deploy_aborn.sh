@@ -38,7 +38,7 @@ echo "=== 3/4  Rebuild body on server (cargo --release, incremental) ==="
 # the gateway keeps spawning the OLD binary. cargo lives in ~/.cargo/bin, which a
 # non-interactive SSH shell does NOT have on PATH — source ~/.cargo/env first
 # (otherwise: `cargo: command not found`, exit 127).
-ssh $REMOTE "set -e; . \$HOME/.cargo/env; cd $DEPLOY_DIR/bionic_v0_src && cargo build --release --bin body && cp -f target/release/body $DEPLOY_DIR/body && echo 'body rebuilt'"
+ssh $REMOTE "set -e; . \$HOME/.cargo/env; cd $DEPLOY_DIR/bionic_v0_src && cargo build --release --bin body --bin sandbox_runner && cp -f target/release/body $DEPLOY_DIR/body && cp -f target/release/sandbox_runner $DEPLOY_DIR/sandbox_runner && echo 'body + sandbox_runner rebuilt'"
 
 echo "=== 4/4  Restart gateway ==="
 # Restarting a system service needs root; a plain `systemctl restart` over SSH is

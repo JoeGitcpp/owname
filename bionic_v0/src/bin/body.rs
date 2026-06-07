@@ -200,6 +200,14 @@ fn main() {
     if let Ok(state) = read_learned_bias_checkpoint(&learned_bias_paths.final_path) {
         *vp.learned_bias.write().unwrap() = state;
     }
+    // Nursery boot: cap action_suppression so the endogenous baseline can cross
+    // the 0.40 vocal gate. Without this, accumulated suppression from prior runs
+    // (observed at 0.155) keeps reflex_pressure at ~0.34 — just below the gate —
+    // and the body never makes its first sound (0×x=0 bootstrapping deadlock).
+    if body_args.nursery_bias {
+        let mut bias = vp.learned_bias.write().unwrap();
+        bias.action_suppression = bias.action_suppression.min(0.02);
+    }
     // C5: restore familiar objects so the responsible-person bond is
     // re-recognized after restart (死后保留).
     let familiar_paths =

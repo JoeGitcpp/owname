@@ -388,7 +388,33 @@ const wss = new WebSocketServer({
   perMessageDeflate: false,
 })
 
+// ── Server-side ping keepalive (mobile lock-screen guard) ─────────────────────
+// Mobile browsers (iOS Safari, Android Chrome) silently drop the WebSocket TCP
+// connection when the screen locks or the app goes to background.  The OS does
+// not send a proper WS close frame, so the server sees a sudden 1006 drop after
+// the NAT/firewall idle timeout (typically 30-90 s).
+//
+// Fix: send a WebSocket-level ping frame every 20 s.  The browser stack
+// responds automatically with a pong frame (built into the WS protocol, no JS
+// needed).  This resets NAT idle timers and lets the server detect truly dead
+// connections (no pong after 30 s → terminate).
+const PING_INTERVAL_MS = 20_000
+const PONG_TIMEOUT_MS  = 30_000
+setInterval(() => {
+  for (const client of wss.clients) {
+    if (client.readyState !== client.OPEN) continue
+    if (client._pongMissed) { client.terminate(); continue }
+    client._pongMissed = true
+    client.ping()
+  }
+}, PING_INTERVAL_MS)
+// Clear the missed-pong flag when a pong arrives.  Attached per-connection below.
+
 wss.on('connection', (ws, req) => {
+  // ── Ping keepalive: clear the missed-pong flag when the browser replies ───
+  ws._pongMissed = false
+  ws.on('pong', () => { ws._pongMissed = false })
+
   // ── Identity resolution: phone cookie > email cookie > anon ──────────────
   const identity    = resolveIdentity(req)
   const authSession = verifySessionCookie(req.headers.cookie)  // keep for legacy check

@@ -4120,9 +4120,19 @@ impl Viewport {
             bias.action_suppression,
         );
         let replay = self.global_attention.read().unwrap().replay_intensity;
+        // P2: active surface aperture → vocal raw_urge.
+        // The active surface integrates attention focus across multiple wave sources
+        // and retains pressure between orchestrator ticks via chain memory/reentry.
+        // Including it here lets sustained perceptual focus — even after raw
+        // prediction waves have decayed — continue to drive exploratory vocalization.
+        // Coefficient 0.60 keeps the contribution subordinate to strong direct
+        // evidence while allowing surface_probe ≥ 0.60 to independently cross
+        // the 0.36 burst threshold.
+        let surface_probe = self.active_surface.read().unwrap().effective_probe_pressure();
         let raw_urge = field_pressure
             .max(evidence_pressure)
             .max(gap_pressure)
+            .max(surface_probe * 0.60)
             .max(baseline)
             .max(replay * 0.25);
         // Innate survival reflex (治本 of the silent-run starvation): the inner

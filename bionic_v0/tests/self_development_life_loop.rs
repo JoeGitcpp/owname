@@ -167,11 +167,11 @@ fn repetitive_write_return_loop_raises_suppression_when_prediction_does_not_impr
     let state = vp.read_self_development();
     assert!(state.repetition_pressure > 0.45);
     assert!(state.output_suppression > 0.25);
-    assert!(state.exploratory_pressure < state.prediction_gap.max(0.01));
+    assert!(state.suppression_events > 0);
 }
 
 #[test]
-fn self_development_suppression_dampens_probe_output_without_disabling_probe_law() {
+fn output_suppression_tracks_repetition_without_gating_probe_drive() {
     let baseline = Viewport::new();
     seed_probe_pressure(&baseline, 3_000_000, 0.90);
     baseline.refresh_probe_law(3_000_100);
@@ -179,19 +179,22 @@ fn self_development_suppression_dampens_probe_output_without_disabling_probe_law
     let baseline_probe = baseline.read_probe_law();
     let baseline_epochs = baseline.read_action_output().n_write_epochs;
 
-    let damped = Viewport::new();
-    seed_probe_pressure(&damped, 3_000_000, 0.90);
-    seed_saturated_low_similarity_loop(&damped);
+    let repetitive = Viewport::new();
+    seed_probe_pressure(&repetitive, 3_000_000, 0.90);
+    seed_saturated_low_similarity_loop(&repetitive);
     for step in 0..10 {
-        damped.tick_self_development_from_substrate(3_000_000 + step * 33_000);
+        repetitive.tick_self_development_from_substrate(3_000_000 + step * 33_000);
     }
-    damped.refresh_probe_law(3_400_000);
-    damped.tick_probe_output_from_law(3_400_000);
-    let damped_probe = damped.read_probe_law();
+    repetitive.refresh_probe_law(3_400_000);
+    repetitive.tick_probe_output_from_law(3_400_000);
+    let repetitive_probe = repetitive.read_probe_law();
 
     assert!(baseline_epochs > 0);
-    assert!(damped.read_self_development().output_suppression > 0.25);
-    assert!(damped_probe.intensity < baseline_probe.intensity * 0.75);
+    assert!(repetitive.read_self_development().output_suppression > 0.25);
+    assert!(
+        (repetitive_probe.intensity - baseline_probe.intensity).abs() < 0.05,
+        "probe drive must come from substrate pressure, not output_suppression gating"
+    );
 }
 
 #[test]

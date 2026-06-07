@@ -102,13 +102,11 @@ impl SelfDevelopmentState {
         self.repetition_pressure = ema(self.repetition_pressure, repetition_input, 0.30);
 
         let suppression_input =
-            unit(self.repetition_pressure * (1.0 - 0.25 * self.familiarity_pressure));
+            unit(self.repetition_pressure * (1.0 - 0.55 * self.familiarity_pressure));
         self.output_suppression = ema(self.output_suppression, suppression_input, 0.35);
 
         self.exploratory_pressure = unit(
-            gap.max(sample.field_pressure)
-                * (1.0 - 0.75 * self.output_suppression)
-                * (1.0 - 0.20 * self.familiarity_pressure),
+            gap.max(sample.field_pressure) * (1.0 - 0.20 * self.familiarity_pressure),
         );
 
         let quiet_load = unit(1.0 - loop_load);
@@ -143,8 +141,7 @@ impl SelfDevelopmentState {
         self.solitary_growth_gate_pass = u8::from(
             self.solitary_growth_score > 0.35
                 && self.room_familiarity > 0.30
-                && self.repetition_pressure < 0.35
-                && self.output_suppression < 0.45,
+                && self.repetition_pressure < 0.35,
         );
 
         if self.output_suppression > 0.50 {

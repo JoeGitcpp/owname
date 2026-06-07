@@ -33,8 +33,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::adapter::ModalityAdapter;
-use crate::viewport::Viewport;
-use crate::{MOD_VIB, MOD_PHOT, VIB_BANDS};
+use crate::viewport::{EventEvidence, HealthState, SlotClaim, SpatialEvidence, Viewport};
+use crate::{MOD_VIB, MOD_PHOT, PHOT_BANDS, VIB_BANDS};
 
 /// Sample rate for vocal PCM frames sent to the gateway.
 pub const VOCAL_SAMPLE_RATE: u32 = 44_100;
@@ -150,6 +150,16 @@ pub struct NetSensesAdapter {
     smoothed_energy: f64,
     /// EMA of VIB surprise (energy change) — accompanies the nominated event.
     smoothed_surprise: f64,
+    /// EMA of PHOT energy (squared luma) — drives phot event nomination.
+    /// Hardware PhotAdapter derives this from motion regions; headless path
+    /// derives it from the frame's luma field (set by nursery_feeder proportional
+    /// to acoustic level). Without this, ambient_phot.event_energy stays 0 and
+    /// phot_structure_observed never flips → stable_recurrence stuck at 0.006.
+    smoothed_phot_energy: f64,
+    /// EMA of PHOT surprise (luma change between ticks).
+    smoothed_phot_surprise: f64,
+    /// Whether we have processed at least one frame (for warmup Quiet state).
+    phot_has_prev: bool,
 }
 
 impl NetSensesAdapter {
@@ -203,6 +213,9 @@ impl NetSensesAdapter {
             vocal_tx: vocal_tx.clone(),
             smoothed_energy: 0.0,
             smoothed_surprise: 0.0,
+            smoothed_phot_energy: 0.0,
+            smoothed_phot_surprise: 0.0,
+            phot_has_prev: false,
         };
         (adapter, vocal_tx)
     }
@@ -215,7 +228,7 @@ impl NetSensesAdapter {
 impl ModalityAdapter for NetSensesAdapter {
     fn modality_bit(&self) -> u8 { MOD_VIB | MOD_PHOT }
     fn writes_ambient(&self) -> bool { true }
-    fn writes_slots(&self)   -> bool { false }
+    fn writes_slots(&self)   -> bool { true }
     fn tick_hz(&self) -> u32 { 20 }
 
     fn tick(&mut self, vp: &Arc<Viewport>, now_us: u64) {
@@ -250,6 +263,37 @@ impl ModalityAdapter for NetSensesAdapter {
             if is_event { Some(now_us) } else { None },
             is_event,
         );
+
+        // ── VIB slot claiming (headless parity with VibAdapter) ─────────────
+        // Without slot claiming: no active edges → slot_scores = 0 →
+        // routing_focus_slot_ids = [-1,...] → top_slot = -1 →
+        // routing_stability = 0 → stable_recurrence stays at floor 0.006.
+        if is_event {
+            let ambient = vp.read_ambient();
+            let vib_ev = EventEvidence {
+                modality_bit: MOD_VIB,
+                event_t_us: now_us,
+                event_energy: self.smoothed_energy,
+                surprise: self.smoothed_surprise,
+                spatial: None,
+                nomination_seq_hint: ambient.nomination_seq,
+            };
+            if let SlotClaim::Reused(sid) | SlotClaim::Allocated(sid) =
+                vp.claim_slot_for_event(&vib_ev)
+            {
+                let mut vib_pred = [0.0f64; VIB_BANDS];
+                let mut vib_err  = [0.0f64; VIB_BANDS];
+                let mut vib_surp = [0.0f64; VIB_BANDS];
+                for axis in 0..VIB_BANDS {
+                    let (_a, _b, s, last_err, _mse, _u) = vp.read_predictor(axis);
+                    vib_surp[axis] = s;
+                    vib_err[axis]  = last_err;
+                }
+                vp.write_slot_vib(sid, now_us, &vib_bands, &vib_pred, &vib_err, &vib_surp);
+                vp.refresh_slot_fusion(sid, MOD_VIB, now_us);
+                vp.refresh_slot_high_layer(sid, now_us);
+            }
+        }
 
         // ── PHOT: push visual signals as vision axes ────────────────────────
         // Browser sends a 160×120 RGB planar grid.  We map it to the 4×4
@@ -290,11 +334,132 @@ impl ModalityAdapter for NetSensesAdapter {
             }
         }
 
+        // ── PHOT ambient (headless parity with hardware PhotAdapter) ───────
+        // Hardware PhotAdapter detects motion regions from consecutive camera
+        // frames and calls write_ambient_for(MOD_PHOT, ...). In headless mode
+        // no camera runs, so we derive phot ambient from the frame's luma field
+        // (nursery_feeder sets luma ∝ acoustic level: 0.06 quiet → 0.16 at
+        // peak tone). Squared luma as energy proxy:
+        //   quiet: 0.06² = 0.0036  >>  EVENT_NOMINATION_THRESHOLD (4e-6)  → event
+        //   tone:  0.16² = 0.0256                                          → event
+        // This immediately flips phot_structure_observed = 1, which is the
+        // prerequisite for routing_stability and stable_recurrence to grow.
+        let phot_luma    = frame.luma as f64;
+        let phot_instant = phot_luma * phot_luma;
+        let phot_surprise = (phot_instant - self.smoothed_phot_energy).abs();
+        let phot_alpha = 0.15_f64;
+        self.smoothed_phot_energy   = (1.0 - phot_alpha) * self.smoothed_phot_energy
+                                      + phot_alpha * phot_instant;
+        self.smoothed_phot_surprise = (1.0 - phot_alpha) * self.smoothed_phot_surprise
+                                      + phot_alpha * phot_surprise;
+        let phot_was_warmed = self.phot_has_prev;
+        let is_phot_event = self.smoothed_phot_energy > crate::EVENT_NOMINATION_THRESHOLD;
+        if !self.phot_has_prev {
+            // First tick: publish QUIET so the health state is initialised,
+            // then flip the flag so subsequent ticks publish real data.
+            self.phot_has_prev = true;
+            vp.write_ambient_for(crate::MOD_PHOT, 0.0, 0.0, None, false);
+            vp.set_phot_health(HealthState::Quiet);
+        } else {
+            vp.write_ambient_for(
+                crate::MOD_PHOT,
+                self.smoothed_phot_energy,
+                self.smoothed_phot_surprise,
+                if is_phot_event { Some(now_us) } else { None },
+                is_phot_event,
+            );
+            vp.set_phot_health(if is_phot_event {
+                HealthState::Ok
+            } else {
+                HealthState::Quiet
+            });
+        }
+
         // ── Gaussian visual field (headless) ────────────────────────────────
         // Feed the 160×120 RGB grid into the Gaussian field so the surface
         // ticker can render a soft, organic splatted reconstruction of what
         // the body currently perceives through the browser camera.
         vp.tick_gaussian_field_from_net(&frame.grid, now_us);
+
+        // ── PHOT slot claiming (headless parity with RealPhotAdapter) ────────
+        // Claim TWO phot slots at horizontally opposing spatial positions.
+        //
+        // Design note: a single whole-field PHOT claim cross-modally merges
+        // with the VIB slot (score > CLAIM_REUSE_MIN_SCORE = 0.50), leaving
+        // only ONE active slot. With a single slot there are no directed
+        // edges (edges need src ≠ dst), so slot_scores stay 0,
+        // routing_focus_slot_ids[0] = -1, routing_stability = 0, and
+        // stable_recurrence is pinned at its 0.006 mathematical floor.
+        //
+        // Two claims at pos_x = 0.25 and pos_x = 0.75 are separated by
+        // distance 0.50 > SAME_MODAL_SPATIAL_DIST (0.45).  The first claim
+        // merges cross-modally into the VIB slot; the second claim finds only
+        // a same-modal PHOT slot (now at 0.25) and the spatial hard-gate
+        // blocks reuse, so a fresh second slot is allocated.  Result: 2 active
+        // slots → 2 directed edges → routing_stability can build.
+        if is_phot_event && phot_was_warmed {
+            let luma   = frame.luma   as f64;
+            let motion = frame.motion as f64;
+            let rms_proxy = self.smoothed_phot_energy.sqrt().clamp(0.0, 1.0);
+
+            // Compute left-half and right-half average luma from the RGB grid.
+            // Gives each region a distinct brightness signal so the predictor
+            // sees genuine per-region variance rather than identical inputs.
+            let half = GRID_PIXELS / 2; // 9600 pixels per half-row
+            let mut left_sum  = 0.0f32;
+            let mut right_sum = 0.0f32;
+            for row in 0..GRID_H {
+                let row_base = row * GRID_W;
+                for col in 0..(GRID_W / 2) {
+                    let i = row_base + col;
+                    left_sum  += (frame.grid[i]
+                        + frame.grid[GRID_PIXELS + i]
+                        + frame.grid[2 * GRID_PIXELS + i]) / 3.0;
+                }
+                for col in (GRID_W / 2)..GRID_W {
+                    let i = row_base + col;
+                    right_sum += (frame.grid[i]
+                        + frame.grid[GRID_PIXELS + i]
+                        + frame.grid[2 * GRID_PIXELS + i]) / 3.0;
+                }
+            }
+            let left_luma  = (left_sum  / half as f32) as f64;
+            let right_luma = (right_sum / half as f32) as f64;
+
+            for (pos_x, reg_luma) in [(0.25_f64, left_luma), (0.75_f64, right_luma)] {
+                let ambient = vp.read_ambient();
+                let phot_ev = EventEvidence {
+                    modality_bit: MOD_PHOT,
+                    event_t_us: now_us,
+                    event_energy: self.smoothed_phot_energy,
+                    surprise: self.smoothed_phot_surprise,
+                    spatial: Some(SpatialEvidence {
+                        pos_x,
+                        pos_y: 0.5,
+                        span_x: 0.45,
+                        span_y: 0.85,
+                        precision: 0.15,
+                    }),
+                    nomination_seq_hint: ambient.nomination_seq,
+                };
+                if let SlotClaim::Reused(sid) | SlotClaim::Allocated(sid) =
+                    vp.claim_slot_for_event(&phot_ev)
+                {
+                    vp.write_slot_spatial(sid, MOD_PHOT, now_us,
+                        pos_x, 0.5, 0.45, 0.85, 0.15);
+                    // Synthesise PHOT_BANDS (4) spectral bands from per-region signals.
+                    let phot_obs: [f64; PHOT_BANDS] = [
+                        reg_luma,
+                        motion,
+                        (reg_luma * 0.7 + motion * 0.3).clamp(0.0, 1.0),
+                        rms_proxy,
+                    ];
+                    vp.update_slot_phot_with_predictor(sid, now_us, &phot_obs);
+                    vp.refresh_slot_fusion(sid, MOD_PHOT, now_us);
+                    vp.refresh_slot_high_layer(sid, now_us);
+                }
+            }
+        }
     }
 }
 
@@ -398,6 +563,13 @@ impl SurfaceSender {
         }
         let recon = field.splat();  // 3×GAUSS_PIX planar f64 RGB in [0, 1]
 
+        // Auto-contrast: find the peak value across all channels and scale up so
+        // the brightest pixel maps to 1.0.  Cap amplification at 6× so a nearly-
+        // black frame (very dark room) doesn't blow out to white noise.  This keeps
+        // the surface visible regardless of ambient light level.
+        let peak = recon.iter().cloned().fold(0.0f64, f64::max);
+        let scale = if peak > 0.01 { (1.0 / peak).min(6.0) } else { 1.0 };
+
         // Nearest-neighbour upscale from Gaussian rec dims → SURF_W×SURF_H (320×180).
         let frame_bytes = 5 + SURF_W * SURF_H * 4;
         let mut buf = Vec::with_capacity(frame_bytes);
@@ -409,9 +581,9 @@ impl SurfaceSender {
             for sx in 0..SURF_W {
                 let gx  = sx * GAUSS_REC_W / SURF_W;
                 let i   = gy * GAUSS_REC_W + gx;
-                let r   = (recon[i].clamp(0.0, 1.0) * 255.0) as u8;
-                let g   = (recon[GAUSS_PIX + i].clamp(0.0, 1.0) * 255.0) as u8;
-                let b   = (recon[2 * GAUSS_PIX + i].clamp(0.0, 1.0) * 255.0) as u8;
+                let r   = ((recon[i]            * scale).clamp(0.0, 1.0) * 255.0) as u8;
+                let g   = ((recon[GAUSS_PIX + i]* scale).clamp(0.0, 1.0) * 255.0) as u8;
+                let b   = ((recon[2*GAUSS_PIX+i]* scale).clamp(0.0, 1.0) * 255.0) as u8;
                 buf.extend_from_slice(&[r, g, b, 255]);
             }
         }

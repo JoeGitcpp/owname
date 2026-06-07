@@ -73,15 +73,13 @@ fn sample_snapshot(snap: &SnapshotData) -> AllostaticSample {
         snap.self_development
             .repetition_pressure
             .max(correction_load)
-            .max(stress_load * demand)
-            .max(snap.self_development.output_suppression * (1.0 - support * 0.50)),
+            .max(stress_load * demand),
     );
     let reserve_level = unit(1.0 - recovery_debt.max(stress_load * 0.70));
     let bearing_capacity = support;
     let protective_limit = unit(
-        snap.self_development
-            .output_suppression
-            .max(snap.probe_law.suppression)
+        snap.probe_law
+            .suppression
             .max(recovery_debt * 0.72 + stress_load * 0.28),
     );
     let expression_gain = unit(
