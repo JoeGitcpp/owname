@@ -76,7 +76,13 @@ impl Ar2Predictor {
             };
             if observed_seq > pp.seq_at_prediction && t_now >= pp.target_t_us {
                 let err = x_now - pp.predicted_value;
-                let eff_lr = self.base_lr * surprise;
+                // A3 developmental precision schedule: one shared clock makes
+                // the local Widrow-Hoff step coarse when naive (m=0 → larger
+                // effective lr, breaks the 0×x=0 bootstrap) and anneals to the
+                // existing hand-tuned rate at m=1 (scale exactly 1.0). A
+                // continuous local scalar only — never a capability gate.
+                let m = vp.developmental_maturity();
+                let eff_lr = self.base_lr * surprise * crate::ar2_lr_scale(m);
                 let da = eff_lr * err * pp.used_x0;
                 let db = eff_lr * err * pp.used_x1;
                 self.a = (self.a + da).clamp(-self.clip, self.clip);

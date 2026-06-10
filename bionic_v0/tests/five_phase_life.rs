@@ -73,6 +73,11 @@ fn empty_snapshot() -> SnapshotData {
         audio_raw_last_clock_us: 0,
         slot_xlayers: Vec::new(),
         slot_towers: Vec::new(),
+        thread_fault: false,
+        thread_fault_count: 0,
+        dual_drive: Default::default(),
+        axis_xlayers: Vec::new(),
+        developmental_maturity: 0.0,
     }
 }
 
@@ -87,7 +92,6 @@ fn five_phase_life_scores_are_bounded_and_observer_side() {
     snap.self_development.exploratory_pressure = 0.58;
     snap.self_development.stable_recurrence = 0.63;
     snap.self_development.familiarity_pressure = 0.57;
-    snap.self_development.output_suppression = 0.20;
 
     let evidence = summarize_five_phase_life([snap].iter(), 1, 0);
 
@@ -117,7 +121,6 @@ fn fire_is_insufficient_when_pressure_has_no_manifestation() {
 fn metal_excess_flags_when_suppression_blocks_wood_and_fire() {
     let mut snap = empty_snapshot();
     snap.probe_law.suppression = 0.96;
-    snap.self_development.output_suppression = 0.94;
 
     let evidence = summarize_five_phase_life([snap].iter(), 1, 0);
 

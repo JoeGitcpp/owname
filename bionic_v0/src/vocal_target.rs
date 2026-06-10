@@ -4,6 +4,9 @@ pub struct VocalTargetState {
     pub pitch_hint: f64,
     pub resonance_hint: f64,
     pub envelope_hint: f64,
+    /// P3 acoustic loop: full 16-band target contour, retained for band-wise
+    /// self↔target comparison. The 2 scalars above are coarse derivations of this.
+    pub target_bands: [f64; crate::VIB_BANDS],
     pub last_update_t_us: u64,
 }
 
@@ -15,11 +18,13 @@ impl VocalTargetState {
         pitch: f64,
         resonance: f64,
         envelope: f64,
+        bands: [f64; crate::VIB_BANDS],
     ) {
         self.active_energy = energy;
         self.pitch_hint = pitch;
         self.resonance_hint = resonance;
         self.envelope_hint = envelope;
+        self.target_bands = bands;
         self.last_update_t_us = now_us;
     }
 

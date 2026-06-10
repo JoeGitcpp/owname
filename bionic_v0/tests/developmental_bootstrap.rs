@@ -14,8 +14,16 @@
 
 use std::sync::Arc;
 
+use bionic_v0::learned_bias::{
+    read_learned_bias_checkpoint, write_learned_bias_checkpoint, LearnedBiasCheckpointPaths,
+    LearnedBiasState,
+};
+use bionic_v0::predictor::Ar2Predictor;
 use bionic_v0::viewport::Viewport;
-use bionic_v0::{binding_align_min, binding_deviate_max, MOD_VIB};
+use bionic_v0::{
+    ar2_lr_scale, binding_align_min, binding_deviate_max, vpc_prior_gain_scale,
+    AR2_LR_SCALE_NAIVE, MOD_VIB, VPC_PRIOR_GAIN_SCALE_NAIVE,
+};
 
 #[test]
 fn maturity_clock_is_monotone_saturating_and_bounded() {
@@ -101,5 +109,146 @@ fn external_sound_with_idle_organ_is_not_counted_as_self_play() {
         vp.read_learned_bias().vocal_efficacy,
         0.0,
         "external sound (idle organ) must not be credited as vocal self-play"
+    );
+}
+
+// --- A3: maturity persistence (跨重启继承) + precision annealing schedule ---
+
+fn temp_checkpoint_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "bionic_a3_{tag}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn learned_bias_v5_roundtrip_preserves_developmental_maturity() {
+    let dir = temp_checkpoint_dir("roundtrip");
+    let paths = LearnedBiasCheckpointPaths::new(&dir);
+
+    let state = LearnedBiasState {
+        developmental_maturity: 0.37,
+        ..LearnedBiasState::default()
+    };
+    write_learned_bias_checkpoint(&state, &paths).unwrap();
+    let read_back = read_learned_bias_checkpoint(&paths.final_path).unwrap();
+    assert_eq!(
+        read_back.developmental_maturity, 0.37,
+        "maturity must survive a checkpoint roundtrip losslessly"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn learned_bias_v4_bytes_are_rejected_as_invalid_data() {
+    let dir = temp_checkpoint_dir("v4_reject");
+    let paths = LearnedBiasCheckpointPaths::new(&dir);
+
+    let state = LearnedBiasState {
+        developmental_maturity: 0.9,
+        ..LearnedBiasState::default()
+    };
+    write_learned_bias_checkpoint(&state, &paths).unwrap();
+
+    // Forge a v4 file: same magic, version u64 (bytes 8..16) patched to 4.
+    let mut bytes = std::fs::read(&paths.final_path).unwrap();
+    bytes[8..16].copy_from_slice(&4u64.to_le_bytes());
+    std::fs::write(&paths.final_path, &bytes).unwrap();
+
+    let err = read_learned_bias_checkpoint(&paths.final_path)
+        .expect_err("a v4 checkpoint must be rejected (newborn fallback), not misread");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::InvalidData,
+        "old-version bytes must surface as InvalidData"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restore_maturity_clamps_and_newborn_default_holds() {
+    // No checkpoint involved at all: a fresh Viewport is a naive newborn.
+    let vp = Arc::new(Viewport::new());
+    assert_eq!(vp.developmental_maturity(), 0.0, "newborn default must stay 0.0");
+
+    vp.restore_maturity(0.5);
+    assert_eq!(vp.developmental_maturity(), 0.5);
+
+    vp.restore_maturity(-1.0);
+    assert_eq!(vp.developmental_maturity(), 0.0, "restore clamps below to 0");
+
+    vp.restore_maturity(2.0);
+    assert_eq!(vp.developmental_maturity(), 1.0, "restore clamps above to 1");
+}
+
+#[test]
+fn precision_annealing_schedules_are_loose_naive_exact_mature_and_monotone() {
+    // m=0: tolerant (coarse) values, strictly looser than mature.
+    assert_eq!(ar2_lr_scale(0.0), AR2_LR_SCALE_NAIVE);
+    assert!(AR2_LR_SCALE_NAIVE > 1.0, "naive AR-2 lr must be amplified");
+    assert_eq!(vpc_prior_gain_scale(0.0), VPC_PRIOR_GAIN_SCALE_NAIVE);
+    assert!(VPC_PRIOR_GAIN_SCALE_NAIVE > 1.0, "naive prior gain must be amplified");
+
+    // m=1: exactly back to the existing hard-coded behaviour (scale ≈ 1.0).
+    assert!((ar2_lr_scale(1.0) - 1.0).abs() < 1e-12);
+    assert!((vpc_prior_gain_scale(1.0) - 1.0).abs() < 1e-12);
+
+    // Monotone tightening with maturity (and clamped outside [0,1]).
+    let mut prev_lr = ar2_lr_scale(0.0);
+    let mut prev_gain = vpc_prior_gain_scale(0.0);
+    for i in 1..=10 {
+        let m = i as f64 / 10.0;
+        let lr = ar2_lr_scale(m);
+        let gain = vpc_prior_gain_scale(m);
+        assert!(lr <= prev_lr, "ar2_lr_scale must anneal monotonically");
+        assert!(gain <= prev_gain, "vpc_prior_gain_scale must anneal monotonically");
+        prev_lr = lr;
+        prev_gain = gain;
+    }
+    assert_eq!(ar2_lr_scale(-3.0), ar2_lr_scale(0.0));
+    assert_eq!(ar2_lr_scale(7.0), ar2_lr_scale(1.0));
+}
+
+/// Honest observation of the annealing dynamic on one axis (no behaviour
+/// target): the same sample sequence is fed to a naive (m=0) and a mature
+/// (m=1) body; after one resolved AR-2 update the naive body's coefficients
+/// must have moved further (larger effective learning rate). Directional
+/// numeric relation only.
+#[test]
+fn naive_body_takes_coarser_ar2_steps_than_mature_body() {
+    let run = |maturity: f64| -> f64 {
+        let vp = Arc::new(Viewport::new());
+        vp.restore_maturity(maturity);
+        vp.set_surprise(0, 1.0); // identical nonzero surprise for both bodies
+        let mut p = Ar2Predictor::new(0);
+
+        vp.push_observation(0, 10_000, 0.10);
+        p.tick(&vp); // insufficient context
+        vp.push_observation(0, 20_000, 0.20);
+        p.tick(&vp); // open publication (horizon 10ms → target 30_000)
+        vp.push_observation(0, 30_000, 0.50);
+        p.tick(&vp); // resolves → one Widrow-Hoff step scaled by ar2_lr_scale(m)
+
+        let (a, b, _, _, _, _) = vp.read_predictor(0);
+        a.abs() + b.abs()
+    };
+
+    let naive_step = run(0.0);
+    let mature_step = run(1.0);
+    assert!(
+        naive_step > 0.0 && mature_step > 0.0,
+        "both bodies must learn from the same surprise: naive {naive_step}, mature {mature_step}"
+    );
+    assert!(
+        naive_step > mature_step,
+        "naive effective learning rate must exceed mature: naive {naive_step} vs mature {mature_step}"
     );
 }

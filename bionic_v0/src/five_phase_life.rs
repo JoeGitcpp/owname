@@ -112,11 +112,7 @@ fn earth_score(snap: &SnapshotData) -> f64 {
 }
 
 fn metal_score(snap: &SnapshotData) -> f64 {
-    unit(
-        snap.probe_law
-            .suppression
-            .max(snap.self_development.output_suppression),
-    )
+    unit(snap.probe_law.suppression)
 }
 
 fn water_score(snap: &SnapshotData) -> f64 {

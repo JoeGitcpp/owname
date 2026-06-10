@@ -5,14 +5,14 @@ use std::path::Path;
 use bionic_v0::snapshot::SnapshotData;
 
 pub fn session_header() -> &'static str {
-    "seq,clock_s,source_writes,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,egress_pressure,egress_deviation,pair_similarity,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,gap_p,gap_c,gap_r,gap_cycles,gap_samples,gap_slot,gap_edge,learned_axes,learned_event_total,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or"
+    "seq,clock_s,source_writes,code_frames,code_windows,egress_phase,egress_frames,egress_returns,egress_total_frames,egress_total_returns,egress_pressure,egress_deviation,pair_similarity,pairs,pair_total,pair_framed_byte_total,pair_other_total,probe_i,probe_o,evidence_p,gap_p,gap_c,gap_r,gap_cycles,gap_samples,gap_slot,gap_edge,learned_axes,learned_event_total,voc_tE,voc_tp,voc_tr,voc_ob,voc_op,voc_or,dd_conflict,dd_net_bond,maturity"
 }
 
 pub fn session_row(snap: &SnapshotData) -> String {
     let clock_s = (snap.clock_us.saturating_sub(snap.start_us)) as f64 * 1e-6;
     let latest_pair_similarity = latest_framed_byte_pair_similarity(snap);
     format!(
-        "{},{:.3},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+        "{},{:.3},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.4}",
         snap.seq,
         clock_s,
         snap.source_writes,
@@ -48,6 +48,9 @@ pub fn session_row(snap: &SnapshotData) -> String {
         snap.vocal_organ.breath_drive,
         snap.vocal_organ.pitch_tension,
         snap.vocal_organ.resonance_position,
+        snap.dual_drive.conflict,
+        snap.dual_drive.net_toward_bond,
+        snap.developmental_maturity,
     )
 }
 

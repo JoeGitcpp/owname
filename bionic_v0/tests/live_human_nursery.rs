@@ -74,6 +74,11 @@ fn make_empty_snapshot() -> SnapshotData {
         audio_raw_last_clock_us: 0,
         slot_xlayers: Vec::new(),
         slot_towers: Vec::new(),
+        thread_fault: false,
+        thread_fault_count: 0,
+        dual_drive: Default::default(),
+        axis_xlayers: Vec::new(),
+        developmental_maturity: 0.0,
     }
 }
 

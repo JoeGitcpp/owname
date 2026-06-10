@@ -167,7 +167,10 @@ impl NetSensesAdapter {
     /// The gateway is expected to connect shortly after the body starts.
     /// `vocal_tx` is shared with `NetVocalSink` so the vocal ticker can
     /// write PCM frames back to the gateway on the same connection.
-    pub fn new(socket_path: PathBuf) -> (Self, Arc<Mutex<Option<UnixStream>>>) {
+    pub fn new(
+        socket_path: PathBuf,
+        vp: Arc<Viewport>,
+    ) -> (Self, Arc<Mutex<Option<UnixStream>>>) {
         let latest: Arc<Mutex<SensesFrame>> = Arc::new(Mutex::new(SensesFrame::default()));
         let vocal_tx: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
 
@@ -175,21 +178,45 @@ impl NetSensesAdapter {
         let vocal_tx2 = vocal_tx.clone();
 
         // Accept a single gateway connection, read sensory frames, hand the
-        // write-end to the vocal sink.
-        std::thread::Builder::new()
+        // write-end to the vocal sink. Setup failures never panic: each one is
+        // recorded on the tier-0 hearing-fault axis and the setup is retried,
+        // so the sole headless sensory inlet can't be killed by a transient
+        // bind/accept error.
+        let vp_reader = vp.clone();
+        let spawned = std::thread::Builder::new()
             .name("net-senses-reader".into())
             .spawn(move || {
-                // Remove stale socket file if it exists.
-                let _ = std::fs::remove_file(&socket_path);
-                let listener = UnixListener::bind(&socket_path)
-                    .expect("net_adapter: bind Unix socket");
-                // Block until the gateway connects.
-                let (mut stream, _) = listener.accept()
-                    .expect("net_adapter: accept gateway connection");
-                // Hand a cloned write-end to the vocal sink.
-                let write_end = stream.try_clone()
-                    .expect("net_adapter: clone socket for vocal sink");
-                *vocal_tx2.lock().unwrap() = Some(write_end);
+                let (mut stream, write_end) = loop {
+                    // Remove stale socket file if it exists.
+                    let _ = std::fs::remove_file(&socket_path);
+                    let listener = match UnixListener::bind(&socket_path) {
+                        Ok(l) => l,
+                        Err(_) => {
+                            vp_reader.report_audio_error();
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            continue;
+                        }
+                    };
+                    // Block until the gateway connects.
+                    let stream = match listener.accept() {
+                        Ok((s, _)) => s,
+                        Err(_) => {
+                            vp_reader.report_audio_error();
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            continue;
+                        }
+                    };
+                    // Hand a cloned write-end to the vocal sink.
+                    match stream.try_clone() {
+                        Ok(w) => break (stream, w),
+                        Err(_) => {
+                            vp_reader.report_audio_error();
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            continue;
+                        }
+                    }
+                };
+                *vocal_tx2.lock().unwrap_or_else(|e| e.into_inner()) = Some(write_end);
 
                 // Read sensory frames from the gateway indefinitely.
                 let mut buf = vec![0u8; FRAME_BYTES];
@@ -197,16 +224,20 @@ impl NetSensesAdapter {
                     match stream.read_exact(&mut buf) {
                         Ok(()) => {
                             if let Some(frame) = parse_frame(&buf) {
-                                *latest2.lock().unwrap() = frame;
+                                *latest2.lock().unwrap_or_else(|e| e.into_inner()) = frame;
                             }
                         }
                         Err(_) => break, // gateway disconnected
                     }
                 }
                 // Gateway disconnected: clear the vocal sink so the ticker stops.
-                *vocal_tx2.lock().unwrap() = None;
-            })
-            .expect("net_adapter: spawn reader thread");
+                *vocal_tx2.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            });
+        if spawned.is_err() {
+            // Reader thread could not start at all: the rhythm is missing.
+            vp.mark_thread_fault();
+            vp.report_audio_error();
+        }
 
         let adapter = Self {
             latest,
@@ -221,7 +252,7 @@ impl NetSensesAdapter {
     }
 
     fn read_latest(&self) -> SensesFrame {
-        self.latest.lock().unwrap().clone()
+        self.latest.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 

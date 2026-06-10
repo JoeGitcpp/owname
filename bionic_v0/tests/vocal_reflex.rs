@@ -1,6 +1,10 @@
 use bionic_v0::action_output::ActionOutputPhase;
+use bionic_v0::learned_bias::{LearnedBiasState, SUPPRESSION_HALF_LIFE_US};
 use bionic_v0::prediction_pressure_field::{PredictionWaveInput, PREDICTION_WAVE_EVENT};
 use bionic_v0::viewport::Viewport;
+use bionic_v0::suppression_damp_floor;
+use bionic_v0::vocal_reflex::{VocalReflexDrive, VocalReflexState, SUPPRESSION_DAMP_FLOOR};
+use bionic_v0::SUPPRESSION_DAMP_FLOOR_MATURE;
 
 fn shock_wave(t_us: u64, amplitude: f64) -> PredictionWaveInput {
     PredictionWaveInput {
@@ -136,6 +140,195 @@ fn vocal_reflex_sources_do_not_introduce_emotion_or_text_ontology() {
             !lowered.contains(forbidden),
             "vocal reflex source must not introduce `{forbidden}`"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2 acceptance: observe the current numeric relation between suppression /
+// reflex_pressure / gate — NOT "verify the body vocalizes". The assertions
+// below only state that the 0×x=0 degenerate fixed point no longer exists.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn worst_case_suppression_still_has_a_gate_crossing_phase() {
+    // Newborn (familiarity=0, efficacy=0 → gate=0.40), action_suppression at
+    // its historically observed deadlock value (0.155) and at a stress value
+    // (0.5). Scan the 5s endogenous rhythm: there must EXIST a phase at which
+    // a quiescent reflex meeting the baseline pushes reflex_pressure above
+    // the gate. This asserts the *possibility* of crossing (fixed point gone),
+    // not that any particular tick must produce a burst.
+    let period_us: u64 = 5_000_000;
+    for &suppression in &[0.155_f64, 0.5_f64] {
+        let mut crossed = false;
+        for step in 0..200u64 {
+            let now_us = 10_000_000 + step * (period_us / 200);
+            // Newborn (maturity=0): floor at its widest B2 endpoint — behavior
+            // must be bit-for-bit identical to the pre-anneal constant.
+            let baseline = VocalReflexState::endogenous_baseline(
+                now_us,
+                0.0,
+                suppression,
+                suppression_damp_floor(0.0),
+            );
+            // Quiescent reflex state (rising-edge encounter with the rhythm).
+            let mut state = VocalReflexState::default();
+            let drive = VocalReflexDrive {
+                drive_pressure: baseline,
+                energy: 0.5,
+            };
+            state.tick_drive(now_us, drive, 0.0, suppression, 0.0);
+            if state.reflex_pressure > 0.40 {
+                crossed = true;
+                break;
+            }
+        }
+        assert!(
+            crossed,
+            "suppression={suppression}: no rhythm phase crosses the 0.40 gate — \
+             the 0×x=0 deadlock fixed point is back"
+        );
+    }
+}
+
+#[test]
+fn suppression_decays_by_pure_time_half_life() {
+    let mut bias = LearnedBiasState {
+        action_suppression: 0.5,
+        last_suppression_decay_us: 1_000_000,
+        ..LearnedBiasState::default()
+    };
+
+    // elapsed = 0 → unchanged.
+    bias.decay_vocal_suppression(1_000_000);
+    assert_eq!(bias.action_suppression, 0.5);
+
+    // Exactly one half-life → halves.
+    let one_tau = 1_000_000 + SUPPRESSION_HALF_LIFE_US as u64;
+    bias.decay_vocal_suppression(one_tau);
+    assert!(
+        (bias.action_suppression - 0.25).abs() < 1e-9,
+        "one half-life should halve suppression: {}",
+        bias.action_suppression
+    );
+
+    // Strictly decreasing and tending to 0 over many half-lives.
+    let before = bias.action_suppression;
+    bias.decay_vocal_suppression(one_tau + SUPPRESSION_HALF_LIFE_US as u64 * 40);
+    assert!(bias.action_suppression < before);
+    assert!(bias.action_suppression < 1e-9);
+}
+
+#[test]
+fn restart_first_decay_relaxes_stale_suppression() {
+    // last_suppression_decay_us is deliberately NOT persisted: after a restart
+    // it is 0, so the first decay sees a huge elapsed and relaxes any stale
+    // accumulated suppression — cross-restart accumulation is structurally
+    // impossible.
+    let mut bias = LearnedBiasState {
+        action_suppression: 0.155,
+        ..LearnedBiasState::default()
+    };
+    // Any realistic boot timestamp (1s of runtime, let alone epoch µs) is many
+    // half-lives.
+    bias.decay_vocal_suppression(SUPPRESSION_HALF_LIFE_US as u64 * 30);
+    assert!(
+        bias.action_suppression < 1e-9,
+        "stale suppression should relax on first post-restart decay: {}",
+        bias.action_suppression
+    );
+}
+
+#[test]
+fn damping_floor_does_not_keep_experienced_baseline_above_zero() {
+    // familiarity → 1 ⇒ exploration_drive → 0 dominates multiplicatively; the
+    // suppression damping floor must not prop the baseline up — it is not a
+    // gate that forces experienced systems to vocalize.
+    let period_us: u64 = 5_000_000;
+    for step in 0..200u64 {
+        let now_us = 20_000_000 + step * (period_us / 200);
+        let b = VocalReflexState::endogenous_baseline(now_us, 1.0, 0.0, SUPPRESSION_DAMP_FLOOR);
+        assert!(
+            b.abs() < 1e-12,
+            "experienced baseline should be zero at every phase, got {b}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2 enhancement acceptance: the suppression damping floor is annealed by the
+// developmental clock — a continuous numeric modulation, never an eligibility
+// gate. m=0 reproduces the B2 constant bit-for-bit; m=1 reduces to the
+// original un-floored damping math.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn damp_floor_schedule_endpoints_monotonicity_and_clamp() {
+    // Endpoints.
+    assert_eq!(suppression_damp_floor(0.0), 0.96);
+    assert_eq!(suppression_damp_floor(0.0), SUPPRESSION_DAMP_FLOOR);
+    assert_eq!(suppression_damp_floor(1.0), 0.45);
+    assert_eq!(suppression_damp_floor(1.0), SUPPRESSION_DAMP_FLOOR_MATURE);
+
+    // Strictly monotonically decreasing in m.
+    let mut prev = suppression_damp_floor(0.0);
+    for i in 1..=100u32 {
+        let m = i as f64 / 100.0;
+        let f = suppression_damp_floor(m);
+        assert!(f < prev, "floor must strictly narrow with the clock: m={m}, {f} !< {prev}");
+        prev = f;
+    }
+
+    // Input clamp to [0,1].
+    assert_eq!(suppression_damp_floor(-1.0), suppression_damp_floor(0.0));
+    assert_eq!(suppression_damp_floor(2.0), suppression_damp_floor(1.0));
+}
+
+#[test]
+fn mature_floor_is_mathematically_inert() {
+    // At m=1 the floor is 0.45 = 1 − 0.55·1.0 ≤ (1 − 0.55·s) for every
+    // s∈[0,1], so the floored baseline equals the ORIGINAL un-floored formula
+    // exactly — the mature body runs the pre-B2 damping math.
+    let period_us: u64 = 5_000_000;
+    let floor = suppression_damp_floor(1.0);
+    for s_step in 0..=20u64 {
+        let suppression = s_step as f64 / 20.0;
+        for phase_step in 0..50u64 {
+            let now_us = 30_000_000 + phase_step * (period_us / 50);
+            for &familiarity in &[0.0_f64, 0.3, 0.7] {
+                let floored = VocalReflexState::endogenous_baseline(
+                    now_us,
+                    familiarity,
+                    suppression,
+                    floor,
+                );
+                // Un-floored original: baseline * (1 − 0.55·s). Reconstruct it
+                // from the s=0 evaluation (damping term = 1.0 there).
+                let raw = VocalReflexState::endogenous_baseline(now_us, familiarity, 0.0, floor)
+                    * (1.0 - suppression * 0.55);
+                assert!(
+                    (floored - raw).abs() < 1e-12,
+                    "m=1 floor must be inert: s={suppression}, {floored} vs {raw}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn newborn_schedule_matches_b2_constant_bit_for_bit() {
+    // m=0 must reproduce the previous SUPPRESSION_DAMP_FLOOR behavior exactly,
+    // including the worst-case historical deadlock value still having a
+    // gate-crossing phase (the B2 guarantee is preserved unchanged).
+    let period_us: u64 = 5_000_000;
+    let floor = suppression_damp_floor(0.0);
+    for step in 0..200u64 {
+        let now_us = 40_000_000 + step * (period_us / 200);
+        for &s in &[0.0_f64, 0.0717, 0.155, 0.5, 1.0] {
+            let scheduled = VocalReflexState::endogenous_baseline(now_us, 0.0, s, floor);
+            let constant =
+                VocalReflexState::endogenous_baseline(now_us, 0.0, s, SUPPRESSION_DAMP_FLOOR);
+            assert_eq!(scheduled, constant);
+        }
     }
 }
 

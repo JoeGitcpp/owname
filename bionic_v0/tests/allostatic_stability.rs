@@ -45,7 +45,6 @@ fn moderate_demand_with_support_opens_overdrive_and_expression_gain() {
     snap.global_reasoning_memory.pattern_recurrence_score = 0.61;
     snap.self_development.familiarity_pressure = 0.60;
     snap.self_development.stable_recurrence = 0.64;
-    snap.self_development.output_suppression = 0.10;
     snap.probe_law.output_intensity = 0.42;
 
     let evidence = summarize_allostatic_stability([snap].iter(), 1, 0);
@@ -69,7 +68,6 @@ fn low_support_and_recovery_debt_raise_downshift() {
     snap.active_reasoning_gap.reentry_score = 0.0;
     snap.framed_byte_egress.correction_deviation = 0.80;
     snap.self_development.repetition_pressure = 0.78;
-    snap.self_development.output_suppression = 0.74;
     snap.self_development.familiarity_pressure = 0.03;
     snap.self_development.stable_recurrence = 0.0;
     snap.self_development.room_familiarity = 0.0;

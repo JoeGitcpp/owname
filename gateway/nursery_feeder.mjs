@@ -30,9 +30,10 @@
 import { spawn }            from 'node:child_process'
 import { createConnection } from 'node:net'
 import {
-  existsSync, mkdirSync, copyFileSync, readFileSync, rmSync,
+  existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, rmSync,
 }                           from 'node:fs'
 import { dirname, join }    from 'node:path'
+import { deserializeCorpus } from './audio_to_bands.mjs'
 
 // ── Frame format (must match net_adapter.rs / security.mjs) ───────────────────
 // net_adapter.rs layout (v2):
@@ -66,6 +67,8 @@ const SEED_DIR     = arg('seed', null)           // dir with learned_bias/vital_
 const DURATION_S   = parseInt(arg('duration', '0'), 10)  // 0 = forever
 const FOREVER      = args.includes('--forever') || DURATION_S === 0
 const HARVEST_S    = parseInt(arg('harvest', '120'), 10) // copy→master every N sec
+const CORPUS_PATH  = arg('corpus', null)         // human-speech corpus_frames.bin → real-audio curriculum
+let CORPUS = null                                // loaded utterances [{label, ticks}], or null
 
 function log(...a) {
   console.log(`[nursery ${new Date().toISOString()}] ${a.join(' ')}`)
@@ -212,28 +215,55 @@ function* glide(c0, c1, durMs, energy = 0.4) {
   }
 }
 
+// Multi-syllable "word" — short tones at distinct spectral centers in sequence.
+function* syllableWord(centers, syllableMs = 280, gapMs = 180, energy = 0.32, width = 0.14) {
+  for (let i = 0; i < centers.length; i++) {
+    yield* tone(centers[i], syllableMs, energy, width)
+    if (i < centers.length - 1) yield* silence(gapMs)
+  }
+}
+
 // One full curriculum pass. Each utterance repeated REPS× so the imitation loop
-// can hit converge_count≥3. Phases 1–4: foundational vowels; 5–6: finer targets
-// and turn-taking bursts. Analytic synthesis only — no TTS.
+// can hit converge_count≥3. Phases 1–6: foundational vowels; 7–10: word-like
+// targets aligned with training_corpus.json categories. Analytic synthesis only.
 const REPS = 3
-const REST_MS = 30000   // base quiet window between passes
-const RESERVE_LOW = 0.10
-const RESERVE_MED = 0.25   // trigger adaptive rest earlier while reserve is still thin
+const REST_MS = 25000   // base quiet window between passes (nursery env is generous)
+const RESERVE_LOW = 0.12
+const RESERVE_MED = 0.30   // only extend rests when genuinely tired
+const VITAL_SEED_RESERVE = 0.55
 
 function passRestMs(getReserve) {
   const reserve = getReserve()
   if (reserve == null) return REST_MS
-  if (reserve < RESERVE_LOW) return REST_MS + 20000
-  if (reserve < RESERVE_MED) return REST_MS + 12000
+  if (reserve < RESERVE_LOW) return REST_MS + 25000
+  if (reserve < RESERVE_MED) return REST_MS + 10000
   return REST_MS
 }
 
 function* adaptiveRest(getReserve, phaseLabel = '') {
   const reserve = getReserve()
   if (reserve == null || reserve >= RESERVE_MED) return
-  const extra = reserve < RESERVE_LOW ? 15000 : 8000
+  const extra = reserve < RESERVE_LOW ? 12000 : 6000
   if (phaseLabel) log(`adaptive_rest phase=${phaseLabel} reserve=${reserve.toFixed(4)} extra_ms=${extra}`)
   yield* silence(extra)
+}
+
+// Nursery sessions seed from master; bump depleted reserve so training starts fed.
+function boostVitalSeed(runtimeDir) {
+  const p = join(runtimeDir, 'vital_core.bin')
+  if (!existsSync(p)) return
+  try {
+    const buf = readFileSync(p)
+    if (buf.length < 41) return
+    const reserve = buf.readDoubleLE(16)
+    if (reserve >= VITAL_SEED_RESERVE) return
+    const patched = Buffer.from(buf)
+    patched.writeDoubleLE(VITAL_SEED_RESERVE, 16)
+    patched.writeDoubleLE(Math.min(buf.readDoubleLE(24), 0.05), 24)
+    patched[40] = 0 // Alive
+    writeFileSync(p, patched)
+    log(`boosted seed reserve ${reserve.toFixed(4)} → ${VITAL_SEED_RESERVE}`)
+  } catch {}
 }
 
 function* curriculumPass(getReserve = () => null) {
@@ -290,6 +320,70 @@ function* curriculumPass(getReserve = () => null) {
   }
   yield* adaptiveRest(getReserve, '6')
 
+  // Phase 7 — simple words (2–3 syllable spectral chains, corpus: simple_words)
+  const wordPatterns = [
+    [0.25, 0.55], [0.15, 0.45, 0.75], [0.35, 0.65],
+    [0.20, 0.50], [0.40, 0.70, 0.30], [0.55, 0.25],
+    [0.30, 0.60], [0.45, 0.15], [0.65, 0.35, 0.55],
+  ]
+  const WORD_REPS = 2
+  for (const syllables of wordPatterns) {
+    for (let r = 0; r < WORD_REPS; r++) {
+      yield* syllableWord(syllables, 260, 200, 0.30, 0.13)
+      yield* silence(600)
+    }
+  }
+  yield* adaptiveRest(getReserve, '7')
+
+  // Phase 8 — word pairs (two distinct targets, corpus: word_pairs)
+  const wordPairs = [
+    [[0.20, 0.45], [0.60, 0.80]], [[0.15, 0.35], [0.55, 0.75]],
+    [[0.30, 0.50], [0.70, 0.40]], [[0.25, 0.65], [0.45, 0.85]],
+    [[0.35, 0.55], [0.75, 0.25]], [[0.40, 0.60], [0.20, 0.80]],
+  ]
+  const PAIR_REPS = 2
+  for (const [a, b] of wordPairs) {
+    for (let r = 0; r < PAIR_REPS; r++) {
+      yield* syllableWord(a, 240, 180, 0.28, 0.12)
+      yield* silence(900)
+      yield* syllableWord(b, 240, 180, 0.28, 0.12)
+      yield* silence(700)
+    }
+  }
+  yield* adaptiveRest(getReserve, '8')
+
+  // Phase 9 — call and response (question rise + long wait + answer, corpus: call_and_response)
+  const callResponse = [
+    [0.25, 0.55], [0.30, 0.70], [0.20, 0.60], [0.35, 0.75],
+  ]
+  const CR_REPS = 2
+  for (const [call, answer] of callResponse) {
+    for (let r = 0; r < CR_REPS; r++) {
+      yield* glide(call, answer, 500, 0.30)
+      yield* silence(350)
+      yield* tone(answer, 400, 0.26, 0.12)
+      yield* silence(10000)
+      yield* tone(call, 350, 0.28, 0.14)
+      yield* silence(800)
+    }
+  }
+  yield* adaptiveRest(getReserve, '9')
+
+  // Phase 10 — simple sentences (longer chains, corpus: simple_sentences)
+  const sentences = [
+    [0.20, 0.40, 0.60, 0.45], [0.30, 0.50, 0.70, 0.55],
+    [0.15, 0.35, 0.55, 0.75, 0.40], [0.25, 0.45, 0.65],
+    [0.35, 0.55, 0.75, 0.50, 0.30],
+  ]
+  const SENT_REPS = 2
+  for (const chain of sentences) {
+    for (let r = 0; r < SENT_REPS; r++) {
+      yield* syllableWord(chain, 220, 160, 0.27, 0.11)
+      yield* silence(1200)
+    }
+  }
+  yield* adaptiveRest(getReserve, '10')
+
   // Rest between passes — quiet window so vital reserve recovers.
   const restMs = passRestMs(getReserve)
   if (restMs > REST_MS) log(`pass_rest reserve=${fmt(getReserve())} rest_ms=${restMs}`)
@@ -303,6 +397,7 @@ const MASTER_ARTIFACTS = [
   ['phoneme_memory.bin',  MASTER_DIR ? join(MASTER_DIR, 'master_phoneme_memory.bin') : null],
   ['familiar_objects.bin', MASTER_DIR ? join(MASTER_DIR, 'master_familiar_objects.bin') : null],
   ['vital_core.bin',      MASTER_DIR ? join(MASTER_DIR, 'master_vital_core.bin') : null],
+  ['vocal_memory.bin',    MASTER_DIR ? join(MASTER_DIR, 'master_vocal_memory.bin') : null],
 ]
 
 function harvestMasterArtifacts(runtimeDir) {
@@ -346,13 +441,14 @@ const biasPath   = join(RUNTIME_DIR, 'learned_bias.bin')
 rmSync(RUNTIME_DIR, { recursive: true, force: true })
 mkdirSync(RUNTIME_DIR, { recursive: true })
 if (SEED_DIR) {
-  for (const f of ['learned_bias.bin', 'vital_core.bin', 'familiar_objects.bin', 'self_model.bin', 'phoneme_memory.bin']) {
+  for (const f of ['learned_bias.bin', 'vital_core.bin', 'familiar_objects.bin', 'self_model.bin', 'phoneme_memory.bin', 'vocal_memory.bin']) {
     const src = join(SEED_DIR, f)
     if (existsSync(src)) { try { copyFileSync(src, join(RUNTIME_DIR, f)) } catch {} }
   }
 } else {
   seedFromMaster(RUNTIME_DIR)
 }
+boostVitalSeed(RUNTIME_DIR)
 
 // sandbox_runner reads live_bytes/out.frames (body's bytecode output), executes
 // it in a stack VM, and writes results back to live_bytes/in.frames. Without it
@@ -364,12 +460,13 @@ const sandbox = spawn(SANDBOX_BIN, [RUNTIME_DIR], { stdio: 'ignore' })
 sandbox.on('error', (e) => log(`sandbox_runner spawn error (non-fatal): ${e.message}`))
 sandbox.on('exit', (code) => log(`sandbox_runner exited code=${code}`))
 
-log(`spawning body: ${BODY_BIN} ${RUNTIME_DIR} --headless ${socketPath}`)
-const child = spawn(BODY_BIN, [RUNTIME_DIR, '--headless', socketPath], { stdio: 'ignore' })
+log(`spawning body: ${BODY_BIN} ${RUNTIME_DIR} --nursery-bias --headless ${socketPath}`)
+const child = spawn(BODY_BIN, [RUNTIME_DIR, '--nursery-bias', '--headless', socketPath], { stdio: 'ignore' })
 child.on('exit', (code) => { log(`body exited code=${code}`); sandbox.kill('SIGTERM'); process.exit(code ?? 0) })
 
 const startEff = readVocalEfficacy(biasPath)
 log(`seed vocal_efficacy=${startEff ?? 'n/a'} reserve=${readReserve(RUNTIME_DIR) ?? 'n/a'}`)
+loadCorpus()
 
 let sock = null
 let stopped = false
@@ -385,11 +482,46 @@ function connect(attempt = 0) {
   c.on('close', () => { if (!stopped) { log('socket closed'); } })
 }
 
+// ── Real-audio curriculum (human speech corpus → identical per-tick frames) ───
+function loadCorpus() {
+  if (!CORPUS_PATH) return
+  if (!existsSync(CORPUS_PATH)) {
+    log(`corpus path not found: ${CORPUS_PATH} (real-audio curriculum disabled)`); return
+  }
+  try {
+    CORPUS = deserializeCorpus(readFileSync(CORPUS_PATH))
+    if (CORPUS && CORPUS.length) {
+      const totalTicks = CORPUS.reduce((a, u) => a + u.ticks.length, 0)
+      log(`real-audio corpus: ${CORPUS.length} utterances, ${totalTicks} ticks [${CORPUS.map(u => u.label).join(' ')}]`)
+    } else { CORPUS = null; log('corpus deserialize failed or empty — disabled') }
+  } catch (e) { CORPUS = null; log(`corpus load error: ${e.message} — disabled`) }
+}
+
+// Replay each real utterance REPS× with rests — same infant-directed pacing as
+// the synthetic phases. Corpus ticks are already at DT_MS cadence (offline xform),
+// so one tick per feedLoop iteration plays back in real time.
+function* realAudioPass(getReserve) {
+  if (!CORPUS) return
+  for (const utt of CORPUS) {
+    for (let r = 0; r < REPS; r++) {
+      for (const tk of utt.ticks) yield tk
+      yield* silence(350)
+    }
+    yield* adaptiveRest(getReserve, `real:${utt.label}`)
+  }
+}
+
+// One full cycle: synthetic foundational phases, then real human speech.
+function* fullPass(getReserve) {
+  yield* curriculumPass(getReserve)
+  yield* realAudioPass(getReserve)
+}
+
 async function feedLoop() {
   let lastHarvest = Date.now()
   let lastReport  = Date.now()
   while (!stopped) {
-    for (const tick of curriculumPass(() => readReserve(RUNTIME_DIR))) {
+    for (const tick of fullPass(() => readReserve(RUNTIME_DIR))) {
       if (stopped || !sock || sock.destroyed) return
       const frame = buildAcousticSyncFrame(tick)
       sock.write(frame)

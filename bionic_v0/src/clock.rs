@@ -35,11 +35,18 @@ pub fn spawn_master_clock_hz(
         let t0 = Instant::now();
         let mut next = t0 + period;
         while !stop.load(Ordering::Relaxed) {
-            vp.master_tick.fetch_add(1, Ordering::Relaxed);
-            vp.clock_us.store(
-                start_wall + t0.elapsed().as_micros() as u64,
-                Ordering::Relaxed,
-            );
+            // Absorb any per-tick panic so the master rhythm never dies; the
+            // payload is dropped unread and the fault lands on a tier-0 axis.
+            let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                vp.master_tick.fetch_add(1, Ordering::Relaxed);
+                vp.clock_us.store(
+                    start_wall + t0.elapsed().as_micros() as u64,
+                    Ordering::Relaxed,
+                );
+            }));
+            if tick.is_err() {
+                vp.mark_thread_fault();
+            }
             let now = Instant::now();
             if next > now {
                 thread::sleep(next - now);
@@ -52,6 +59,7 @@ pub fn spawn_master_clock_hz(
 }
 
 pub fn spawn_ticker<F>(
+    vp: Arc<Viewport>,
     rate_hz: u32,
     stop: Arc<std::sync::atomic::AtomicBool>,
     mut f: F,
@@ -59,13 +67,19 @@ pub fn spawn_ticker<F>(
 where
     F: FnMut(u64) + Send + 'static,
 {
-    let period = Duration::from_micros(1_000_000u64 / rate_hz as u64);
+    let period = Duration::from_micros(1_000_000u64 / rate_hz.max(1) as u64);
     thread::spawn(move || {
         let t0 = Instant::now();
         let mut next = t0 + period;
         let mut local_tick: u64 = 0;
         while !stop.load(Ordering::Relaxed) {
-            f(local_tick);
+            // Absorb any per-tick panic so this rhythm keeps self-exciting; the
+            // payload is dropped unread and the fault lands on a tier-0 axis.
+            let tick =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(local_tick)));
+            if tick.is_err() {
+                vp.mark_thread_fault();
+            }
             local_tick = local_tick.wrapping_add(1);
             let now = Instant::now();
             if next > now {

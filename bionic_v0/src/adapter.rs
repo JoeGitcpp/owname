@@ -134,7 +134,14 @@ where
         let sleep = Duration::from_micros(2_000);
         while !stop.load(Ordering::Relaxed) {
             let t = now_us();
-            reg.tick_due(&vp, t);
+            // Absorb any per-tick panic so the sensory driver rhythm keeps
+            // running; the payload is dropped unread and the fault lands on a
+            // tier-0 axis.
+            let tick =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reg.tick_due(&vp, t)));
+            if tick.is_err() {
+                vp.mark_thread_fault();
+            }
             std::thread::sleep(sleep);
         }
     })

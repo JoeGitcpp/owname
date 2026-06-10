@@ -104,6 +104,94 @@ pub struct CrossLayerPredictor {
 
 const WARMUP_MIN: u32 = 8;
 
+/// A2: readable / persistable snapshot of one axis-level cross-layer predictor
+/// (pure numbers — no strings, no labels). Mirrors the learned fields so the
+/// bank survives a restart instead of re-warming from zero (prior 短暂归 0 会
+/// 破坏自洽连续性).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AxisCrossLayerState {
+    /// Axis whose low-layer error this predictor explains.
+    pub target_axis: usize,
+    /// Sparse explicit source axes, parallel to `source_weights`.
+    pub source_axes: Vec<usize>,
+    /// Learned weight per source axis.
+    pub source_weights: Vec<f64>,
+    /// Learned bias / intercept.
+    pub bias: f64,
+    /// EMA of squared error-prediction error.
+    pub err_pred_mse: f64,
+    /// Previous-tick mse (learning-progress bookkeeping).
+    pub prev_mse: f64,
+    /// EMA of downward mse movement.
+    pub learning_progress: f64,
+    /// EMA of the target error's own magnitude² (variance proxy).
+    pub target_err_var: f64,
+    /// Total ticks run (warmup gate state).
+    pub n_updates: u32,
+}
+
+/// A2: the body-resident axis-level cross-layer bank — the hard-coded SPARSE
+/// prior table for VPC mechanism 5's prior write-back leg. Every (target,
+/// sources) pair is explicit; each target reads at most a handful of same- or
+/// related-modality axes, NEVER an all-axis fan-in (that would be a disguised
+/// global coupling / BP). Coverage (intentionally restrained for the first
+/// wiring):
+///   - hearing: each VIB band's error predicted from its adjacent band(s);
+///   - vision: per region, brightness error from the region's R/G/B, and
+///     temporal-flux error from the region's motion/edge-energy;
+///   - interoception: three pairs whose dynamics are substrate-coupled.
+pub fn axis_predictor_bank() -> Vec<CrossLayerPredictor> {
+    let mut bank = Vec::new();
+
+    // Hearing: adjacent frequency bands (same-modality neighbours).
+    for k in 0..crate::VIB_BANDS {
+        let target = crate::AXIS_VIB + k;
+        let mut sources = Vec::with_capacity(2);
+        if k > 0 {
+            sources.push(crate::AXIS_VIB + k - 1);
+        }
+        if k + 1 < crate::VIB_BANDS {
+            sources.push(crate::AXIS_VIB + k + 1);
+        }
+        bank.push(CrossLayerPredictor::new(target, &sources));
+    }
+
+    // Vision: within-region physical quantities (sparse, never cross-all).
+    for region in 0..crate::VIS_REGIONS {
+        bank.push(CrossLayerPredictor::new(
+            crate::vis_axis(region, crate::vis_sub::BRIGHTNESS),
+            &[
+                crate::vis_axis(region, crate::vis_sub::R),
+                crate::vis_axis(region, crate::vis_sub::G),
+                crate::vis_axis(region, crate::vis_sub::B),
+            ],
+        ));
+        bank.push(CrossLayerPredictor::new(
+            crate::vis_axis(region, crate::vis_sub::TEMPORAL_FLUX),
+            &[
+                crate::vis_axis(region, crate::vis_sub::MOTION),
+                crate::vis_axis(region, crate::vis_sub::EDGE_ENERGY),
+            ],
+        ));
+    }
+
+    // Interoception: a few substrate-coupled scalar pairs.
+    bank.push(CrossLayerPredictor::new(
+        crate::INTERO_VITAL_ANXIETY,
+        &[crate::INTERO_RESERVE, crate::INTERO_PAIN],
+    ));
+    bank.push(CrossLayerPredictor::new(
+        crate::INTERO_GAP_PRESSURE,
+        &[crate::INTERO_CLOSURE, crate::INTERO_LEARNING_PROGRESS],
+    ));
+    bank.push(CrossLayerPredictor::new(
+        crate::INTERO_PRESENCE,
+        &[crate::INTERO_ATTACHMENT, crate::INTERO_CLOSURE],
+    ));
+
+    bank
+}
+
 impl CrossLayerPredictor {
     pub fn new(target_axis: usize, source_axes: &[usize]) -> Self {
         let sources = source_axes
@@ -135,6 +223,58 @@ impl CrossLayerPredictor {
     /// (mastered or pure noise). Gates the prior (noise rejection).
     pub fn learning_progress(&self) -> f64 {
         self.learning_progress
+    }
+
+    /// A2: pure-numeric snapshot of the learned state (observer / persistence).
+    pub fn to_state(&self) -> AxisCrossLayerState {
+        AxisCrossLayerState {
+            target_axis: self.target_axis,
+            source_axes: self.sources.iter().map(|s| s.axis).collect(),
+            source_weights: self.sources.iter().map(|s| s.w).collect(),
+            bias: self.bias,
+            err_pred_mse: self.err_pred_mse,
+            prev_mse: self.prev_mse,
+            learning_progress: self.learning_progress,
+            target_err_var: self.target_err_var,
+            n_updates: self.n_updates,
+        }
+    }
+
+    /// A2: rebuild a predictor from a persisted state. Returns None if the
+    /// state refers to axes outside the current layout (e.g. a snapshot from
+    /// an older axis map) or carries non-finite learned values — the caller
+    /// then falls back to a fresh predictor instead of importing corruption.
+    pub fn from_state(state: &AxisCrossLayerState) -> Option<Self> {
+        if state.target_axis >= crate::AXIS_COUNT {
+            return None;
+        }
+        if state.source_axes.len() != state.source_weights.len() {
+            return None;
+        }
+        if state.source_axes.iter().any(|&a| a >= crate::AXIS_COUNT) {
+            return None;
+        }
+        let finite = state.bias.is_finite()
+            && state.err_pred_mse.is_finite()
+            && state.prev_mse.is_finite()
+            && state.learning_progress.is_finite()
+            && state.target_err_var.is_finite()
+            && state.source_weights.iter().all(|w| w.is_finite());
+        if !finite {
+            return None;
+        }
+        let mut p = Self::new(state.target_axis, &state.source_axes);
+        let clip = p.clip;
+        for (s, &w) in p.sources.iter_mut().zip(state.source_weights.iter()) {
+            s.w = w.clamp(-clip, clip);
+        }
+        p.bias = state.bias.clamp(-clip, clip);
+        p.err_pred_mse = state.err_pred_mse;
+        p.prev_mse = state.prev_mse;
+        p.learning_progress = state.learning_progress;
+        p.target_err_var = state.target_err_var;
+        p.n_updates = state.n_updates;
+        Some(p)
     }
 
     /// Learned weight for a given source axis (0 if not a source).
@@ -208,7 +348,16 @@ impl CrossLayerPredictor {
             for (s, &x) in self.sources.iter().zip(src_vals.iter()) {
                 prior += s.w * x;
             }
-            vp.push_prior(self.target_axis, self.prior_gain * explained * prior);
+            // A3 developmental precision schedule: the write-back gain is more
+            // tolerant when naive (m=0 → coarse early priors help the low
+            // layer off its 0×x=0 dead point) and anneals to exactly the
+            // existing prior_gain·explained gate at m=1. Scales only this
+            // predictor's local scalar; push_prior still clamps the magnitude.
+            let m = vp.developmental_maturity();
+            vp.push_prior(
+                self.target_axis,
+                crate::vpc_prior_gain_scale(m) * self.prior_gain * explained * prior,
+            );
         }
     }
 }

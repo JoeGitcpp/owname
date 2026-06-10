@@ -1109,6 +1109,11 @@ pub struct Viewport {
 
     pub hearing_fault: AtomicBool,
     pub hearing_fault_count: AtomicU64,
+    /// Tier-0 thread-fault axis: a tick panic absorbed by catch_unwind, or a
+    /// rhythm thread observed dead by the main-loop watchdog, increments the
+    /// count. Neutral structural fact — no payload, no text, no valence.
+    pub thread_fault: AtomicBool,
+    pub thread_fault_count: AtomicU64,
     pub last_obs_t_us: AtomicU64,
 
     /// First-class viewport health. Numeric-only; observers render, never
@@ -1256,6 +1261,14 @@ pub struct Viewport {
     pub vocal_imitation: RwLock<VocalImitationState>,
     /// Vocal substrate (v36). Stable vocal prototypes memory.
     pub vocal_memory: RwLock<VocalMemoryState>,
+    /// P3 acoustic loop: the body's own ears — PCM→VIB analyzer over a sliding
+    /// window with its own EMA state. Lets the body hear its own synthesized voice.
+    pub self_ear: RwLock<crate::vocal_self_analysis::SelfEar>,
+    /// P3 acoustic loop: latest self-heard 16 VIB bands + timestamp.
+    pub self_vocal_bands: RwLock<([f64; VIB_BANDS], u64)>,
+    /// P3 Stage 3: active acoustic servo — learned pitch/resonance correction that
+    /// hill-climbs to minimize the heard shape error (steers, not just credits).
+    pub vocal_servo: RwLock<crate::vocal_servo::VocalServoState>,
     /// C5: familiar-objects sediment. Numeric fingerprints + accumulated
     /// familiarity; object identity and the responsible-person bond EMERGE here
     /// (no id table, no role label). Persisted via learned_bias for 死后保留.
@@ -1269,6 +1282,8 @@ pub struct Viewport {
     /// survival crisis (famine → Standby → revive) can occur instead of the
     /// reserve sitting pinned at 1.0. Deterministic; configurable.
     pub vital_env: crate::vital_env::VitalEnv,
+    /// Nursery training mode: generous vital_env + reduced voicing exertion.
+    pub nursery_metabolic: bool,
     /// Birth-wall timestamp (µs) of the last vital-core advance. The vital core
     /// integrates at a FIXED step (vital_env::VITAL_STEP_US) independent of the
     /// orchestrator's ~30 Hz rate, so survival dynamics track wall-clock time.
@@ -1279,6 +1294,11 @@ pub struct Viewport {
     /// B1-4: dual-drive arbitration reading (self-preservation vs caregiver
     /// attachment). Where 纠结/痛苦/牺牲 emerge; observer-side, recomputed each tick.
     pub dual_drive: RwLock<crate::dual_drive::DualDriveReading>,
+    /// A2 (VPC mechanism 5): observer/persistence mirror of the axis-level
+    /// cross-layer bank's learned state. The live predictors are owned by the
+    /// body main loop; this mirror is refreshed after each bank tick so the
+    /// snapshot can persist learned weights across restarts (pure numbers).
+    pub axis_xlayer_states: RwLock<Vec<crate::vpc_cross_layer::AxisCrossLayerState>>,
     /// Vocal substrate. Numeric reflex pressure over abrupt prediction load.
     pub vocal_reflex: RwLock<VocalReflexState>,
     /// Substrate-only timestamp (µs) of the most recent vocal reflex burst
@@ -1362,6 +1382,8 @@ impl Viewport {
             snapshot_fail_count: AtomicU64::new(0),
             hearing_fault: AtomicBool::new(false),
             hearing_fault_count: AtomicU64::new(0),
+            thread_fault: AtomicBool::new(false),
+            thread_fault_count: AtomicU64::new(0),
             last_obs_t_us: AtomicU64::new(0),
             health_state: AtomicU8::new(HEALTH_QUIET),
             phot_health: AtomicU8::new(HEALTH_QUIET),
@@ -1407,14 +1429,21 @@ impl Viewport {
             vocal_organ: RwLock::new(VocalOrganState::default()),
             vocal_imitation: RwLock::new(VocalImitationState::default()),
             vocal_memory: RwLock::new(VocalMemoryState::default()),
+            self_ear: RwLock::new(crate::vocal_self_analysis::SelfEar::new(
+                crate::vocal_synthesis::VOCAL_SAMPLE_RATE as f64,
+            )),
+            self_vocal_bands: RwLock::new(([0.0; VIB_BANDS], 0)),
+            vocal_servo: RwLock::new(crate::vocal_servo::VocalServoState::default()),
             familiar_objects: RwLock::new(
                 crate::familiar_objects::FamiliarObjectsState::default(),
             ),
             vital_core: RwLock::new(crate::vital_core::VitalCoreState::default()),
             vital_env: crate::vital_env::VitalEnv::default(),
+            nursery_metabolic: false,
             last_vital_advance_us: AtomicU64::new(0),
             self_model: RwLock::new(crate::self_model::SelfModelState::default()),
             dual_drive: RwLock::new(crate::dual_drive::DualDriveReading::default()),
+            axis_xlayer_states: RwLock::new(Vec::new()),
             vocal_reflex: RwLock::new(VocalReflexState::default()),
             last_vocal_output_t_us: AtomicU64::new(0),
             auditory_visual: RwLock::new(AuditoryVisualState::default()),
@@ -1432,6 +1461,8 @@ impl Viewport {
     pub fn with_birth_sensitivity(birth_sensitivity: Arc<BiasPriors>) -> Self {
         let mut vp = Self::new();
         vp.birth_sensitivity = birth_sensitivity;
+        vp.vital_env = crate::vital_env::VitalEnv::nursery_training();
+        vp.nursery_metabolic = true;
         vp
     }
 
@@ -2142,7 +2173,12 @@ impl Viewport {
     }
 
     pub fn read_learned_bias(&self) -> LearnedBiasState {
-        self.learned_bias.read().unwrap().clone()
+        let mut state = self.learned_bias.read().unwrap().clone();
+        // A3: the developmental clock's source of truth is the Viewport field;
+        // copy it into the checkpoint-bound state so every existing save path
+        // (periodic + exit) persists it without extra wiring.
+        state.developmental_maturity = self.developmental_maturity();
+        state
     }
 
     pub fn apply_learned_bias_event(&self, event: LearnedBiasEventInput) {
@@ -2173,6 +2209,13 @@ impl Viewport {
         }
         let mut m = self.developmental_maturity.write().unwrap();
         *m = (*m + c * crate::MATURITY_GAIN * (1.0 - *m)).clamp(0.0, 1.0);
+    }
+
+    /// Restore the developmental clock from a checkpoint. Boot-only; clamps to
+    /// [0,1]. Keeps newborn default 0.0 when no checkpoint exists
+    /// (advance_maturity remains the only forward chokepoint during life).
+    pub fn restore_maturity(&self, m: f64) {
+        *self.developmental_maturity.write().unwrap() = m.clamp(0.0, 1.0);
     }
 
     pub fn apply_language_binding_event(&self, event: BindingEvent) {
@@ -3318,8 +3361,16 @@ impl Viewport {
 
     /// B1 (VPC mechanism 5): write a prior for `axis`. Called by a cross-layer
     /// predictor that has learned to predict this axis's error. Lock-free.
+    /// A2 precision-war guard rule 2: magnitude hard-clamped to
+    /// ±MAX_PRIOR_MAGNITUDE (non-finite collapses to 0), so a diverged high
+    /// layer can never push an unbounded value into the low layer's additive
+    /// input.
     pub fn push_prior(&self, axis: usize, prior: f64) {
-        let v = if prior.is_finite() { prior } else { 0.0 };
+        let v = if prior.is_finite() {
+            prior.clamp(-crate::MAX_PRIOR_MAGNITUDE, crate::MAX_PRIOR_MAGNITUDE)
+        } else {
+            0.0
+        };
         self.prior_signal[axis].store(v.to_bits(), Ordering::Relaxed);
     }
 
@@ -3327,6 +3378,28 @@ impl Viewport {
     /// low-layer predictor; added to its prediction as an input only.
     pub fn read_prior(&self, axis: usize) -> f64 {
         f64::from_bits(self.prior_signal[axis].load(Ordering::Relaxed))
+    }
+
+    /// A2: replace the observer-facing mirror of the axis-level cross-layer
+    /// bank's learned state. Written by the body's global refresh cycle right
+    /// after the bank ticks; read by the snapshot writer (pure numbers).
+    pub fn store_axis_xlayer_states(
+        &self,
+        states: Vec<crate::vpc_cross_layer::AxisCrossLayerState>,
+    ) {
+        let mut w = self
+            .axis_xlayer_states
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *w = states;
+    }
+
+    /// A2: read the current mirror of the axis-level cross-layer bank state.
+    pub fn read_axis_xlayer_states(&self) -> Vec<crate::vpc_cross_layer::AxisCrossLayerState> {
+        self.axis_xlayer_states
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn update_predictor(&self, axis: usize, a: f64, b: f64, last_err: f64) {
@@ -3377,6 +3450,18 @@ impl Viewport {
         (
             self.hearing_fault.load(Ordering::Relaxed),
             self.hearing_fault_count.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn mark_thread_fault(&self) {
+        self.thread_fault.store(true, Ordering::Relaxed);
+        self.thread_fault_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn thread_fault_status(&self) -> (bool, u64) {
+        (
+            self.thread_fault.load(Ordering::Relaxed),
+            self.thread_fault_count.load(Ordering::Relaxed),
         )
     }
 
@@ -3597,9 +3682,12 @@ impl Viewport {
             // will be further refined on subsequent self-play iterations.
             {
                 use crate::phoneme_memory::AcousticState;
+                // P3: real self-spectral fingerprint from our own heard output
+                // (replaces the former 0.5/0.5 placeholders).
+                let (sb, _) = self.read_self_vocal_bands();
                 let acoustic_obs = AcousticState {
-                    spectral_center: 0.5, // placeholder; spectral data unavailable here
-                    resonance: 0.5,       // placeholder
+                    spectral_center: crate::vocal_self_analysis::vib_spectral_center(&sb),
+                    resonance: crate::vocal_self_analysis::vib_resonance(&sb),
                     envelope: vib.event_energy.clamp(0.0, 1.0),
                 };
                 self.phoneme_memory
@@ -3660,12 +3748,13 @@ impl Viewport {
             / (vib.event_energy.abs() + vib.surprise.abs() + f64::EPSILON))
             .clamp(0.0, 1.0);
 
-        self.observe_vocal_target(
+        self.observe_vocal_target_bands(
             now_us,
             vib.event_energy.clamp(0.0, 1.0),
             spectral_center.clamp(0.0, 1.0),
             resonance.clamp(0.0, 1.0),
             envelope,
+            bands,
         );
     }
 
@@ -3714,12 +3803,53 @@ impl Viewport {
         resonance: f64,
         envelope: f64,
     ) {
+        self.observe_vocal_target_bands(now_us, energy, pitch, resonance, envelope, [0.0; VIB_BANDS]);
+    }
+
+    /// P3: like observe_vocal_target but retains the full 16-band target contour
+    /// for band-wise self↔target comparison (the acoustic loop).
+    pub fn observe_vocal_target_bands(
+        &self,
+        now_us: u64,
+        energy: f64,
+        pitch: f64,
+        resonance: f64,
+        envelope: f64,
+        bands: [f64; VIB_BANDS],
+    ) {
         let mut vt = self.vocal_target.write().unwrap();
-        vt.observe_external_contour(now_us, energy, pitch, resonance, envelope);
+        vt.observe_external_contour(now_us, energy, pitch, resonance, envelope, bands);
     }
 
     pub fn read_vocal_target(&self) -> VocalTargetState {
         *self.vocal_target.read().unwrap()
+    }
+
+    /// P3: hear our own synthesized PCM through the same analyzer the target
+    /// uses, storing the resulting 16 VIB bands. Called after synthesis each tick.
+    pub fn observe_self_vocal_pcm(&self, now_us: u64, samples: &[f32]) {
+        let bands = self.self_ear.write().unwrap().observe(samples);
+        *self.self_vocal_bands.write().unwrap() = (bands, now_us);
+    }
+
+    pub fn read_self_vocal_bands(&self) -> ([f64; VIB_BANDS], u64) {
+        *self.self_vocal_bands.read().unwrap()
+    }
+
+    /// P3 (observable): band-wise perceptual distance between what we just heard
+    /// ourselves produce and the current target contour. [0,1].
+    pub fn vocal_acoustic_distance(&self) -> f64 {
+        let (self_bands, _) = self.read_self_vocal_bands();
+        let target = self.read_vocal_target();
+        crate::vocal_self_analysis::spectral_distance(&self_bands, &target.target_bands)
+    }
+
+    /// P3 (observable): loudness-invariant SHAPE distance between self and target
+    /// band distributions — the formant-pattern error the acoustic servo targets.
+    pub fn vocal_acoustic_shape_distance(&self) -> f64 {
+        let (self_bands, _) = self.read_self_vocal_bands();
+        let target = self.read_vocal_target();
+        crate::vocal_self_analysis::spectral_shape_distance(&self_bands, &target.target_bands)
     }
 
     pub fn apply_vocal_write_event(&self, event: ActionOutputEvent, pitch: f64, resonance: f64) {
@@ -4016,8 +4146,12 @@ impl Viewport {
         } else {
             0.0
         };
-        if delta_fam > 0.0 || delta_sup > 0.0 || delta_eff > 0.0 {
+        {
             let mut bias = self.learned_bias.write().unwrap();
+            // B2 机制A: suppression 的时间遗忘与其累积共用同一把写锁、
+            // 同一节律（tick_vocal_reflex_from_pairs → 本闭环观察路径），
+            // 不新增 ticker、不依赖外部驱动。先半衰再沉积。
+            bias.decay_vocal_suppression(now_us);
             bias.prediction_familiarity = (bias.prediction_familiarity + delta_fam).min(1.0);
             bias.action_suppression = (bias.action_suppression + delta_sup).min(1.0);
             bias.vocal_efficacy = (bias.vocal_efficacy + delta_eff).min(1.0);
@@ -4041,10 +4175,15 @@ impl Viewport {
         // vocalization even without external stimuli. High for newborns,
         // dampened as prediction_familiarity and action_suppression grow.
         let bias = self.learned_bias.read().unwrap().summary();
+        // B2 enhancement: suppression damping floor annealed by the
+        // developmental clock — continuous numeric modulation (wide at birth
+        // for bootstrap escape, narrowing to the no-op 0.45 endpoint at m=1).
+        let damp_floor = crate::suppression_damp_floor(self.developmental_maturity());
         let baseline = VocalReflexState::endogenous_baseline(
             now_us,
             bias.prediction_familiarity,
             bias.action_suppression,
+            damp_floor,
         );
 
         // Quiet-history replay intensity: when the system has prior experience,
@@ -4114,10 +4253,14 @@ impl Viewport {
         let evidence_pressure = self.read_evidence_tension().unresolved_pressure;
         let gap_pressure = self.read_active_reasoning_gap().gap_pressure;
         let bias = self.learned_bias.read().unwrap().summary();
+        // B2 enhancement: same developmental anneal of the damping floor as in
+        // tick_vocal_reflex_from_pressure (single clock, single schedule).
+        let damp_floor = crate::suppression_damp_floor(self.developmental_maturity());
         let baseline = crate::vocal_reflex::VocalReflexState::endogenous_baseline(
             now_us,
             bias.prediction_familiarity,
             bias.action_suppression,
+            damp_floor,
         );
         let replay = self.global_attention.read().unwrap().replay_intensity;
         // P2: active surface aperture → vocal raw_urge.
@@ -4178,15 +4321,58 @@ impl Viewport {
             let pitch_gap = (target.pitch_hint - organ.pitch_tension).abs();
             let resonance_gap = (target.resonance_hint - organ.resonance_position).abs();
             let total_gap = (pitch_gap + resonance_gap) / 2.0;
+            // P3 Stage 2: drive imitation LEARNING by the real acoustic shape error
+            // (self heard vs target through the same de-saturated ears), replacing
+            // the near-constant 2-scalar parametric proxy that produced illusory
+            // convergence. Until the body has actually voiced (self silent → no
+            // shape), fall back to the parametric gap so pre-voicing still feels
+            // pressure to vocalize. Threshold scale matches observe_gap (measured:
+            // good match ≈0.12 < 0.2 converge; far ≈0.6 > 0.5 fail).
+            let (self_bands_now, _) = *self.self_vocal_bands.read().unwrap();
+            let acoustic_dist =
+                crate::vocal_self_analysis::spectral_distance(&self_bands_now, &target.target_bands);
+            let shape_dist =
+                crate::vocal_self_analysis::spectral_shape_distance(&self_bands_now, &target.target_bands);
+            let self_voiced = self_bands_now.iter().sum::<f64>() > 1e-6;
+            let learning_gap = if self_voiced { shape_dist } else { total_gap };
             {
                 let mut imit = self.vocal_imitation.write().unwrap();
-                imit.observe_gap(now_us, total_gap, organ.breath_drive);
+                imit.observe_gap(now_us, learning_gap, organ.breath_drive);
+                imit.last_acoustic_distance = acoustic_dist;
             }
+            // P3 Stage 3: active acoustic servo. The feedforward hint aims coarsely;
+            // the servo hill-climbs a bounded pitch/resonance correction to reduce
+            // the shape error the body actually HEARS. It steps on its own ~90 ms
+            // cadence (the organ's smoothing must settle between probes); the aim is
+            // read every tick so the held probe is applied continuously.
+            let (servo_p, servo_r) = {
+                let mut servo = self.vocal_servo.write().unwrap();
+                if self_voiced
+                    && now_us.saturating_sub(servo.last_update_t_us)
+                        >= crate::vocal_servo::SERVO_INTERVAL_US
+                {
+                    servo.step(now_us, shape_dist);
+                }
+                servo.aim()
+            };
+            // A1: dual-drive confluence flows back here — and ONLY here. The
+            // arbitrated reading (already ticked each orchestrator tick) leans
+            // the external/attachment-driven voicing continuously: net>0 (bond
+            // pull wins) amplifies the cry toward the caregiver, net<0
+            // (self-preservation wins) attenuates it. Region A keeps its own
+            // survival gate untouched (no double-gating / feedback loop), and
+            // the combined survival gate below still applies. Continuous
+            // multiplicative field, NOT a behaviour gate; identity at net=0.
+            let dd = self.read_dual_drive();
+            let bond_drive = crate::vocal_drive_field::bond_modulated_region_b(
+                target.active_energy * 0.5,
+                dd.net_toward_bond,
+            );
             contribs.push(VocalDriveContribution {
-                intensity: (target.active_energy * 0.5).clamp(0.0, 1.0),
-                breath: target.active_energy * 0.5,
-                pitch: target.pitch_hint,
-                resonance: target.resonance_hint,
+                intensity: bond_drive,
+                breath: bond_drive,
+                pitch: (target.pitch_hint + servo_p).clamp(0.0, 1.0),
+                resonance: (target.resonance_hint + servo_r).clamp(0.0, 1.0),
                 noise: 0.0,
             });
         }
@@ -4389,7 +4575,8 @@ impl Viewport {
             let t = self.last_vocal_output_t_us.load(Ordering::Relaxed);
             t != 0 && now_us.saturating_sub(t) < 1_000_000
         };
-        let exertion = if recently_voiced { 0.5 } else { 0.0 };
+        let voicing_cost = if self.nursery_metabolic { 0.20 } else { 0.50 };
+        let exertion = if recently_voiced { voicing_cost } else { 0.0 };
         let drain = (self.vital_env.drain(env_now) + exertion).clamp(0.0, 1.0);
 
         self.vital_core.write().unwrap().tick(now_us, supply, drain);
@@ -4431,15 +4618,21 @@ impl Viewport {
 
     /// B1-4: arbitrate the two drive sources into a reading.
     /// self-preservation from C1; attachment = the responsible person's
-    /// long-earned familiarity from C5; principle_floor from 大脑警察 (0 for now).
+    /// long-earned familiarity from C5; principle_floor from 大脑警察 = the
+    /// vital core's C6 acute pain (the body's own "this is hurting me now"
+    /// transient). Continuous [0,1] mapping, no threshold gate: pain 0 keeps
+    /// the floor branch inert (bit-identical to the unsourced default), and
+    /// pain is already a fast-decaying EMA inside vital_core, so no extra
+    /// smoothing is layered here.
     pub fn tick_dual_drive(&self, _now_us: u64) {
-        let self_preservation = self.read_vital_core().self_preservation_pressure();
+        let vital = self.read_vital_core();
+        let self_preservation = vital.self_preservation_pressure();
         let attachment = self
             .read_familiar_objects()
             .most_familiar()
             .map(|o| o.familiarity)
             .unwrap_or(0.0);
-        let principle_floor = 0.0; // 大脑警察 harm-to-others signal: wired, not yet sourced
+        let principle_floor = vital.pain.clamp(0.0, 1.0);
         let reading =
             crate::dual_drive::arbitrate(self_preservation, attachment, principle_floor);
         *self.dual_drive.write().unwrap() = reading;
@@ -4508,7 +4701,10 @@ impl Viewport {
         }
 
         let imit = self.read_vocal_imitation();
-        if imit.last_gap < 0.2 && imit.converge_count >= 3 {
+        // P3: graded credit — last_gap is now the real acoustic shape distance;
+        // record acoustically-ballpark matches (the servo refines quality over time)
+        // rather than demanding a near-perfect score the synthesis may never reach.
+        if imit.last_gap < 0.40 && imit.converge_count >= 3 {
             let organ = self.read_vocal_organ();
             {
                 let mut mem = self.vocal_memory.write().unwrap();
@@ -4540,7 +4736,10 @@ impl Viewport {
         // recording runs every tick right after tick_vocal_drive_field updates
         // the imitation gap.
         let imit = self.read_vocal_imitation();
-        if imit.last_gap < 0.2 && imit.converge_count >= 3 {
+        // P3: graded credit — last_gap is now the real acoustic shape distance;
+        // record acoustically-ballpark matches (the servo refines quality over time)
+        // rather than demanding a near-perfect score the synthesis may never reach.
+        if imit.last_gap < 0.40 && imit.converge_count >= 3 {
             let organ = self.read_vocal_organ();
             if organ.phase == crate::vocal_organ::VocalOrganPhase::Active
                 && organ.breath_drive > 0.01

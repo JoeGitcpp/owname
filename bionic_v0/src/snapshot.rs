@@ -263,6 +263,26 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
         }
     }
 
+    // v57: tier-0 thread-fault axis (catch_unwind absorbed tick panics +
+    // watchdog-observed dead rhythm threads). Appended at the end to keep all
+    // earlier offsets stable.
+    {
+        let (thread_fault, thread_fault_count) = vp.thread_fault_status();
+        buf.extend_from_slice(&(thread_fault as u64).to_le_bytes());
+        buf.extend_from_slice(&thread_fault_count.to_le_bytes());
+    }
+
+    // v58: dual-drive arbitration reading (observer-visible soul confluence).
+    write_dual_drive(&mut buf, &vp.read_dual_drive());
+
+    // v59: A2 axis-level cross-layer bank (mechanism 5 prior write-back leg).
+    // Appended at the very end so all earlier offsets stay stable.
+    write_axis_xlayers(&mut buf, &vp.read_axis_xlayer_states());
+
+    // v60: A3 developmental clock (one LE f64), appended at the very end so
+    // the observer can watch the coarse→fine annealing curve.
+    buf.extend_from_slice(&vp.developmental_maturity().to_le_bytes());
+
     // Rejected v21/v22 naming sections were removed by cleanup spec
     // 2026-04-20. Snapshot terminates at the reasoning memory summary
     // plus language-binding traces.
@@ -527,6 +547,25 @@ pub struct SnapshotData {
     /// One Vec per object slot (empty where no tier above tier 1 was born).
     /// Observer-visible so emergent abstraction depth shows up in a live run.
     pub slot_towers: Vec<Vec<crate::vpc_cross_layer::SlotCrossLayerState>>,
+    /// v57: tier-0 thread-fault axis — true once any rhythm-thread tick panic
+    /// was absorbed (catch_unwind) or a dead rhythm thread was observed.
+    pub thread_fault: bool,
+    /// v57: monotonic count of absorbed tick panics + observed dead threads.
+    pub thread_fault_count: u64,
+    /// v58: dual-drive arbitration reading (observer-visible soul confluence).
+    /// Pure per-tick derivation of vital_core + familiar_objects; not restored
+    /// into the live viewport on load (the next tick recomputes it).
+    pub dual_drive: crate::dual_drive::DualDriveReading,
+    /// v59: A2 axis-level cross-layer bank (VPC mechanism 5 prior write-back
+    /// leg). Learned source weights / bias / EMAs per target axis; restored
+    /// into the body's bank at boot so priors don't re-warm from zero. Empty
+    /// for snapshots older than v59.
+    pub axis_xlayers: Vec<crate::vpc_cross_layer::AxisCrossLayerState>,
+    /// v60: A3 developmental clock m∈[0,1] (Viewport::developmental_maturity),
+    /// observer-visible so the coarse→fine precision annealing curve shows up
+    /// in a live run. 0.0 for snapshots older than v60. Observation only; the
+    /// live clock is restored at boot from learned_bias.bin, not from here.
+    pub developmental_maturity: f64,
 }
 
 impl SnapshotData {
@@ -1081,6 +1120,40 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         }
     }
 
+    // v57: tier-0 thread-fault axis (appended at the end; symmetric with the
+    // writer above).
+    let mut thread_fault = false;
+    let mut thread_fault_count = 0u64;
+    if version >= 57 {
+        thread_fault = rd_u64(&bytes, &mut cur) != 0;
+        thread_fault_count = rd_u64(&bytes, &mut cur);
+    }
+
+    // v58: dual-drive arbitration reading (appended at the end; symmetric with
+    // the writer above). Pure derived mirror for the observer; older versions
+    // fall back to the default reading.
+    let dual_drive = if version >= 58 {
+        read_dual_drive_snapshot(&bytes, &mut cur)
+    } else {
+        crate::dual_drive::DualDriveReading::default()
+    };
+
+    // v59: A2 axis-level cross-layer bank (appended at the end; symmetric
+    // with the writer above). Older versions restore an empty bank.
+    let axis_xlayers = if version >= 59 {
+        read_axis_xlayers_snapshot(&bytes, &mut cur)
+    } else {
+        Vec::new()
+    };
+
+    // v60: A3 developmental clock (appended at the end; symmetric with the
+    // writer above). Older versions read back the newborn default 0.0.
+    let developmental_maturity = if version >= 60 {
+        rd_f64(&bytes, &mut cur)
+    } else {
+        0.0
+    };
+
     // Rejected v21/v22 naming sections removed by cleanup spec 2026-04-20.
     // Older snapshot files containing those bytes are no longer readable;
     // v23+ omits them entirely.
@@ -1138,6 +1211,11 @@ pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
         audio_raw_last_clock_us,
         slot_xlayers,
         slot_towers,
+        thread_fault,
+        thread_fault_count,
+        dual_drive,
+        axis_xlayers,
+        developmental_maturity,
     })
 }
 
@@ -2350,8 +2428,128 @@ fn read_vocal_target_snapshot(bytes: &[u8], cur: &mut usize) -> VocalTargetState
         pitch_hint: rd_f64(bytes, cur),
         resonance_hint: rd_f64(bytes, cur),
         envelope_hint: rd_f64(bytes, cur),
+        target_bands: [0.0; crate::VIB_BANDS],
         last_update_t_us: rd_u64(bytes, cur),
     }
+}
+
+// v58: dual-drive arbitration reading. Layout: 5×f64 LE (self_preservation,
+// attachment, conflict, net_toward_bond, principle_floor) + sacrificing as one
+// u8 + 7 bytes of alignment padding (write_vocal_organ idiom).
+fn write_dual_drive(buf: &mut Vec<u8>, s: &crate::dual_drive::DualDriveReading) {
+    buf.extend_from_slice(&s.self_preservation.to_le_bytes());
+    buf.extend_from_slice(&s.attachment.to_le_bytes());
+    buf.extend_from_slice(&s.conflict.to_le_bytes());
+    buf.extend_from_slice(&s.net_toward_bond.to_le_bytes());
+    buf.extend_from_slice(&s.principle_floor.to_le_bytes());
+    buf.push(s.sacrificing as u8);
+    buf.extend_from_slice(&[0u8; 7]);
+}
+
+fn read_dual_drive_snapshot(bytes: &[u8], cur: &mut usize) -> crate::dual_drive::DualDriveReading {
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    let self_preservation = rd_f64(bytes, cur);
+    let attachment = rd_f64(bytes, cur);
+    let conflict = rd_f64(bytes, cur);
+    let net_toward_bond = rd_f64(bytes, cur);
+    let principle_floor = rd_f64(bytes, cur);
+    let sacrificing = bytes[*cur] != 0;
+    *cur += 8; // 1-byte flag + 7-byte alignment padding
+    crate::dual_drive::DualDriveReading {
+        self_preservation,
+        attachment,
+        conflict,
+        net_toward_bond,
+        sacrificing,
+        principle_floor,
+    }
+}
+
+// v59: A2 axis-level cross-layer bank. Layout (LE):
+//   u16 count
+//   per entry:
+//     u16 target_axis
+//     u16 n_sources
+//     per source: u16 axis, f64 weight
+//     f64 bias, f64 err_pred_mse, f64 prev_mse,
+//     f64 learning_progress, f64 target_err_var
+//     u32 n_updates
+fn write_axis_xlayers(buf: &mut Vec<u8>, states: &[crate::vpc_cross_layer::AxisCrossLayerState]) {
+    buf.extend_from_slice(&(states.len() as u16).to_le_bytes());
+    for st in states {
+        buf.extend_from_slice(&(st.target_axis as u16).to_le_bytes());
+        let n = st.source_axes.len().min(st.source_weights.len());
+        buf.extend_from_slice(&(n as u16).to_le_bytes());
+        for i in 0..n {
+            buf.extend_from_slice(&(st.source_axes[i] as u16).to_le_bytes());
+            buf.extend_from_slice(&st.source_weights[i].to_le_bytes());
+        }
+        buf.extend_from_slice(&st.bias.to_le_bytes());
+        buf.extend_from_slice(&st.err_pred_mse.to_le_bytes());
+        buf.extend_from_slice(&st.prev_mse.to_le_bytes());
+        buf.extend_from_slice(&st.learning_progress.to_le_bytes());
+        buf.extend_from_slice(&st.target_err_var.to_le_bytes());
+        buf.extend_from_slice(&st.n_updates.to_le_bytes());
+    }
+}
+
+fn read_axis_xlayers_snapshot(
+    bytes: &[u8],
+    cur: &mut usize,
+) -> Vec<crate::vpc_cross_layer::AxisCrossLayerState> {
+    fn rd_u16(b: &[u8], c: &mut usize) -> u16 {
+        let mut a = [0u8; 2];
+        a.copy_from_slice(&b[*c..*c + 2]);
+        *c += 2;
+        u16::from_le_bytes(a)
+    }
+    fn rd_u32(b: &[u8], c: &mut usize) -> u32 {
+        let mut a = [0u8; 4];
+        a.copy_from_slice(&b[*c..*c + 4]);
+        *c += 4;
+        u32::from_le_bytes(a)
+    }
+    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[*c..*c + 8]);
+        *c += 8;
+        f64::from_le_bytes(a)
+    }
+    let count = rd_u16(bytes, cur) as usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let target_axis = rd_u16(bytes, cur) as usize;
+        let n_sources = rd_u16(bytes, cur) as usize;
+        let mut source_axes = Vec::with_capacity(n_sources);
+        let mut source_weights = Vec::with_capacity(n_sources);
+        for _ in 0..n_sources {
+            source_axes.push(rd_u16(bytes, cur) as usize);
+            source_weights.push(rd_f64(bytes, cur));
+        }
+        let bias = rd_f64(bytes, cur);
+        let err_pred_mse = rd_f64(bytes, cur);
+        let prev_mse = rd_f64(bytes, cur);
+        let learning_progress = rd_f64(bytes, cur);
+        let target_err_var = rd_f64(bytes, cur);
+        let n_updates = rd_u32(bytes, cur);
+        out.push(crate::vpc_cross_layer::AxisCrossLayerState {
+            target_axis,
+            source_axes,
+            source_weights,
+            bias,
+            err_pred_mse,
+            prev_mse,
+            learning_progress,
+            target_err_var,
+            n_updates,
+        });
+    }
+    out
 }
 
 fn write_vocal_organ(buf: &mut Vec<u8>, s: &VocalOrganState) {
@@ -2483,6 +2681,7 @@ fn read_vocal_imitation_snapshot(bytes: &[u8], cur: &mut usize) -> VocalImitatio
         last_gap: rd_f64(bytes, cur),
         converge_count: rd_u64(bytes, cur) as u32,
         fail_count: rd_u64(bytes, cur) as u32,
+        last_acoustic_distance: 0.0,
         last_update_t_us: rd_u64(bytes, cur),
     }
 }

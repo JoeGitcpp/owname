@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bionic_v0::language_binding::{BindingStatus, BindingTargetRef, PatternKind};
 use bionic_v0::snapshot::{read_snapshot, SnapshotData};
+use bionic_v0::vpc_cross_layer::AxisCrossLayerState;
 use bionic_v0::vpc::{ObservationDomainKind, PredictorLifecycleState, PublicationStatus};
 use bionic_v0::{
     CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED, HEALTH_FAULT, HEALTH_OK,
@@ -58,7 +59,12 @@ fn main() {
           bind:n|traces[...]|vpc:n|pub[...]|open[...]\t\
          ep:n|epochs[...]\t\
          voc:tE|tp|tr|te|ob|op|or|oph|ip|ig|ic|if|mn\t\
-         prb:i|s|ph|o"
+         prb:i|s|ph|o\t\
+         etn:t|p|h|pc\t\
+         tf:fault|count\t\
+         dd:sp|at|CF(conflict)|NB(net_toward_bond)|pf|sac\t\
+         mat:m\t\
+         axl:n|act|upd|expl(n|avg|max)|top[ax:e|n|w[src:w,...]]"
         );
     }
 
@@ -723,5 +729,110 @@ fn print_row(snap: &SnapshotData) {
         et.current_tension, et.unresolved_pressure, et.history_len, et.last_pair_cursor,
     ));
 
+    // v57: thread-fault axis (B1) — current flag + cumulative count, so a
+    // half-dead body (a crashed thread) is visible at a glance.
+    row.push_str(&format!(
+        "\ttf:{}|{}",
+        if snap.thread_fault { 1 } else { 0 },
+        snap.thread_fault_count,
+    ));
+
+    // v58: dual-drive confluence — observer renders snapshot truth only.
+    // CF (conflict) and NB (net_toward_bond) are the core soul readouts,
+    // hence the uppercase markers.
+    let dd = &snap.dual_drive;
+    row.push_str(&format!(
+        "\tdd:sp{:.3}|at{:.3}|CF{:.3}|NB{:+.3}|pf{:.3}|sac{}",
+        dd.self_preservation,
+        dd.attachment,
+        dd.conflict,
+        dd.net_toward_bond,
+        dd.principle_floor,
+        if dd.sacrificing { 1 } else { 0 },
+    ));
+
+    // v60: developmental maturity clock m∈[0,1].
+    row.push_str(&format!("\tmat:{:.4}", snap.developmental_maturity));
+
+    // v59: axis-level cross-layer bank — summary, never a full dump.
+    row.push_str(&format!("\taxl:{}", axis_xlayer_summary(&snap.axis_xlayers)));
+
     println!("{}", row);
+}
+
+/// Explained fraction of the target error's variance: 1 - mse/var, clamped to
+/// [0,1]. Derived for display only — the observer never feeds this back.
+fn axis_xlayer_explained(s: &AxisCrossLayerState) -> Option<f64> {
+    if s.n_updates == 0 || s.target_err_var <= 1e-12 {
+        return None;
+    }
+    Some((1.0 - s.err_pred_mse / s.target_err_var).clamp(0.0, 1.0))
+}
+
+/// v59 summary line: bank size, active predictors (n_updates>0), total
+/// updates, how many predictors explain >5% of their target err variance
+/// (avg/max explained over those with a defined ratio), and the top-3
+/// predictors by explained fraction with their strongest learned weights.
+fn axis_xlayer_summary(states: &[AxisCrossLayerState]) -> String {
+    if states.is_empty() {
+        return "-".to_string();
+    }
+    let n = states.len();
+    let active = states.iter().filter(|s| s.n_updates > 0).count();
+    let upd_total: u64 = states.iter().map(|s| s.n_updates as u64).sum();
+
+    let mut explained: Vec<(usize, f64)> = states
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| axis_xlayer_explained(s).map(|e| (i, e)))
+        .collect();
+    let n_expl = explained.iter().filter(|(_, e)| *e > 0.05).count();
+    let avg_expl = if explained.is_empty() {
+        0.0
+    } else {
+        explained.iter().map(|(_, e)| e).sum::<f64>() / explained.len() as f64
+    };
+    let max_expl = explained
+        .iter()
+        .map(|(_, e)| *e)
+        .fold(0.0f64, f64::max);
+
+    explained.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top_str: String = explained
+        .iter()
+        .take(3)
+        .map(|&(i, e)| {
+            let s = &states[i];
+            // strongest learned weights (by |w|), up to 3 sources
+            let mut ws: Vec<(usize, f64)> = s
+                .source_axes
+                .iter()
+                .copied()
+                .zip(s.source_weights.iter().copied())
+                .collect();
+            ws.sort_by(|a, b| {
+                b.1.abs()
+                    .partial_cmp(&a.1.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let w_str: String = ws
+                .iter()
+                .take(3)
+                .map(|(src, w)| format!("{}:{:+.3}", src, w))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("ax{}:e{:.2}|n{}|w[{}]", s.target_axis, e, s.n_updates, w_str)
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!(
+        "n{}|act{}|upd{}|expl(n{}|avg{:.2}|max{:.2})|top[{}]",
+        n,
+        active,
+        upd_total,
+        n_expl,
+        avg_expl,
+        max_expl,
+        if top_str.is_empty() { "-" } else { &top_str },
+    )
 }

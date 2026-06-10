@@ -5,6 +5,9 @@ pub struct VocalImitationState {
     pub last_gap: f64,
     pub converge_count: u32,
     pub fail_count: u32,
+    /// P3 acoustic loop (Stage 1, observable): latest band-wise self↔target
+    /// distance. Recorded for measurement; NOT yet wired into observe_gap.
+    pub last_acoustic_distance: f64,
     pub last_update_t_us: u64,
 }
 

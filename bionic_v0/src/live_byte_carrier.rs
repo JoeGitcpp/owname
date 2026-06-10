@@ -74,7 +74,7 @@ pub fn spawn_live_byte_ingress(
 ) -> JoinHandle<()> {
     let carrier = LiveByteFileCarrier::new(path, LIVE_BYTE_STREAM_ID, LIVE_BYTE_FRAME_LEN);
     let mut adapter = CodeIngressAdapter::new(carrier);
-    spawn_ticker(LIVE_BYTE_INGRESS_HZ, stop, move |_| {
+    spawn_ticker(vp.clone(), LIVE_BYTE_INGRESS_HZ, stop, move |_| {
         adapter.tick(&vp, now_us());
     })
 }

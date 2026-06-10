@@ -76,6 +76,25 @@ impl Default for VitalEnv {
 }
 
 impl VitalEnv {
+    /// Generous metabolic world for 7×24 nursery training: high baseline
+    /// supply, low resting drain, no famine. Paired with reduced voicing
+    /// exertion in `Viewport::tick_vital_core` so the body can finish full
+    /// curriculum passes without chronic Standby.
+    pub fn nursery_training() -> Self {
+        Self {
+            day_us: 600_000_000,       // 10 min / day — slow circadian breathing
+            supply_floor: 0.58,        // always above metabolism + voicing cost
+            supply_amp: 0.32,          // midday peak ≈ 0.90
+            base_metabolism: 0.08,
+            famine_period_days: 0,     // no scarcity windows during training
+            famine_frac: 0.0,
+            famine_start: 0.0,
+            famine_mult: 1.0,
+        }
+    }
+}
+
+impl VitalEnv {
     /// Phase within the current simulated day, [0,1). 0 = midnight (supply
     /// trough), 0.5 = midday (supply peak).
     pub fn phase(&self, now_us: u64) -> f64 {
@@ -160,6 +179,20 @@ mod tests {
             t += VITAL_STEP_US;
         }
         (v, trace)
+    }
+
+    #[test]
+    fn nursery_training_supply_always_covers_metabolism_and_voicing() {
+        let env = VitalEnv::nursery_training();
+        let min_supply = (0..=env.day_us).step_by(env.day_us as usize / 20)
+            .map(|t| env.supply(t))
+            .fold(f64::INFINITY, f64::min);
+        let voicing_drain = env.drain(0) + 0.20;
+        assert!(
+            min_supply > voicing_drain,
+            "nursery trough ({min_supply}) must exceed voicing drain ({voicing_drain})"
+        );
+        assert_eq!(env.famine_period_days, 0);
     }
 
     #[test]

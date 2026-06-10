@@ -99,6 +99,18 @@ pub fn survival_gated_urge(urge: f64, self_preservation_pressure: f64) -> f64 {
     urge * gain
 }
 
+/// dual-drive arbitration modulating the external/attachment-driven (region-B)
+/// voicing gain. Continuous multiplicative field, NOT a behaviour gate.
+/// `net_toward_bond` ∈ [-1,1]: >0 leans toward serving the bond (amplify the
+/// cry toward the caregiver), <0 leans toward self-preservation (attenuate).
+/// Maps net∈[-1,1] → gain∈[0.5,1.5] linearly; identity (gain=1) at net=0 so an
+/// un-arbitrated/default reading leaves region B untouched.
+pub fn bond_modulated_region_b(intensity: f64, net_toward_bond: f64) -> f64 {
+    // net 0 → 1.0; net +1 → up to ~1.5; net -1 → down to ~0.5. Bounded, smooth.
+    let gain = (1.0 + 0.5 * net_toward_bond.clamp(-1.0, 1.0)).clamp(0.0, 2.0);
+    (intensity * gain).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +163,45 @@ mod tests {
         let f = VocalDriveField::combine(&[c(0.6, 0.3), c(0.4, 0.9)]);
         let expected = (0.6 * 0.3 + 0.4 * 0.9) / (0.6 + 0.4);
         assert!((f.pitch - expected).abs() < 1e-12, "pitch={}", f.pitch);
+    }
+
+    /// net=0 (default / un-arbitrated reading) must be the identity: the
+    /// dual-drive confluence introduces no behaviour change until the two
+    /// sources actually lean somewhere.
+    #[test]
+    fn bond_modulation_is_identity_at_net_zero() {
+        for intensity in [0.0, 0.2, 0.5, 1.0] {
+            assert!((bond_modulated_region_b(intensity, 0.0) - intensity).abs() < 1e-12);
+        }
+    }
+
+    /// net>0 (bond pull wins) amplifies the cry toward the caregiver.
+    #[test]
+    fn bond_modulation_amplifies_when_leaning_toward_bond() {
+        let base = 0.4;
+        assert!(bond_modulated_region_b(base, 0.5) > base);
+        assert!(bond_modulated_region_b(base, 1.0) > bond_modulated_region_b(base, 0.5));
+        assert!((bond_modulated_region_b(base, 1.0) - base * 1.5).abs() < 1e-12);
+    }
+
+    /// net<0 (self-preservation wins) attenuates the external-driven voicing.
+    #[test]
+    fn bond_modulation_attenuates_when_leaning_toward_self() {
+        let base = 0.4;
+        assert!(bond_modulated_region_b(base, -0.5) < base);
+        assert!(bond_modulated_region_b(base, -1.0) < bond_modulated_region_b(base, -0.5));
+        assert!((bond_modulated_region_b(base, -1.0) - base * 0.5).abs() < 1e-12);
+    }
+
+    /// All outputs stay in [0,1] even for out-of-range nets or intensities.
+    #[test]
+    fn bond_modulation_output_is_bounded() {
+        for &intensity in &[0.0, 0.3, 0.9, 1.0, 2.0] {
+            for &net in &[-5.0, -1.0, -0.3, 0.0, 0.3, 1.0, 5.0] {
+                let out = bond_modulated_region_b(intensity, net);
+                assert!((0.0..=1.0).contains(&out), "out={out}");
+            }
+        }
     }
 
     #[test]

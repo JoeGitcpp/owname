@@ -17,10 +17,10 @@ use bionic_v0::live_byte_carrier::spawn_live_byte_ingress;
 use bionic_v0::live_byte_closure::LiveByteClosureDriver;
 use bionic_v0::phot_camera::{RealCameraFrameProvider, StubRealCameraFrameProvider};
 use bionic_v0::predictor::Ar2Predictor;
-use bionic_v0::snapshot::{write_snapshot, SnapshotPaths};
+use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
+use bionic_v0::vpc_cross_layer::{axis_predictor_bank, CrossLayerPredictor};
 use bionic_v0::vocal_adapter::spawn_vocal_output;
-use bionic_v0::VIB_BANDS;
 use bionic_v0::{BINDING_REFRESH_HZ, PHOT_CONSEQUENCE_QUIESCENCE_US};
 
 #[derive(Clone, Copy)]
@@ -125,7 +125,12 @@ fn parse_body_args(args: &[String]) -> BodyArgs {
 // before snapshot observation.
 // Per cleanup spec 2026-04-20, rejected naming layers are not part of the
 // body main loop and must not be reintroduced here.
-fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u64) {
+fn run_global_refresh_cycle(
+    vp: &Arc<Viewport>,
+    paths: &Arc<SnapshotPaths>,
+    xlayer_axis: &Arc<Mutex<Vec<CrossLayerPredictor>>>,
+    t: u64,
+) {
     vp.refresh_global_attention(t);
     vp.refresh_global_relations(t);
     vp.refresh_global_relation_predictor(t);
@@ -140,6 +145,20 @@ fn run_global_refresh_cycle(vp: &Arc<Viewport>, paths: &Arc<SnapshotPaths>, t: u
     // tiers never write a prior downward (that is Stage 2). Depth emerges only
     // where the tier below is a permanent explainer, and self-limits on noise.
     vp.tick_cross_layer_tower_sweep(t);
+    // A2 (VPC mechanism 5, prior write-back leg): tick the axis-level
+    // cross-layer bank on the serial global-refresh rhythm — strictly slower
+    // than the 100 Hz AR-2 ticker it explains. Each predictor reads its
+    // target's err + sparse source observations via the viewport only, updates
+    // its own weights locally, and (after warmup) writes a clamped prior back
+    // so the low layer's next prediction can use it. The learned state is
+    // mirrored into the viewport so the snapshot persists it across restarts.
+    {
+        let mut bank = xlayer_axis.lock().unwrap_or_else(|e| e.into_inner());
+        for clp in bank.iter_mut() {
+            clp.tick(vp);
+        }
+        vp.store_axis_xlayer_states(bank.iter().map(|c| c.to_state()).collect());
+    }
     // C5: re-recognize active objects into the familiar-objects sediment;
     // object identity and the responsible-person bond emerge from familiarity.
     vp.tick_familiar_objects(t);
@@ -179,6 +198,12 @@ fn register_or_abort(reg: &mut AdapterRegistry, adapter: Box<dyn ModalityAdapter
 }
 
 fn main() {
+    // 推论1: the body never emits human-readable text. The default panic hook
+    // would print the panic payload to stderr before catch_unwind absorbs it;
+    // replace it with a no-op so an absorbed tick panic stays purely on the
+    // tier-0 thread-fault axis.
+    std::panic::set_hook(Box::new(|_| {}));
+
     let args: Vec<String> = std::env::args().collect();
     let body_args = parse_body_args(&args);
     let runtime_dir = body_args.runtime_dir;
@@ -198,16 +223,18 @@ fn main() {
         Arc::new(Viewport::new())
     };
     if let Ok(state) = read_learned_bias_checkpoint(&learned_bias_paths.final_path) {
+        let maturity = state.developmental_maturity;
         *vp.learned_bias.write().unwrap() = state;
+        // A3: the developmental clock lives on the Viewport itself; restore it
+        // from the checkpoint so maturation survives restart (factory_dna).
+        vp.restore_maturity(maturity);
     }
-    // Nursery boot: cap action_suppression so the endogenous baseline can cross
-    // the 0.40 vocal gate. Without this, accumulated suppression from prior runs
-    // (observed at 0.155) keeps reflex_pressure at ~0.34 — just below the gate —
-    // and the body never makes its first sound (0×x=0 bootstrapping deadlock).
-    if body_args.nursery_bias {
-        let mut bias = vp.learned_bias.write().unwrap();
-        bias.action_suppression = bias.action_suppression.min(0.02);
-    }
+    // B2: the former nursery-only one-shot suppression clamp is gone. The
+    // 0×x=0 bootstrapping deadlock is now dissolved structurally for every
+    // body: action_suppression carries a pure time half-life
+    // (learned_bias::decay_vocal_suppression, driven by the body's own
+    // closure-observation cadence) and the endogenous baseline keeps a
+    // multiplicative damping floor (vocal_reflex::SUPPRESSION_DAMP_FLOOR).
     // C5: restore familiar objects so the responsible-person bond is
     // re-recognized after restart (死后保留).
     let familiar_paths =
@@ -240,13 +267,23 @@ fn main() {
             *vp.phoneme_memory.write().unwrap() = pm;
         }
     }
+    // Vocal memory: restore motor prototypes (breath/pitch/resonance parameters)
+    // accumulated by the imitation loop.  Without this, mn resets to 0 on every
+    // nursery restart and all converged motor knowledge is lost.
+    let vocal_memory_path = runtime_dir.join("vocal_memory.bin");
+    if let Ok(bytes) = std::fs::read(&vocal_memory_path) {
+        if let Some(vm) = bionic_v0::vocal_memory::VocalMemoryState::deserialize(&bytes) {
+            *vp.vocal_memory.write().unwrap() = vm;
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     // Register SIGTERM so the OS-level kill causes a graceful flush rather than
     // instant termination.  signal_flag::register atomically sets `stop` on
     // SIGTERM delivery, which exits the ticker loops and falls through to the
     // final checkpoint-write block below.
-    signal_flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stop))
-        .expect("register SIGTERM handler");
+    if signal_flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stop)).is_err() {
+        std::process::exit(1);
+    }
 
     let h_master = spawn_master_clock_hz(vp.clone(), stop.clone(), profile.master_clock_hz);
     let h_live_byte = spawn_live_byte_ingress(
@@ -261,10 +298,12 @@ fn main() {
             runtime_dir.join("live_bytes").join("out.frames"),
         )));
         let live_byte_closure_ref = live_byte_closure.clone();
-        spawn_ticker(profile.live_byte_closure_hz, stop.clone(), move |_| {
+        spawn_ticker(vp.clone(), profile.live_byte_closure_hz, stop.clone(), move |_| {
+            // Poison recovery: a caught panic elsewhere must not let this lock
+            // kill the rhythm on every later tick (state is re-derived per tick).
             let _ = live_byte_closure_ref
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .tick(&vp_live_byte_closure, now_us());
         })
     };
@@ -285,7 +324,8 @@ fn main() {
     let net_vocal_tx: VocalTx;
     let h_adapters;
     if let Some(socket_path) = headless_socket {
-        let (net_adapter, vt) = bionic_v0::net_adapter::NetSensesAdapter::new(socket_path);
+        let (net_adapter, vt) =
+            bionic_v0::net_adapter::NetSensesAdapter::new(socket_path, vp.clone());
         net_vocal_tx = vt;
         h_adapters = spawn_registry_driver(vp.clone(), stop.clone(), move || {
             let mut reg = AdapterRegistry::new();
@@ -319,18 +359,41 @@ fn main() {
         });
     };
 
-    // AR-2 predictors for ALL active axes (hearing + vision + interoception),
-    // 100 Hz. Previously only VIB_BANDS (4) were covered; expanding to AXIS_COUNT
-    // (34) means visual and interoceptive axes are now predicted — they produce
-    // err signals, feed into the relation graph, and enter the abstraction tower.
-    // This is Stage 0 of the interoceptive substrate unification: zero behavior
-    // change to the boxes; the predictors simply observe whatever each axis holds.
+    // AR-2 predictors for ALL active axes (hearing + vision + interoception +
+    // code + gauss summaries), 100 Hz. Originally only VIB_BANDS were covered;
+    // covering all AXIS_COUNT (161) axes means every tier-0 axis is predicted —
+    // each produces err signals, feeds the relation graph, and enters the
+    // abstraction tower. The predictors simply observe whatever each axis holds.
     let predictors: Arc<Mutex<Vec<Ar2Predictor>>> =
         Arc::new(Mutex::new((0..bionic_v0::AXIS_COUNT).map(Ar2Predictor::new).collect()));
+
+    // A2 (VPC mechanism 5): the axis-level cross-layer bank — the high-layer
+    // half of the keystone loop, built from a hard-coded SPARSE prior table
+    // (axis_predictor_bank). Restored from the last snapshot when one exists
+    // so learned source weights survive a restart (死后保留); a missing,
+    // older-version, or structurally incompatible snapshot yields a fresh bank.
+    let xlayer_axis: Arc<Mutex<Vec<CrossLayerPredictor>>> = {
+        let restored: Vec<CrossLayerPredictor> = read_snapshot(&paths.final_path)
+            .map(|snap| {
+                snap.axis_xlayers
+                    .iter()
+                    .filter_map(CrossLayerPredictor::from_state)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let bank = if restored.is_empty() {
+            axis_predictor_bank()
+        } else {
+            restored
+        };
+        Arc::new(Mutex::new(bank))
+    };
     let vp_pred = vp.clone();
     let pred_ref = predictors.clone();
-    let h_pred = spawn_ticker(profile.predictor_hz, stop.clone(), move |_| {
-        let mut ps = pred_ref.lock().unwrap();
+    let h_pred = spawn_ticker(vp.clone(), profile.predictor_hz, stop.clone(), move |_| {
+        // Poison recovery: predictor state updates incrementally each tick, so
+        // resuming from a poisoned guard self-corrects within a few ticks.
+        let mut ps = pred_ref.lock().unwrap_or_else(|e| e.into_inner());
         for p in ps.iter_mut() {
             p.tick(&vp_pred);
         }
@@ -341,14 +404,14 @@ fn main() {
     let hl = Arc::new(Mutex::new(HighLevelPredictor::new()));
     let vp_hl = vp.clone();
     let hl_ref = hl.clone();
-    let h_hl = spawn_ticker(profile.high_level_hz, stop.clone(), move |_| {
-        let mut hlp = hl_ref.lock().unwrap();
+    let h_hl = spawn_ticker(vp.clone(), profile.high_level_hz, stop.clone(), move |_| {
+        let mut hlp = hl_ref.lock().unwrap_or_else(|e| e.into_inner());
         hlp.tick(&vp_hl);
     });
 
     // Viewport health recompute, 50 Hz — observer only renders this value.
     let vp_health = vp.clone();
-    let h_health = spawn_ticker(profile.health_hz, stop.clone(), move |_| {
+    let h_health = spawn_ticker(vp.clone(), profile.health_hz, stop.clone(), move |_| {
         vp_health.update_health_state(now_us());
     });
 
@@ -357,13 +420,13 @@ fn main() {
     // auto-pairing for newly closed windows. Single authoritative path for
     // quiescence-based window closure.
     let vp_ingress = vp.clone();
-    let h_ingress = spawn_ticker(profile.ingress_hz, stop.clone(), move |_| {
+    let h_ingress = spawn_ticker(vp.clone(), profile.ingress_hz, stop.clone(), move |_| {
         tick_all_ingress_accumulation(&vp_ingress, now_us(), PHOT_CONSEQUENCE_QUIESCENCE_US);
     });
 
     // Binding maintenance refresh ticker, 5 Hz by default.
     let vp_binding = vp.clone();
-    let h_binding = spawn_ticker(profile.binding_hz, stop.clone(), move |_| {
+    let h_binding = spawn_ticker(vp.clone(), profile.binding_hz, stop.clone(), move |_| {
         let t = now_us();
         vp_binding.tick_binding_maintenance(t);
         vp_binding.tick_binding_resonance(t);
@@ -374,7 +437,7 @@ fn main() {
     // quiet-period history replay (endogenous activity law §2.1).
     // Both are substrate-level mechanisms — no world content or meaning.
     let vp_endo = vp.clone();
-    let h_endogenous = spawn_ticker(profile.endogenous_hz, stop.clone(), move |_| {
+    let h_endogenous = spawn_ticker(vp.clone(), profile.endogenous_hz, stop.clone(), move |_| {
         let t = now_us();
         vp_endo.tick_err_driven_attention(t);
         vp_endo.tick_quiet_history_replay(t);
@@ -387,7 +450,7 @@ fn main() {
     // In headless mode, also sample the vocal organ and send PCM to the gateway.
     let vp_vocal = vp.clone();
     let vt_for_ticker = net_vocal_tx.clone();
-    let h_vocal = spawn_ticker(profile.vocal_hz, stop.clone(), move |_| {
+    let h_vocal = spawn_ticker(vp.clone(), profile.vocal_hz, stop.clone(), move |_| {
         let t = now_us();
         // 改造6: external sound is observed into the target (no voicing here),
         // then ONE unified outlet combines all drive sources and voices once.
@@ -397,10 +460,16 @@ fn main() {
         // Headless mode: send vocal PCM to gateway via the shared socket.
         // In hardware mode the tx slot is None and this is a no-op.
         {
-            let guard = vt_for_ticker.lock().unwrap();
+            let guard = vt_for_ticker.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_some() {
                 drop(guard); // release before the (slightly expensive) PCM synthesis
                 let samples = bionic_v0::net_adapter::sample_vocal_pcm(&vp_vocal);
+                // P3: hear our own voice through the same analyzer the target
+                // uses. This reafference (self_vocal_bands → vocal_acoustic_*
+                // distance) stays inside the body as tier-0 numeric state; any
+                // human-readable readout of it belongs to the external observer
+                // reading the snapshot, never to the body process itself.
+                vp_vocal.observe_self_vocal_pcm(t, &samples);
                 bionic_v0::net_adapter::send_vocal_frame(&vt_for_ticker, &samples);
             }
         }
@@ -438,7 +507,7 @@ fn main() {
         let vt_surf = net_vocal_tx.clone();
         let vp_surf = vp.clone();
         let mut sender = bionic_v0::net_adapter::SurfaceSender::new();
-        spawn_ticker(30, stop.clone(), move |_| {
+        spawn_ticker(vp.clone(), 30, stop.clone(), move |_| {
             sender.send_gauss(&vp_surf, &vt_surf);
         })
     };
@@ -452,7 +521,8 @@ fn main() {
         let vital_cp = bionic_v0::vital_core::VitalCoreCheckpointPaths::new(&runtime_dir);
         let self_cp = bionic_v0::self_model::SelfModelCheckpointPaths::new(&runtime_dir);
         let phoneme_cp = runtime_dir.join("phoneme_memory.bin");
-        spawn_ticker(profile.checkpoint_hz, stop.clone(), move |_| {
+        let vocal_mem_cp = runtime_dir.join("vocal_memory.bin");
+        spawn_ticker(vp.clone(), profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
             let _ = write_learned_bias_checkpoint(&state, &paths_checkpoint);
             let _ = bionic_v0::familiar_objects::write_familiar_objects_checkpoint(
@@ -467,8 +537,20 @@ fn main() {
                 &vp_checkpoint.read_self_model(),
                 &self_cp,
             );
-            let pm_bytes = vp_checkpoint.phoneme_memory.read().unwrap().serialize();
+            let pm_bytes = vp_checkpoint
+                .phoneme_memory
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .serialize();
             let _ = std::fs::write(&phoneme_cp, &pm_bytes);
+            // Persist motor prototypes so imitation learning accumulates across
+            // nursery restarts (without this mn resets to 0 every restart).
+            let vm_bytes = vp_checkpoint
+                .vocal_memory
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .serialize();
+            let _ = std::fs::write(&vocal_mem_cp, &vm_bytes);
         })
     };
 
@@ -479,21 +561,63 @@ fn main() {
     // the snapshot always captures post-refresh state.
     let vp_orch = vp.clone();
     let paths_orch = paths.clone();
-    let h_orchestrator = spawn_ticker(profile.orchestrator_hz, stop.clone(), move |_| {
-        run_global_refresh_cycle(&vp_orch, &paths_orch, now_us());
+    let xlayer_orch = xlayer_axis.clone();
+    let h_orchestrator = spawn_ticker(vp.clone(), profile.orchestrator_hz, stop.clone(), move |_| {
+        run_global_refresh_cycle(&vp_orch, &paths_orch, &xlayer_orch, now_us());
     });
 
-    if duration_secs > 0 {
-        let t0 = std::time::Instant::now();
-        while t0.elapsed() < Duration::from_secs(duration_secs) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        stop.store(true, Ordering::Relaxed);
-    } else {
-        // Poll stop flag at 100 ms so a SIGTERM (or any other flag-setter)
-        // is noticed quickly and falls through to the checkpoint flush below.
-        while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(100));
+    // Watchdog (推论3): the main loop already wakes every 100 ms; piggyback a
+    // liveness sweep over all rhythm threads. A handle that finished while
+    // stop is still false means a rhythm died — record it once on the tier-0
+    // thread-fault axis (no text, no restart in this stage) so the observer
+    // sees a half-dead body instead of silence.
+    {
+        let watch_handles: [&std::thread::JoinHandle<()>; 16] = [
+            &h_surface,
+            &h_adapters,
+            &h_pred,
+            &h_hl,
+            &h_health,
+            &h_ingress,
+            &h_binding,
+            &h_endogenous,
+            &h_vocal,
+            &h_vocal_output,
+            &h_audio,
+            &h_learned_bias_checkpoint,
+            &h_orchestrator,
+            &h_live_byte,
+            &h_live_byte_closure,
+            &h_master,
+        ];
+        let mut watch_reported = [false; 16];
+        let watchdog_sweep = |reported: &mut [bool; 16]| {
+            for (i, h) in watch_handles.iter().enumerate() {
+                if !reported[i] && h.is_finished() {
+                    reported[i] = true;
+                    vp.mark_thread_fault();
+                }
+            }
+        };
+
+        if duration_secs > 0 {
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < Duration::from_secs(duration_secs) {
+                std::thread::sleep(Duration::from_millis(100));
+                if !stop.load(Ordering::Relaxed) {
+                    watchdog_sweep(&mut watch_reported);
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+        } else {
+            // Poll stop flag at 100 ms so a SIGTERM (or any other flag-setter)
+            // is noticed quickly and falls through to the checkpoint flush below.
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                if !stop.load(Ordering::Relaxed) {
+                    watchdog_sweep(&mut watch_reported);
+                }
+            }
         }
     }
 
@@ -535,6 +659,12 @@ fn main() {
     {
         let pm_bytes = vp.phoneme_memory.read().unwrap().serialize();
         let _ = std::fs::write(&phoneme_memory_path, &pm_bytes);
+    }
+    // Motor prototypes: persist at shutdown so accumulated imitation learning
+    // is not lost when the nursery restarts (cumulative across sessions).
+    {
+        let vm_bytes = vp.vocal_memory.read().unwrap().serialize();
+        let _ = std::fs::write(&vocal_memory_path, &vm_bytes);
     }
 
     std::process::exit(0);

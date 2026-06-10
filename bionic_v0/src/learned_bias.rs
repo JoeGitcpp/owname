@@ -5,9 +5,15 @@ use std::io::{Error, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 pub const LEARNED_BIAS_MAGIC: u64 = 0xB10B10_0000_0042;
-pub const LEARNED_BIAS_VERSION: u64 = 4;
+pub const LEARNED_BIAS_VERSION: u64 = 5;
 pub const LEARNED_BIAS_CURVE_CAP: usize = 128;
 pub const LEARNED_BIAS_EVENT_CAP: usize = 256;
+/// B2 机制A: action_suppression 的纯时间半衰期（5 分钟）。
+/// 远长于 5s 内生节律与单次闭环间隔（单个闭环间隔内衰减 <1%，
+/// 在场安静的沉积仍稳定积累）；但有限——长期没有闭环刺激时
+/// suppression 松弛回低位，结构上消除单调累积锁死（0×x=0）。
+/// 无语义的数值松弛：非惩罚、非 reward、不带正负价。
+pub const SUPPRESSION_HALF_LIFE_US: f64 = 300_000_000.0;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BiasLocator {
@@ -69,6 +75,18 @@ pub struct LearnedBiasState {
     /// proved useful → 爱叫". Independent of prediction_familiarity, which damps
     /// self-excitation. Newborn 0.0; 死后保留 (serialized v4+).
     pub vocal_efficacy: f64,
+    /// A3: developmental clock m∈[0,1]（Viewport::developmental_maturity 的
+    /// checkpoint 镜像）。真身在 Viewport 上；save 时由
+    /// `Viewport::read_learned_bias` 装入，boot 时经
+    /// `Viewport::restore_maturity` 回填。新生 0.0（Default 守住）；
+    /// 死后保留 (serialized v5+)。
+    pub developmental_maturity: f64,
+    /// B2 机制A: 上次 suppression 半衰的时刻（µs）。
+    /// 刻意**不持久化**（不入 learned_bias.bin、不动 LEARNED_BIAS_VERSION）：
+    /// 重启后该字段为 0，首次 decay 看到的 elapsed 巨大 → suppression
+    /// 大幅松弛——把"久未刷新"的陈旧抑制当作已遗忘，结构上根除
+    /// 跨重启累积的锁死。工程时戳，非语义状态。
+    pub last_suppression_decay_us: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -218,6 +236,23 @@ impl LearnedBiasState {
             vocal_efficacy: self.vocal_efficacy,
         }
     }
+
+    /// B2 机制A: action_suppression 的纯时间半衰。
+    /// 无语义数值松弛——非惩罚、非 reward；suppression 仍只由闭环事件
+    /// 沉积，这里只补一条遗忘律，使它成为"近期未发声闭环的滑动沉积"
+    /// 而非永久单调累积。τ 远大于单次闭环间隔（在场安静仍稳定沉积），
+    /// 但有限（长期无闭环时松弛），消除自举死锁的退化不动点。
+    /// 重启后 last_suppression_decay_us=0（不持久化）→ 首次调用
+    /// elapsed 巨大 → 陈旧 suppression 直接松弛到 ≈0。
+    pub fn decay_vocal_suppression(&mut self, now_us: u64) {
+        let elapsed = now_us.saturating_sub(self.last_suppression_decay_us);
+        if elapsed == 0 {
+            return;
+        }
+        let k = 0.5_f64.powf(elapsed as f64 / SUPPRESSION_HALF_LIFE_US);
+        self.action_suppression *= k;
+        self.last_suppression_decay_us = now_us;
+    }
 }
 
 
@@ -258,6 +293,8 @@ pub fn write_learned_bias_checkpoint(
     write_f64(&mut buf, state.prediction_familiarity);
     write_f64(&mut buf, state.action_suppression);
     write_f64(&mut buf, state.vocal_efficacy);
+    // v5: developmental clock persists（跨重启继承; A3）.
+    write_f64(&mut buf, state.developmental_maturity);
 
     {
         let mut f = File::create(&paths.tmp_path)?;
@@ -304,6 +341,8 @@ pub fn read_learned_bias_checkpoint(path: &Path) -> std::io::Result<LearnedBiasS
     let prediction_familiarity = read_f64(&bytes, &mut cur)?;
     let action_suppression = read_f64(&bytes, &mut cur)?;
     let vocal_efficacy = read_f64(&bytes, &mut cur)?;
+    // v5: developmental clock persists. (version gate already enforced == 5.)
+    let developmental_maturity = read_f64(&bytes, &mut cur)?;
 
     Ok(LearnedBiasState {
         n_curves: curves.len() as u32,
@@ -315,6 +354,10 @@ pub fn read_learned_bias_checkpoint(path: &Path) -> std::io::Result<LearnedBiasS
         prediction_familiarity,
         action_suppression,
         vocal_efficacy,
+        developmental_maturity,
+        // B2: 刻意不持久化。重启后从 0 起 → 首次 decay 的 elapsed 巨大
+        // → 陈旧 suppression 大幅松弛，跨重启累积在结构上被根除。
+        last_suppression_decay_us: 0,
     })
 }
 

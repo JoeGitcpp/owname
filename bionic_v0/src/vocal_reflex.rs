@@ -1,3 +1,18 @@
+/// B2 机制B(B1路线): endogenous baseline 的 suppression 乘性阻尼地板。
+/// 消除乘性退化不动点(0×x=0)——不是发声靶子:它只保证"内生探索节律"
+/// 这一输入项不会被同一回路沉积的抑制乘性压塌;suppression 仍经
+/// tick_drive 的 regulating_pressure 加性地全额起作用(单重阻尼,
+/// 不再双重)。取 0.96: 地板恰在历史死锁起点 S*≈0.0717 处接管
+/// (1-0.55·0.0717≈0.96),低于该点原阻尼律不受影响。
+/// 成熟体 prediction_familiarity→1 时 exploration_drive→0,
+/// baseline 整体仍自然归零——地板不会逼成熟体发声。
+///
+/// B2 增强: 此常量现为发育时钟退火的 m=0 端点(新生最宽)。实际地板由
+/// 调用方经 lib.rs::suppression_damp_floor(发育时钟) 连续线性收窄,
+/// 在 m=1 处到 0.45 = 1−0.55·1.0——即地板退到乘性项自身的自然下限,
+/// 成熟体逐位回到原始无地板阻尼律。连续数值调制,非资格门、非靶子。
+pub const SUPPRESSION_DAMP_FLOOR: f64 = 0.96;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VocalReflexState {
     pub reflex_pressure: f64,
@@ -108,10 +123,16 @@ impl VocalReflexState {
     /// Returns a pressure value in [0.0, 0.12] — just enough to cross the
     /// reflex threshold (0.40) when combined with other drive sources or
     /// when the newborn has near-zero regulating pressure.
+    /// `damp_floor`: multiplicative floor for the suppression damping term,
+    /// precomputed by the caller from the developmental clock via
+    /// lib.rs::suppression_damp_floor (continuous anneal: widest at birth,
+    /// narrowing to the term's own natural lower bound 0.45 where it never
+    /// binds). Passing SUPPRESSION_DAMP_FLOOR reproduces the newborn law.
     pub fn endogenous_baseline(
         now_us: u64,
         prediction_familiarity: f64,
         action_suppression: f64,
+        damp_floor: f64,
     ) -> f64 {
         // Slow oscillation: ~0.04 Hz (25-second period).
         // This is the "wave" — a substrate-level numerical rhythm that,
@@ -141,7 +162,11 @@ impl VocalReflexState {
         let baseline = rhythm * exploration_drive;
 
         // Dampened by learned suppression. High suppression → quieter baseline.
-        baseline * (1.0 - action_suppression * 0.55)
+        // B2 机制B: 阻尼项加乘性地板——消除乘性退化不动点,非发声靶子;
+        // familiarity→1 时 exploration_drive→0 仍让 baseline 整体归零。
+        // 地板值由调用方按发育时钟连续退火传入(幼态宽=自举逃逸,
+        // 成熟收窄到 0.45 后地板不再起作用,回到原始阻尼数学)。
+        baseline * (1.0 - action_suppression * 0.55).max(damp_floor)
     }
 
     pub fn tick_decay(&mut self, now_us: u64) {

@@ -58,6 +58,8 @@ pub mod vocal_imitation;
 pub mod vocal_memory;
 pub mod vocal_organ;
 pub mod vocal_reflex;
+pub mod vocal_self_analysis;
+pub mod vocal_servo;
 pub mod vocal_synthesis;
 pub mod vocal_target;
 pub mod phoneme_memory;
@@ -530,7 +532,25 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 /// v56: Maximized CPU spec — VIB_BANDS 4→16, VIS_GRID 2×2→4×4,
 /// VIS_AXES_PER_REGION 5→8 (+saturation/temporal_flux/edge_energy); AXIS_COUNT
 /// 41→161 (16+128+10+5+2). Old axis layout incompatible; v55 snapshots rejected.
-pub const SNAPSHOT_VERSION: u64 = 56;
+/// v57: B1 robustness — tier-0 thread-fault axis (thread_fault: u64-bool +
+/// thread_fault_count: u64) appended at the very end of the snapshot.
+/// v58: A1 dual-drive confluence — observer-visible mirror of the per-tick
+/// DualDriveReading (5×f64 + sacrificing u8 + 7-byte pad) appended at the very
+/// end of the snapshot, after the v57 thread-fault block.
+/// v59: A2 axis-level cross-layer bank (VPC mechanism 5 prior write-back leg) —
+/// learned per-target source weights / bias / EMAs of the body-resident axis
+/// CrossLayerPredictor bank, appended at the very end of the snapshot, after
+/// the v58 dual-drive block. Older snapshots restore an empty bank.
+/// v60: A3 developmental clock (Viewport::developmental_maturity, one LE f64)
+/// appended after the v59 axis cross-layer bank, so the observer can watch the
+/// coarse→fine precision annealing curve. Older snapshots read back 0.0.
+pub const SNAPSHOT_VERSION: u64 = 60;
+
+/// Precision-war guard rule 2: hard ceiling on any prior magnitude written
+/// into the per-axis prior channel ("prior 精度上限 ≈ 100"). A diverged or
+/// degenerate high-layer predictor can at worst push ±this value into the low
+/// layer's additive input — never an unbounded finite value.
+pub const MAX_PRIOR_MAGNITUDE: f64 = 100.0;
 
 /// Maximum precision_bias suggestion value (Phase 5C). precision_bias is a
 /// purely observable suggestion and does NOT feed back into fusion formulas.
@@ -588,6 +608,62 @@ pub fn binding_align_min(maturity: f64) -> f64 {
 pub fn binding_deviate_max(maturity: f64) -> f64 {
     let m = maturity.clamp(0.0, 1.0);
     BINDING_PAIR_NEUTRAL - (BINDING_PAIR_NEUTRAL - BINDING_PAIR_DEVIATE_MAX) * m
+}
+
+/// A3: naive multiplier for the AR-2 axis predictor's effective learning rate.
+/// At m=0 the per-tick Widrow-Hoff step is this many times larger — coarse,
+/// fast, tolerant learning so a near-zero newborn coefficient still moves
+/// (0×x=0 bootstrap escape). Anneals linearly to exactly 1.0 at m=1 so the
+/// mature body keeps the existing hand-tuned base_lr untouched.
+pub const AR2_LR_SCALE_NAIVE: f64 = 3.0;
+
+/// Maturity schedule for the AR-2 effective learning rate: AR2_LR_SCALE_NAIVE
+/// at m=0, exactly 1.0 at m=1 (mature behaviour identical to the pre-schedule
+/// hard-coded value). Pure function over the developmental clock; a continuous
+/// local scalar, never a capability gate.
+pub fn ar2_lr_scale(maturity: f64) -> f64 {
+    let m = maturity.clamp(0.0, 1.0);
+    AR2_LR_SCALE_NAIVE + (1.0 - AR2_LR_SCALE_NAIVE) * m
+}
+
+/// A3: naive multiplier for the cross-layer (mechanism 5) prior write-back
+/// gain. At m=0 the high layer's coarse prior reaches the low layer this many
+/// times stronger — an early, tolerant prior helps the low layer move off its
+/// 0×x=0 dead point. Anneals linearly to exactly 1.0 at m=1 so the mature
+/// noise-rejection gate (prior_gain·explained) is untouched. The downstream
+/// push_prior ±MAX_PRIOR_MAGNITUDE clamp still bounds the worst case.
+pub const VPC_PRIOR_GAIN_SCALE_NAIVE: f64 = 2.0;
+
+/// Maturity schedule for the cross-layer prior write-back gain:
+/// VPC_PRIOR_GAIN_SCALE_NAIVE at m=0, exactly 1.0 at m=1. Pure function over
+/// the developmental clock; scales one local scalar of the writing predictor
+/// only — never crosses layers, never gates a capability.
+pub fn vpc_prior_gain_scale(maturity: f64) -> f64 {
+    let m = maturity.clamp(0.0, 1.0);
+    VPC_PRIOR_GAIN_SCALE_NAIVE + (1.0 - VPC_PRIOR_GAIN_SCALE_NAIVE) * m
+}
+
+/// B2 enhancement: mature endpoint for the endogenous-baseline suppression
+/// damping floor. 0.45 = 1 − 0.55·1.0, the natural lower bound of the
+/// multiplicative damping term itself — at m=1 the floor can never bind for
+/// any suppression in [0,1], so the mature body runs the ORIGINAL un-floored
+/// damping math bit-for-bit. Not a vocal target, not a capability gate.
+pub const SUPPRESSION_DAMP_FLOOR_MATURE: f64 = 0.45;
+
+/// Maturity schedule for the endogenous-baseline suppression damping floor:
+/// SUPPRESSION_DAMP_FLOOR (0.96, the B2 newborn value that takes over exactly
+/// at the historical deadlock onset S*≈0.0717) at m=0, annealing linearly to
+/// SUPPRESSION_DAMP_FLOOR_MATURE (0.45) at m=1 where the floor mathematically
+/// vanishes (1 − 0.55·s ≥ 0.45 for all s∈[0,1]). Wide when naive — the
+/// multiplicative 0×x=0 degenerate fixed point cannot form during bootstrap —
+/// then narrowing continuously so the mature body returns to the original
+/// damping law. Pure function over the developmental clock; a continuous
+/// local scalar, never a capability/eligibility gate, never a reward.
+pub fn suppression_damp_floor(maturity: f64) -> f64 {
+    let m = maturity.clamp(0.0, 1.0);
+    // Two-coefficient lerp so both endpoints are exact in f64 (the a+(b−a)·m
+    // form lands at 0.44999999999999996 at m=1).
+    (1.0 - m) * crate::vocal_reflex::SUPPRESSION_DAMP_FLOOR + m * SUPPRESSION_DAMP_FLOOR_MATURE
 }
 
 // --- Endogenous Activity Laws (spec 2026-04-20) ---
