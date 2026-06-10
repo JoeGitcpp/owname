@@ -526,6 +526,42 @@ wss.on('connection', (ws, req) => {
   let badFrames    = 0
   const MAX_BAD    = 10  // disconnect after N consecutive bad frames
 
+  // Backpressure-aware surface relay. The body emits raw 320×180 RGBA surface
+  // frames (~230 KB) at ~30 fps (~7 MB/s). Forwarding every frame queues
+  // unboundedly in the ws send buffer when the tunnel/client link is slower,
+  // delaying ALL frames (vocal audio included) by seconds-to-minutes — the
+  // browser sees a black surface and hears nothing. Instead: keep only the
+  // freshest surface frame and flush it when the socket has drained; drop
+  // stale ones. Vocal frames are small and latency-sensitive — forward
+  // immediately, dropping only under heavy backlog.
+  let latestSurface  = null
+  let surfaceTimer   = null
+  const SURFACE_FLUSH_MS      = 250         // ≤ 4 fps to the browser
+  const SURFACE_BACKLOG_MAX   = 64 * 1024   // flush only when queue is short
+  const VOCAL_BACKLOG_MAX     = 256 * 1024  // drop vocal only past this
+  // Tunnel goodput measured at ~100 KB/s: a raw 320×180 RGBA frame (230 KB)
+  // alone exceeds it. Downsample 4× (80×45, ~14 KB) before relaying — the
+  // client draws whatever w×h the frame declares and CSS scales it up.
+  const SURFACE_DOWNSCALE     = 4
+  const downsampleSurface = (frame) => {
+    const w = frame.readUInt16LE(1), h = frame.readUInt16LE(3)
+    const f = SURFACE_DOWNSCALE
+    if (f <= 1 || w % f || h % f) return frame
+    const dw = w / f, dh = h / f
+    const out = Buffer.allocUnsafe(5 + dw * dh * 4)
+    out[0] = frame[0]
+    out.writeUInt16LE(dw, 1)
+    out.writeUInt16LE(dh, 3)
+    for (let y = 0; y < dh; y++) {
+      for (let x = 0; x < dw; x++) {
+        const src = 5 + ((y * f) * w + (x * f)) * 4
+        const dst = 5 + (y * dw + x) * 4
+        frame.copy(out, dst, src, src + 4)
+      }
+    }
+    return out
+  }
+
   const tryConnect = (attempts = 0) => {
     if (attempts > 40 || ws.readyState !== 1 /* OPEN */) {
       ws.close(1011, 'body-timeout'); return
@@ -546,7 +582,9 @@ wss.on('connection', (ws, req) => {
             const n    = vocalBuf.readUInt16LE(1)
             const need = 3 + n * 4
             if (vocalBuf.length < need) break
-            if (ws.readyState === 1) ws.send(XorCipher.apply(vocalBuf.slice(0, need), xorKey))
+            if (ws.readyState === 1 && ws.bufferedAmount < VOCAL_BACKLOG_MAX) {
+              ws.send(XorCipher.apply(vocalBuf.slice(0, need), xorKey))
+            }
             vocalBuf = vocalBuf.slice(need)
           } else if (tag === 0x04) {
             // Surface pixel frame: [0x04][w:u16le][h:u16le][w*h*4 RGBA bytes]
@@ -555,7 +593,7 @@ wss.on('connection', (ws, req) => {
             const h    = vocalBuf.readUInt16LE(3)
             const need = 5 + w * h * 4
             if (vocalBuf.length < need) break
-            if (ws.readyState === 1) ws.send(XorCipher.apply(vocalBuf.slice(0, need), xorKey))
+            latestSurface = downsampleSurface(vocalBuf.slice(0, need))  // keep freshest, flushed by surfaceTimer
             vocalBuf = vocalBuf.slice(need)
           } else {
             vocalBuf = vocalBuf.slice(1)  // resync
@@ -567,6 +605,14 @@ wss.on('connection', (ws, req) => {
     })
   }
   setTimeout(() => tryConnect(), 300)
+
+  // Flush the freshest surface frame whenever the socket has drained.
+  surfaceTimer = setInterval(() => {
+    if (!latestSurface || ws.readyState !== 1) return
+    if (ws.bufferedAmount > SURFACE_BACKLOG_MAX) return  // still draining — retry next tick
+    ws.send(XorCipher.apply(latestSurface, xorKey))
+    latestSurface = null
+  }, SURFACE_FLUSH_MS)
 
   // Life-state pulse at ~1 Hz
   stateTimer = setInterval(() => {
@@ -623,6 +669,7 @@ wss.on('connection', (ws, req) => {
   const cleanup = () => {
     clearTimeout(hardTimeout)
     clearInterval(stateTimer)
+    clearInterval(surfaceTimer)
     idleTracker.remove(sessionId)
     sessionGuard.release(sessionId)
     activeSessions.delete(sessionId)
