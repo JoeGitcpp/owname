@@ -15,23 +15,48 @@ use bionic_v0::learned_bias::{
     read_learned_bias_checkpoint, write_learned_bias_checkpoint, LearnedBiasCheckpointPaths,
 };
 use bionic_v0::viewport::Viewport;
+use bionic_v0::VIB_BANDS;
+
+/// Set up a viewport so that a vocalized closure carries real acoustic
+/// competence evidence: a target contour AND a heard-self that matches it
+/// (fit≈1), mirroring the real nursery where the body hears itself voice and
+/// compares to the fed audio. Without this, vocal_efficacy correctly stays 0
+/// (no target to be competent at).
+fn pin_matching_self_and_target(vp: &Arc<Viewport>) {
+    let mut shape = [0.0f64; VIB_BANDS];
+    shape[0] = 1.0;
+    shape[1] = 0.6;
+    shape[2] = 0.3;
+    vp.observe_vocal_target_bands(1, 0.6, 0.4, 0.7, 0.6, shape);
+    *vp.self_vocal_bands.write().unwrap() = (shape, 1); // heard-self == target → fit≈1
+}
 
 #[test]
 fn voicing_closure_raises_efficacy() {
     let vp = Arc::new(Viewport::new());
     assert_eq!(vp.read_learned_bias().vocal_efficacy, 0.0, "newborn efficacy 0");
+    pin_matching_self_and_target(&vp);
 
-    // Repeated effective voicing (vocalized=true with closure support).
+    // Repeated effective voicing whose heard-self matches the target → real
+    // acoustic competence → efficacy EMA rises from 0.
     let mut t = 1_000_000u64;
-    for _ in 0..20 {
+    for k in 0..200u64 {
+        *vp.self_vocal_bands.write().unwrap() = ({
+            let mut s = [0.0f64; VIB_BANDS];
+            s[0] = 1.0;
+            s[1] = 0.6;
+            s[2] = 0.3;
+            s
+        }, t);
         vp.observe_vocal_reflex_closure(t, 0.9, true);
         t += 100_000;
+        let _ = k;
     }
 
     let eff = vp.read_learned_bias().vocal_efficacy;
     assert!(
         eff > 0.0,
-        "effective voicing must raise vocal_efficacy (爱叫): {eff}"
+        "voicing that hears itself match the target must raise vocal_efficacy (爱叫): {eff}"
     );
 }
 
@@ -42,9 +67,17 @@ fn vocal_biases_survive_checkpoint_roundtrip() {
     let paths = LearnedBiasCheckpointPaths::new(&dir);
 
     let vp = Arc::new(Viewport::new());
+    pin_matching_self_and_target(&vp);
     let mut t = 1_000_000u64;
-    for _ in 0..30 {
-        vp.observe_vocal_reflex_closure(t, 0.9, true); // raises fam + efficacy
+    for _ in 0..200 {
+        *vp.self_vocal_bands.write().unwrap() = ({
+            let mut s = [0.0f64; VIB_BANDS];
+            s[0] = 1.0;
+            s[1] = 0.6;
+            s[2] = 0.3;
+            s
+        }, t);
+        vp.observe_vocal_reflex_closure(t, 0.9, true); // matches target → raises fam + efficacy
         vp.observe_vocal_reflex_closure(t + 50_000, 0.9, false); // raises suppression
         t += 200_000;
     }

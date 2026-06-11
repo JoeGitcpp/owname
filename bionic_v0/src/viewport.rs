@@ -4143,67 +4143,61 @@ impl Viewport {
             let mut reflex = self.vocal_reflex.write().unwrap();
             reflex.observe_closure(now_us, closure_support, vocalized)
         };
-        // Acoustic-fit honesty (uniform across ALL closure paths). A closure
-        // only counts as vocal *competence* to the degree the body's heard-self
-        // actually matches the current target contour. acoustic_fit ∈ [0,1]:
-        // 1 = heard self matches target shape, →0 = unlike. With no acoustic
-        // evidence yet (self silent / no self-hearing data) it is 1.0 — no
-        // penalty, preserving the cold-start bootstrap before any spectral data
-        // exists. shape_dist is a prediction-error-derived neutral quantity,
-        // applied as a continuous multiplicative field — NOT a reward, NOT a
-        // threshold gate. This is what makes "I voiced" stop masquerading as
-        // "I voiced *like the target*".
-        let acoustic_fit = if vocalized {
+        // Vocal-acoustic competence. A closure carries competence evidence ONLY
+        // when the body actually heard itself voice this round AND can compare
+        // that to the target contour. A closure with no heard-self — a silent
+        // moment, or no self-hearing data yet — carries NO acoustic evidence and
+        // must credit neither efficacy nor the developmental clock. (The earlier
+        // "no evidence → fit 1.0, no penalty" fallback was the leak: the
+        // action-consequence pair path fires at the orchestrator rate, mostly
+        // during silent moments, so those evidence-less closures sailed through
+        // ungated and saturated efficacy/maturity to 1.0 — the illusory
+        // convergence.) shape_dist is a prediction-error-derived neutral
+        // quantity used as a continuous weight, NOT a reward and NOT a threshold
+        // gate. None = no evidence, skip; Some(c) = acoustic-fit-weighted level.
+        let acoustic_competence: Option<f64> = if vocalized {
             let (self_bands, _) = self.read_self_vocal_bands();
             if self_bands.iter().sum::<f64>() > 1e-6 {
                 let target = self.read_vocal_target();
-                (1.0 - crate::vocal_self_analysis::spectral_shape_distance(
-                    &self_bands,
-                    &target.target_bands,
-                ))
-                .clamp(0.0, 1.0)
+                let fit = (1.0
+                    - crate::vocal_self_analysis::spectral_shape_distance(
+                        &self_bands,
+                        &target.target_bands,
+                    ))
+                .clamp(0.0, 1.0);
+                Some((closure_support.clamp(0.0, 1.0) * fit).clamp(0.0, 1.0))
             } else {
-                1.0
+                None
             }
         } else {
-            1.0
-        };
-        // efficacy is an exponential moving average of the acoustic-fit-weighted
-        // closure level, NOT a monotonic ratchet. The action-consequence pair
-        // path fires at the orchestrator rate (tens of Hz); a ratchet (even with
-        // slow decay) saturates to 1.0 within seconds regardless of fit, which
-        // is exactly the illusory convergence we are removing. An EMA instead
-        // converges toward the *recent average* competence: it rises only as the
-        // heard-self genuinely approaches the target and falls when it does not,
-        // so efficacy reports present ability rather than "ever voiced".
-        let competence = if vocalized {
-            (closure_support.clamp(0.0, 1.0) * acoustic_fit).clamp(0.0, 1.0)
-        } else {
-            // non-vocalized closure carries no vocal-competence evidence; pull
-            // efficacy toward 0 only gently by leaving it untouched here.
-            f64::NAN
+            None
         };
         {
             let mut bias = self.learned_bias.write().unwrap();
             // B2 机制A: suppression 的时间遗忘与其累积共用同一把写锁、同一节律。
             bias.decay_vocal_suppression(now_us);
-            // efficacy 的纯时间松弛保留为重启松弛兜底（不持久化时戳）；
-            // 生命期内的真正调节由下面的 EMA 完成。
+            // efficacy 的纯时间松弛保留为重启松弛兜底（不持久化时戳）。
             bias.decay_vocal_efficacy(now_us);
             bias.prediction_familiarity = (bias.prediction_familiarity + delta_fam).min(1.0);
             bias.action_suppression = (bias.action_suppression + delta_sup).min(1.0);
-            if competence.is_finite() {
-                // EMA toward the acoustic-fit-weighted competence level.
+            // efficacy is an EMA of the acoustic-fit-weighted competence, updated
+            // ONLY on closures that carry heard-self evidence. It converges toward
+            // recent genuine competence and falls when the heard-self stops
+            // matching — reporting present ability, not "ever voiced". A ratchet
+            // (even with slow decay) saturates under the high-rate pair path; an
+            // evidence-gated EMA does not.
+            if let Some(c) = acoustic_competence {
                 bias.vocal_efficacy +=
-                    crate::VOCAL_EFFICACY_EMA_ALPHA * (competence - bias.vocal_efficacy);
+                    crate::VOCAL_EFFICACY_EMA_ALPHA * (c - bias.vocal_efficacy);
                 bias.vocal_efficacy = bias.vocal_efficacy.clamp(0.0, 1.0);
             }
         }
-        // Developmental clock: maturity advances on *earned acoustic competence*,
-        // not on mere voicing — gate the advance by the same acoustic fit so the
-        // coarse→fine schedule tracks real progress instead of saturating in
-        // seconds from high-rate content-blind closures.
-        self.advance_maturity(closure_support * acoustic_fit);
+        // Developmental clock advances on earned acoustic competence only —
+        // evidence-less closures do not move it, so the coarse→fine schedule
+        // tracks real vocal progress instead of saturating in seconds.
+        if let Some(c) = acoustic_competence {
+            self.advance_maturity(c);
+        }
     }
 
     pub fn tick_vocal_reflex_from_pressure(&self, now_us: u64) {

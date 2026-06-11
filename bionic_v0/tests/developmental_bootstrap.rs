@@ -121,6 +121,23 @@ fn high_rate_unlike_closures_do_not_saturate_efficacy() {
         "high-rate unlike closures must NOT saturate efficacy (got {eff_unlike})"
     );
 
+    // The leak that pinned the LIVE body to 1.0: the orchestrator pair path
+    // fires mostly during silent moments where self_vocal_bands is empty. Such
+    // evidence-less closures must carry NO competence — they must not move
+    // efficacy at all (no "no-evidence → fit 1.0" fallback).
+    let vp_silent = Arc::new(Viewport::new());
+    vp_silent.observe_vocal_target_bands(1, 0.6, 0.4, 0.7, 0.6, low);
+    // self_vocal_bands left EMPTY throughout.
+    for k in 0..5000u64 {
+        vp_silent.observe_vocal_reflex_closure(1 + k, 1.0, true);
+    }
+    let eff_silent = vp_silent.read_learned_bias().vocal_efficacy;
+    assert!(
+        eff_silent < 1e-6,
+        "evidence-less (empty self_bands) closures must not move efficacy at all \
+         (got {eff_silent})"
+    );
+
     // Now matching closures: efficacy must rise well above the unlike case toward
     // the genuine competence level — efficacy reports present ability.
     let vp2 = Arc::new(Viewport::new());
@@ -171,15 +188,23 @@ fn binding_precision_is_loose_for_newborn_and_strict_for_mature() {
 }
 
 #[test]
-fn vocal_self_play_breaks_bootstrap_without_caregiver() {
+fn vocal_self_play_builds_familiarity_but_not_target_competence() {
+    // Corrected developmental semantics: babbling and hearing one's own echo is
+    // a predictable motor→sound consequence — it builds FAMILIARITY (the body
+    // learns its voice is its own and predictable), which breaks the cold-start
+    // deadlock (there is now something learnable). But vocal *competence*
+    // (efficacy) and the developmental clock (maturity) are reserved for
+    // matching a target contour: a body babbling into a room with NO caregiver
+    // model has nothing to be competent *at*, so neither advances. (This is what
+    // stops "I babbled" from masquerading as "I learned to speak" — the illusory
+    // convergence that pinned efficacy/maturity to 1.0.)
     let vp = Arc::new(Viewport::new());
     assert_eq!(vp.read_learned_bias().vocal_efficacy, 0.0, "newborn efficacy 0");
     assert_eq!(vp.developmental_maturity(), 0.0, "newborn naive");
 
-    // Pure self-play: the body babbles (begin_voicing) and 10 ms later hears its
-    // own voice come back as a VIB candidate (the echo). No external/caregiver
-    // sound is ever injected. The echo is still kept out of the imitation target
-    // (anti self-excitation), but it now closes a slow self-play loop.
+    // Pure self-play, NO external/caregiver sound. The echo is kept out of the
+    // imitation target (anti self-excitation); self_vocal_bands is never
+    // populated here, mirroring the no-evidence-vs-a-target case.
     let mut t = 1_000_000u64;
     for _ in 0..20 {
         vp.begin_voicing(t, 0.6, 0.4, 0.7); // babble: organ goes Active
@@ -190,17 +215,17 @@ fn vocal_self_play_breaks_bootstrap_without_caregiver() {
     }
 
     assert!(
-        vp.read_learned_bias().vocal_efficacy > 0.0,
-        "vocal self-play (babble + hear-self) must raise efficacy with no caregiver: {}",
-        vp.read_learned_bias().vocal_efficacy
-    );
-    assert!(
         vp.read_learned_bias().prediction_familiarity > 0.0,
         "self-play must build familiarity (a predictable motor→sound consequence)"
     );
-    assert!(
-        vp.developmental_maturity() > 0.0,
-        "self-play closures must advance the developmental clock: {}",
+    assert_eq!(
+        vp.read_learned_bias().vocal_efficacy, 0.0,
+        "without a target to match, babble must NOT build vocal competence: {}",
+        vp.read_learned_bias().vocal_efficacy
+    );
+    assert_eq!(
+        vp.developmental_maturity(), 0.0,
+        "without a target to match, babble must NOT advance the developmental clock: {}",
         vp.developmental_maturity()
     );
 }
