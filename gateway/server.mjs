@@ -428,26 +428,19 @@ const wss = new WebSocketServer({
 // not send a proper WS close frame, so the server sees a sudden 1006 drop after
 // the NAT/firewall idle timeout (typically 30-90 s).
 //
-// Fix: send a WebSocket-level ping frame every 20 s.  The browser stack
-// responds automatically with a pong frame (built into the WS protocol, no JS
-// needed).  This resets NAT idle timers and lets the server detect truly dead
-// connections (no pong after 30 s → terminate).
+// Send a ping frame every 20 s to reset NAT idle timers on the CF tunnel →
+// server TCP leg.  Cloudflare strips WS control frames before they reach the
+// browser, so pongs never come back — do NOT terminate on missed pong or every
+// session dies at 20–40 s.
 const PING_INTERVAL_MS = 20_000
-const PONG_TIMEOUT_MS  = 30_000
 setInterval(() => {
   for (const client of wss.clients) {
     if (client.readyState !== client.OPEN) continue
-    if (client._pongMissed) { client.terminate(); continue }
-    client._pongMissed = true
     client.ping()
   }
 }, PING_INTERVAL_MS)
-// Clear the missed-pong flag when a pong arrives.  Attached per-connection below.
 
 wss.on('connection', (ws, req) => {
-  // ── Ping keepalive: clear the missed-pong flag when the browser replies ───
-  ws._pongMissed = false
-  ws.on('pong', () => { ws._pongMissed = false })
 
   // ── Identity resolution: phone cookie > email cookie > anon ──────────────
   const identity    = resolveIdentity(req)
@@ -618,7 +611,16 @@ wss.on('connection', (ws, req) => {
             const need = 3 + n * 4
             if (vocalBuf.length < need) break
             if (ws.readyState === 1 && ws.bufferedAmount < VOCAL_BACKLOG_MAX) {
-              ws.send(XorCipher.apply(vocalBuf.slice(0, need), xorKey))
+              // Convert f32 → int16 before sending: halves bandwidth (~51 KB/s vs ~103 KB/s).
+              // Format stays [0x02][n:u16le][n×i16le] — browser reads getInt16/32768.
+              const frame = Buffer.allocUnsafe(3 + n * 2)
+              frame[0] = 0x02
+              frame.writeUInt16LE(n, 1)
+              for (let i = 0; i < n; i++) {
+                const s = vocalBuf.readFloatLE(3 + i * 4)
+                frame.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(s * 32767))), 3 + i * 2)
+              }
+              ws.send(XorCipher.apply(frame, xorKey))
             }
             vocalBuf = vocalBuf.slice(need)
           } else if (tag === 0x04) {

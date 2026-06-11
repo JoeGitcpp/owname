@@ -153,7 +153,7 @@ function useBodyBridge(
         const RATE = 44100   // match VOCAL_SAMPLE_RATE in net_adapter.rs
         const abuf = actx.createBuffer(1, n, RATE)
         const chan  = abuf.getChannelData(0)
-        for (let i = 0; i < n; i++) chan[i] = view.getFloat32(3 + i * 4, true)
+        for (let i = 0; i < n; i++) chan[i] = view.getInt16(3 + i * 2, true) / 32768.0
         const src = actx.createBufferSource()
         src.buffer = abuf
         src.connect(actx.destination)
