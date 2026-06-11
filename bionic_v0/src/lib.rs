@@ -598,6 +598,25 @@ pub const VOCAL_SELF_PLAY_MIN_INTERVAL_US: u64 = 250_000;
 /// high-rate voicing. Small alpha → a smoothing window of order ~10s at 30 Hz.
 pub const VOCAL_EFFICACY_EMA_ALPHA: f64 = 0.003;
 
+/// A3-family: naive multiplier for the vocal_efficacy EMA step. At m=0 each
+/// evidence-carrying closure moves efficacy this many times faster — the
+/// newborn escape from the vocal bootstrap deadlock (efficacy 0 → reflex gate
+/// at its 0.40 ceiling → few bursts → few evidence closures → at base alpha
+/// 0.003 efficacy needs hundreds of closures to move → gate never drops:
+/// 0×x=0). Coarse, fast, tolerant early learning; anneals linearly to exactly
+/// 1.0 at m=1 so the mature body keeps the hand-tuned base alpha and its
+/// ~10s smoothing window untouched. Evidence gating is NOT relaxed: only
+/// closures that carry real heard-self evidence step the EMA at all.
+pub const VOCAL_EFFICACY_ALPHA_SCALE_NAIVE: f64 = 8.0;
+
+/// Maturity schedule for the vocal_efficacy EMA step:
+/// VOCAL_EFFICACY_ALPHA_SCALE_NAIVE at m=0, exactly 1.0 at m=1. Pure function
+/// over the developmental clock; a continuous local scalar, never a gate.
+pub fn vocal_efficacy_alpha_scale(maturity: f64) -> f64 {
+    let m = maturity.clamp(0.0, 1.0);
+    VOCAL_EFFICACY_ALPHA_SCALE_NAIVE + (1.0 - VOCAL_EFFICACY_ALPHA_SCALE_NAIVE) * m
+}
+
 /// Newborn-neutral midpoint for pair-evidence classification. At maturity 0 the
 /// align/deviate thresholds collapse to this midpoint (no dead zone), so a rough
 /// match still yields a weak signal; they widen to the strict ALIGN_MIN /

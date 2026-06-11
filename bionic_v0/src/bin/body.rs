@@ -457,19 +457,24 @@ fn main() {
         vp_vocal.tick_vocal_target_from_vib(t);
         vp_vocal.tick_vocal_drive_field(t);
         vp_vocal.tick_vocal_memory(t);
-        // Headless mode: send vocal PCM to gateway via the shared socket.
-        // In hardware mode the tx slot is None and this is a no-op.
+        // P3: hear our own voice through the same analyzer the target uses —
+        // in EVERY mode. This reafference (self_vocal_bands → vocal_acoustic_*
+        // distance) is the efference copy of the body's own voicing; gating it
+        // on the gateway socket left hardware-mode bodies structurally deaf to
+        // themselves, so the heard-self evidence gate (07a8a9a) froze efficacy
+        // and the developmental clock forever. Synthesis here uses a
+        // thread-local synthesizer reading organ state — independent of the
+        // cpal speaker path, no double-advance. The reafference stays tier-0
+        // numeric state; human-readable readouts belong to the observer only.
+        let samples = bionic_v0::net_adapter::sample_vocal_pcm(&vp_vocal);
+        vp_vocal.observe_self_vocal_pcm(t, &samples);
+        // Headless mode: additionally send the same PCM to the gateway via the
+        // shared socket. In hardware mode the tx slot is None and this no-ops
+        // (the cpal speaker thread carries the audible output instead).
         {
             let guard = vt_for_ticker.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_some() {
-                drop(guard); // release before the (slightly expensive) PCM synthesis
-                let samples = bionic_v0::net_adapter::sample_vocal_pcm(&vp_vocal);
-                // P3: hear our own voice through the same analyzer the target
-                // uses. This reafference (self_vocal_bands → vocal_acoustic_*
-                // distance) stays inside the body as tier-0 numeric state; any
-                // human-readable readout of it belongs to the external observer
-                // reading the snapshot, never to the body process itself.
-                vp_vocal.observe_self_vocal_pcm(t, &samples);
+                drop(guard); // release before the socket write
                 bionic_v0::net_adapter::send_vocal_frame(&vt_for_ticker, &samples);
             }
         }
@@ -522,9 +527,44 @@ fn main() {
         let self_cp = bionic_v0::self_model::SelfModelCheckpointPaths::new(&runtime_dir);
         let phoneme_cp = runtime_dir.join("phoneme_memory.bin");
         let vocal_mem_cp = runtime_dir.join("vocal_memory.bin");
+        let vocal_diag_cp = runtime_dir.join("vocal_diag.csv");
         spawn_ticker(vp.clone(), profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
             let _ = write_learned_bias_checkpoint(&state, &paths_checkpoint);
+            // 体检 telemetry dump: numeric trace of the vocal loop so a stalled
+            // life is diagnosable from outside (burst? heard-self? evidence?
+            // efficacy/maturity moving?). Append-only CSV; the body never reads
+            // it back — observer-side instrumentation only.
+            {
+                let d = *vp_checkpoint
+                    .vocal_diag
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let line = format!(
+                    "{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+                    now_us(),
+                    d.outlet_ticks,
+                    d.bursts,
+                    d.closures,
+                    d.closures_vocalized,
+                    d.closures_with_evidence,
+                    d.last_drive_pressure,
+                    d.last_self_bands_sum,
+                    d.last_fit,
+                    state.vocal_efficacy,
+                    state.prediction_familiarity,
+                    state.action_suppression,
+                    state.developmental_maturity,
+                );
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&vocal_diag_cp)
+                {
+                    use std::io::Write as _;
+                    let _ = f.write_all(line.as_bytes());
+                }
+            }
             let _ = bionic_v0::familiar_objects::write_familiar_objects_checkpoint(
                 &vp_checkpoint.read_familiar_objects(),
                 &fam_cp,

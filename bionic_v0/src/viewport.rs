@@ -1090,6 +1090,31 @@ fn spatial_overlap_score(src: SpatialState, dst: SpatialState) -> f64 {
     clamp01(overlap_area / src_area.min(dst_area))
 }
 
+/// Engineering telemetry for the vocal loop (体检). Pure counters/last-values
+/// dumped to a numeric trace file by the body's checkpoint ticker; never read
+/// back into any law. Answers, with new code actually running: does the body
+/// burst at all, does heard-self arrive, do evidence-carrying closures happen,
+/// and do efficacy/maturity actually move.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VocalLoopDiag {
+    /// tick_vocal_drive_field invocations.
+    pub outlet_ticks: u64,
+    /// Bursts the inner-pressure reflex actually fired.
+    pub bursts: u64,
+    /// Last raw drive pressure seen at the outlet.
+    pub last_drive_pressure: f64,
+    /// observe_vocal_reflex_closure invocations.
+    pub closures: u64,
+    /// ... of which arrived with vocalized=true.
+    pub closures_vocalized: u64,
+    /// ... of which carried heard-self evidence (acoustic_competence=Some).
+    pub closures_with_evidence: u64,
+    /// Last heard-self 16-band energy sum at the closure sink.
+    pub last_self_bands_sum: f64,
+    /// Last acoustic fit (1-shape_dist) on an evidence-carrying closure.
+    pub last_fit: f64,
+}
+
 pub struct Viewport {
     pub master_tick: AtomicU64,
     pub clock_us: AtomicU64,
@@ -1279,6 +1304,11 @@ pub struct Viewport {
     /// P3 Stage 3: active acoustic servo — learned pitch/resonance correction that
     /// hill-climbs to minimize the heard shape error (steers, not just credits).
     pub vocal_servo: RwLock<crate::vocal_servo::VocalServoState>,
+    /// Engineering telemetry for the vocal loop (体检). Written by the live
+    /// outlet and the closure sink; read only by the body's checkpoint ticker
+    /// to dump a numeric trace file. Never read back into any law — pure
+    /// observer-side instrumentation, not body state. Not persisted.
+    pub vocal_diag: RwLock<VocalLoopDiag>,
     /// C5: familiar-objects sediment. Numeric fingerprints + accumulated
     /// familiarity; object identity and the responsible-person bond EMERGE here
     /// (no id table, no role label). Persisted via learned_bias for 死后保留.
@@ -1446,6 +1476,7 @@ impl Viewport {
             self_vocal_mel64: RwLock::new(([0.0; crate::vocal_self_analysis::BANDS], 0)),
             latest_target_mel64: RwLock::new(([0.0; crate::vocal_self_analysis::BANDS], 0)),
             vocal_servo: RwLock::new(crate::vocal_servo::VocalServoState::default()),
+            vocal_diag: RwLock::new(VocalLoopDiag::default()),
             familiar_objects: RwLock::new(
                 crate::familiar_objects::FamiliarObjectsState::default(),
             ),
@@ -4256,6 +4287,20 @@ impl Viewport {
             None
         };
         {
+            // 体检 telemetry: count closures / vocalized / evidence at the sink.
+            let mut diag = self.vocal_diag.write().unwrap();
+            diag.closures += 1;
+            if vocalized {
+                diag.closures_vocalized += 1;
+                let (sb, _) = self.read_self_vocal_bands();
+                diag.last_self_bands_sum = sb.iter().sum::<f64>();
+            }
+            if let Some(c) = acoustic_competence {
+                diag.closures_with_evidence += 1;
+                diag.last_fit = c;
+            }
+        }
+        {
             let mut bias = self.learned_bias.write().unwrap();
             // B2 机制A: suppression 的时间遗忘与其累积共用同一把写锁、同一节律。
             bias.decay_vocal_suppression(now_us);
@@ -4270,8 +4315,12 @@ impl Viewport {
             // (even with slow decay) saturates under the high-rate pair path; an
             // evidence-gated EMA does not.
             if let Some(c) = acoustic_competence {
-                bias.vocal_efficacy +=
-                    crate::VOCAL_EFFICACY_EMA_ALPHA * (c - bias.vocal_efficacy);
+                // A3-family anneal: newborns take coarse, fast EMA steps so the
+                // first genuine fits actually lower the reflex gate (bootstrap
+                // escape); the multiplier anneals to exactly 1.0 at m=1.
+                let alpha = crate::VOCAL_EFFICACY_EMA_ALPHA
+                    * crate::vocal_efficacy_alpha_scale(self.developmental_maturity());
+                bias.vocal_efficacy += alpha * (c - bias.vocal_efficacy);
                 bias.vocal_efficacy = bias.vocal_efficacy.clamp(0.0, 1.0);
             }
         }
@@ -4426,6 +4475,15 @@ impl Viewport {
                 bias.vocal_efficacy,
             )
         };
+        {
+            // 体检 telemetry: outlet cadence, raw drive, burst count.
+            let mut diag = self.vocal_diag.write().unwrap();
+            diag.outlet_ticks += 1;
+            diag.last_drive_pressure = drive_pressure;
+            if burst.is_some() {
+                diag.bursts += 1;
+            }
+        }
         if let Some(b) = burst {
             contribs.push(VocalDriveContribution {
                 intensity: b.breath,

@@ -80,14 +80,26 @@ fn closure_efficacy_is_honest_about_acoustic_fit() {
     );
     assert!(matched > 0.0, "a real acoustic match must move efficacy: {matched}");
 
-    // The acoustic-fit honesty is UNIFORM, not annealed on maturity: a newborn's
-    // matching babble earns the same competence as a mature body's. (Maturity
-    // governs the precision schedule elsewhere, not whether a closure is honest.)
+    // The acoustic-fit honesty is UNIFORM across maturity: at EVERY age an
+    // unlike babble must earn markedly less than a matching one — maturity
+    // never buys credit for a bad fit. What DOES anneal is the EMA step size
+    // (A3 family, same shape as ar2_lr_scale): a newborn's matching closure
+    // moves efficacy VOCAL_EFFICACY_ALPHA_SCALE_NAIVE× faster than a mature
+    // body's, so the first genuine fits can lower the reflex gate at all
+    // (0×x=0 bootstrap escape); the multiplier anneals to exactly 1.0 at m=1.
     let matched_newborn = self_play_efficacy_for(0.0, low, low);
+    let mismatched_newborn = self_play_efficacy_for(0.0, high, low);
     assert!(
-        (matched_newborn - matched).abs() < matched * 0.02 + 1e-12,
-        "acoustic-fit honesty must not depend on maturity \
-         (newborn={matched_newborn}, mature={matched})"
+        mismatched_newborn < matched_newborn * 0.5,
+        "acoustic-fit honesty must hold for newborns too \
+         (matched={matched_newborn}, mismatched={mismatched_newborn})"
+    );
+    let scale = matched_newborn / matched;
+    let naive = bionic_v0::VOCAL_EFFICACY_ALPHA_SCALE_NAIVE;
+    assert!(
+        (scale - naive).abs() < naive * 0.05,
+        "newborn EMA step must be the annealed multiple of the mature step \
+         (newborn={matched_newborn}, mature={matched}, scale={scale}, want≈{naive})"
     );
 }
 
