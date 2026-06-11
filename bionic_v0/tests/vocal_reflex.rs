@@ -1,5 +1,5 @@
 use bionic_v0::action_output::ActionOutputPhase;
-use bionic_v0::learned_bias::{LearnedBiasState, SUPPRESSION_HALF_LIFE_US};
+use bionic_v0::learned_bias::{LearnedBiasState, EFFICACY_HALF_LIFE_US, SUPPRESSION_HALF_LIFE_US};
 use bionic_v0::prediction_pressure_field::{PredictionWaveInput, PREDICTION_WAVE_EVENT};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::suppression_damp_floor;
@@ -216,6 +216,45 @@ fn suppression_decays_by_pure_time_half_life() {
     bias.decay_vocal_suppression(one_tau + SUPPRESSION_HALF_LIFE_US as u64 * 40);
     assert!(bias.action_suppression < before);
     assert!(bias.action_suppression < 1e-9);
+}
+
+#[test]
+fn efficacy_decays_by_pure_time_half_life() {
+    // vocal_efficacy gains a pure-time forgetting law so it tracks RECENT real
+    // vocal competence instead of being a monotone ratchet (the 1.0-pinned
+    // illusory-convergence the diagnosis identified). Same shape as the
+    // suppression half-life, longer tau.
+    let mut bias = LearnedBiasState {
+        vocal_efficacy: 0.5,
+        last_efficacy_decay_us: 1_000_000,
+        ..LearnedBiasState::default()
+    };
+
+    // elapsed = 0 → unchanged.
+    bias.decay_vocal_efficacy(1_000_000);
+    assert_eq!(bias.vocal_efficacy, 0.5);
+
+    // Exactly one half-life → halves.
+    let one_tau = 1_000_000 + EFFICACY_HALF_LIFE_US as u64;
+    bias.decay_vocal_efficacy(one_tau);
+    assert!(
+        (bias.vocal_efficacy - 0.25).abs() < 1e-9,
+        "one half-life should halve efficacy: {}",
+        bias.vocal_efficacy
+    );
+
+    // Strictly decreasing and tending to 0 over many half-lives.
+    let before = bias.vocal_efficacy;
+    bias.decay_vocal_efficacy(one_tau + EFFICACY_HALF_LIFE_US as u64 * 40);
+    assert!(bias.vocal_efficacy < before);
+    assert!(bias.vocal_efficacy < 1e-9);
+}
+
+#[test]
+fn efficacy_half_life_is_longer_than_suppression() {
+    // Sustained real acoustic fit must be able to hold a high efficacy, so the
+    // forgetting timescale is deliberately an order longer than suppression's.
+    assert!(EFFICACY_HALF_LIFE_US > SUPPRESSION_HALF_LIFE_US);
 }
 
 #[test]

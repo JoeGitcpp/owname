@@ -14,6 +14,13 @@ pub const LEARNED_BIAS_EVENT_CAP: usize = 256;
 /// suppression 松弛回低位，结构上消除单调累积锁死（0×x=0）。
 /// 无语义的数值松弛：非惩罚、非 reward、不带正负价。
 pub const SUPPRESSION_HALF_LIFE_US: f64 = 300_000_000.0;
+/// vocal_efficacy 的纯时间半衰期（30 分钟）。刻意比 suppression（5 分钟）长
+/// 一个量级：持续的真实声学拟合（每个真实闭环沉积 delta_eff）能稳住高
+/// efficacy，但一旦停止真实拟合，efficacy 在 ~30 分钟尺度松弛，使它表征
+/// **近期真实发声能力**而非"曾经叫过"的单调棘轮。无语义的数值松弛：
+/// 非惩罚、非 reward、不带正负价。单个闭环间隔内衰减极小（在场持续沉积
+/// 仍稳定爬升），但有限——长期无真实拟合时松弛，消除棘轮锁死的退化不动点。
+pub const EFFICACY_HALF_LIFE_US: f64 = 1_800_000_000.0;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BiasLocator {
@@ -87,6 +94,11 @@ pub struct LearnedBiasState {
     /// 大幅松弛——把"久未刷新"的陈旧抑制当作已遗忘，结构上根除
     /// 跨重启累积的锁死。工程时戳，非语义状态。
     pub last_suppression_decay_us: u64,
+    /// vocal_efficacy 时间遗忘的上次半衰时刻（µs）。与 last_suppression_decay_us
+    /// 同款：刻意**不持久化**（不入 learned_bias.bin、不动 LEARNED_BIAS_VERSION）。
+    /// 重启后该字段为 0 → 首次 decay 的 elapsed 巨大 → efficacy 大幅松弛，把
+    /// 跨重启累积的"曾经叫过"幻觉在结构上根除。工程时戳，非语义状态。
+    pub last_efficacy_decay_us: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -253,6 +265,23 @@ impl LearnedBiasState {
         self.action_suppression *= k;
         self.last_suppression_decay_us = now_us;
     }
+
+    /// vocal_efficacy 的纯时间半衰。无语义数值松弛——非惩罚、非 reward；
+    /// efficacy 仍只由真实声学闭环沉积（observe_vocal_reflex_closure 的
+    /// delta_eff），这里只补一条遗忘律，使它成为"近期真实发声能力的滑动
+    /// 沉积"而非永久单调棘轮（打破钉死 1.0 的幻觉收敛）。τ 远大于单次闭环
+    /// 间隔（持续真实拟合仍稳定爬升），但有限（长期无真实拟合时松弛）。
+    /// 重启后 last_efficacy_decay_us=0（不持久化）→ 首次调用 elapsed 巨大
+    /// → 陈旧 efficacy 直接松弛。逐行仿 decay_vocal_suppression。
+    pub fn decay_vocal_efficacy(&mut self, now_us: u64) {
+        let elapsed = now_us.saturating_sub(self.last_efficacy_decay_us);
+        if elapsed == 0 {
+            return;
+        }
+        let k = 0.5_f64.powf(elapsed as f64 / EFFICACY_HALF_LIFE_US);
+        self.vocal_efficacy *= k;
+        self.last_efficacy_decay_us = now_us;
+    }
 }
 
 
@@ -358,6 +387,9 @@ pub fn read_learned_bias_checkpoint(path: &Path) -> std::io::Result<LearnedBiasS
         // B2: 刻意不持久化。重启后从 0 起 → 首次 decay 的 elapsed 巨大
         // → 陈旧 suppression 大幅松弛，跨重启累积在结构上被根除。
         last_suppression_decay_us: 0,
+        // 同款不持久化：重启后从 0 起 → efficacy 首次大幅松弛，跨重启的
+        // "曾经叫过"幻觉累积在结构上被根除。
+        last_efficacy_decay_us: 0,
     })
 }
 

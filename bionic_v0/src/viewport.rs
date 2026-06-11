@@ -3672,7 +3672,44 @@ impl Viewport {
         if self_match > 0.85 {
             let last_sp = self.last_self_play_t_us.load(Ordering::Relaxed);
             if now_us.saturating_sub(last_sp) >= crate::VOCAL_SELF_PLAY_MIN_INTERVAL_US {
-                let support = (self_match * vib.event_energy.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                // Continuous-field honesty: the self-play closure_support is
+                // additionally weighted by how closely the heard self matches
+                // the target contour — a prediction-error-derived neutral
+                // quantity (NOT a value/incentive channel). This removes the
+                // former illusion that "having voiced at all" counts as a
+                // learned closure: a babble that sounds nothing like the target
+                // now yields a small support, so the closure stays honest.
+                //
+                // acoustic_fit ∈ [0,1]: 1 = heard self matches target shape,
+                // →0 = unlike. With no acoustic evidence yet (self not voiced /
+                // no self-hearing data) it is 1.0 — no penalty, preserving the
+                // cold-start bootstrap (the motor→sound contingency must be able
+                // to seed the loop before any spectral data exists).
+                let (self_bands, _) = self.read_self_vocal_bands();
+                let acoustic_fit = if self_bands.iter().sum::<f64>() > 1e-6 {
+                    let target = self.read_vocal_target();
+                    (1.0
+                        - crate::vocal_self_analysis::spectral_shape_distance(
+                            &self_bands,
+                            &target.target_bands,
+                        ))
+                    .clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                // Coarse→fine anneal on the SAME developmental clock the rest of
+                // the precision schedule rides: m=0 (newborn) → acoustic_weight
+                // ≡ 1, identity pass-through so the 0×x=0 cold start can boot off
+                // the motor→sound contingency alone; m→1 (mature) → support is
+                // governed entirely by acoustic fit (sounds-unlike → low closure
+                // → efficacy stops being ratcheted by mere voicing). Continuous
+                // interpolation — no boolean / threshold qualification gate.
+                let m = self.developmental_maturity();
+                let acoustic_weight = (1.0 - m) + m * acoustic_fit;
+                let support = (self_match
+                    * vib.event_energy.clamp(0.0, 1.0)
+                    * acoustic_weight)
+                    .clamp(0.0, 1.0);
                 self.observe_vocal_reflex_closure(now_us, support, true);
                 self.last_self_play_t_us.store(now_us, Ordering::Relaxed);
             }
@@ -4152,6 +4189,10 @@ impl Viewport {
             // 同一节律（tick_vocal_reflex_from_pairs → 本闭环观察路径），
             // 不新增 ticker、不依赖外部驱动。先半衰再沉积。
             bias.decay_vocal_suppression(now_us);
+            // efficacy 的纯时间松弛与其沉积共用同一把写锁、同一节律。
+            // 无语义时间松弛：非惩罚、非 reward。先半衰再沉积，使 efficacy
+            // 表征近期真实发声能力而非单调棘轮（打破钉死 1.0 的幻觉收敛）。
+            bias.decay_vocal_efficacy(now_us);
             bias.prediction_familiarity = (bias.prediction_familiarity + delta_fam).min(1.0);
             bias.action_suppression = (bias.action_suppression + delta_sup).min(1.0);
             bias.vocal_efficacy = (bias.vocal_efficacy + delta_eff).min(1.0);

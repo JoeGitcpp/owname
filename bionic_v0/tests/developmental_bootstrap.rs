@@ -22,8 +22,76 @@ use bionic_v0::predictor::Ar2Predictor;
 use bionic_v0::viewport::Viewport;
 use bionic_v0::{
     ar2_lr_scale, binding_align_min, binding_deviate_max, vpc_prior_gain_scale,
-    AR2_LR_SCALE_NAIVE, MOD_VIB, VPC_PRIOR_GAIN_SCALE_NAIVE,
+    AR2_LR_SCALE_NAIVE, MOD_VIB, VIB_BANDS, VPC_PRIOR_GAIN_SCALE_NAIVE,
 };
+
+/// Run ONE self-play closure on a fresh viewport with the developmental clock
+/// pinned to `m`, the heard-self bands set to `self_bands`, and the target
+/// contour set to `target_bands`. Returns the vocal_efficacy after the single
+/// closure. Since a newborn starts at efficacy 0 (and the time-forgetting law
+/// only relaxes the already-zero value), the returned efficacy is exactly
+/// `closure_support · 0.01` — a clean readout of the support the self-play loop
+/// chose to credit. We only ever compare these readings against each other, so
+/// the 0.01 scale is irrelevant; what we assert is the DIRECTION of the change.
+fn self_play_efficacy_for(
+    m: f64,
+    self_bands: [f64; VIB_BANDS],
+    target_bands: [f64; VIB_BANDS],
+) -> f64 {
+    let vp = Arc::new(Viewport::new());
+    vp.restore_maturity(m);
+    // Pin the target contour (the echo is dropped from the target path, so this
+    // stands as the comparison reference for the acoustic-fit weighting).
+    vp.observe_vocal_target_bands(1, 0.6, 0.4, 0.7, 0.6, target_bands);
+    // Pin what the body "hears itself" produce.
+    *vp.self_vocal_bands.write().unwrap() = (self_bands, 1);
+
+    let t = 1_000_000u64;
+    vp.begin_voicing(t, 0.6, 0.4, 0.7); // organ Active → self_match high
+    let heard = t + 10_000; // within the 150 ms self-match guard
+    // Re-pin self bands right before the closure (begin_voicing does not touch
+    // them, but keep it explicit and robust to any internal resets).
+    *vp.self_vocal_bands.write().unwrap() = (self_bands, heard);
+    vp.write_ambient_for(MOD_VIB, 0.6, 0.1, Some(heard), true);
+    vp.tick_vocal_target_from_vib(heard); // echo → single self-play closure
+    vp.read_learned_bias().vocal_efficacy
+}
+
+#[test]
+fn self_play_support_is_honest_about_acoustic_fit_when_mature() {
+    // Two band shapes: one concentrated in the low bands, one in the high bands.
+    let mut low = [0.0f64; VIB_BANDS];
+    let mut high = [0.0f64; VIB_BANDS];
+    for i in 0..4 {
+        low[i] = 1.0;
+        high[VIB_BANDS - 1 - i] = 1.0;
+    }
+
+    // Mature body (m=1): closure_support is governed entirely by acoustic fit.
+    // Heard-self matches target → high support; heard-self unlike target → the
+    // body honestly observes "I sound nothing like it" → much lower support, so
+    // efficacy is no longer ratcheted by mere voicing.
+    let mature_match = self_play_efficacy_for(1.0, low, low);
+    let mature_mismatch = self_play_efficacy_for(1.0, high, low);
+    assert!(
+        mature_mismatch < mature_match * 0.5,
+        "mature: an unlike babble must yield markedly lower closure_support than \
+         a matching one (matched={mature_match}, mismatched={mature_mismatch})"
+    );
+
+    // Newborn body (m=0): identity pass-through preserves the cold-start
+    // bootstrap — the motor→sound contingency alone seeds the loop, so a poor
+    // acoustic fit does NOT collapse the support. The two cases stay close.
+    let naive_match = self_play_efficacy_for(0.0, low, low);
+    let naive_mismatch = self_play_efficacy_for(0.0, high, low);
+    assert!(
+        (naive_match - naive_mismatch).abs() < naive_match * 0.05 + 1e-9,
+        "newborn: acoustic fit must NOT gate the bootstrap closure \
+         (matched={naive_match}, mismatched={naive_mismatch})"
+    );
+    // And the newborn still earns a positive bootstrap closure regardless.
+    assert!(naive_mismatch > 0.0, "newborn bootstrap must not be zeroed: {naive_mismatch}");
+}
 
 #[test]
 fn maturity_clock_is_monotone_saturating_and_bounded() {
