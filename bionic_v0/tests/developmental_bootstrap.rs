@@ -58,7 +58,7 @@ fn self_play_efficacy_for(
 }
 
 #[test]
-fn self_play_support_is_honest_about_acoustic_fit_when_mature() {
+fn closure_efficacy_is_honest_about_acoustic_fit() {
     // Two band shapes: one concentrated in the low bands, one in the high bands.
     let mut low = [0.0f64; VIB_BANDS];
     let mut high = [0.0f64; VIB_BANDS];
@@ -67,30 +67,74 @@ fn self_play_support_is_honest_about_acoustic_fit_when_mature() {
         high[VIB_BANDS - 1 - i] = 1.0;
     }
 
-    // Mature body (m=1): closure_support is governed entirely by acoustic fit.
-    // Heard-self matches target → high support; heard-self unlike target → the
-    // body honestly observes "I sound nothing like it" → much lower support, so
-    // efficacy is no longer ratcheted by mere voicing.
-    let mature_match = self_play_efficacy_for(1.0, low, low);
-    let mature_mismatch = self_play_efficacy_for(1.0, high, low);
+    // A single closure nudges efficacy (EMA from 0) by ≈ alpha·competence, where
+    // competence = support·acoustic_fit. Heard-self matching the target → high
+    // fit → larger efficacy bump; heard-self unlike the target → the body
+    // honestly observes "I sound nothing like it" → a much smaller bump.
+    let matched = self_play_efficacy_for(1.0, low, low);
+    let mismatched = self_play_efficacy_for(1.0, high, low);
     assert!(
-        mature_mismatch < mature_match * 0.5,
-        "mature: an unlike babble must yield markedly lower closure_support than \
-         a matching one (matched={mature_match}, mismatched={mature_mismatch})"
+        mismatched < matched * 0.5,
+        "an unlike babble must move efficacy markedly less than a matching one \
+         (matched={matched}, mismatched={mismatched})"
+    );
+    assert!(matched > 0.0, "a real acoustic match must move efficacy: {matched}");
+
+    // The acoustic-fit honesty is UNIFORM, not annealed on maturity: a newborn's
+    // matching babble earns the same competence as a mature body's. (Maturity
+    // governs the precision schedule elsewhere, not whether a closure is honest.)
+    let matched_newborn = self_play_efficacy_for(0.0, low, low);
+    assert!(
+        (matched_newborn - matched).abs() < matched * 0.02 + 1e-12,
+        "acoustic-fit honesty must not depend on maturity \
+         (newborn={matched_newborn}, mature={matched})"
+    );
+}
+
+#[test]
+fn high_rate_unlike_closures_do_not_saturate_efficacy() {
+    // The exact failure observed live: the action-consequence pair path fires at
+    // the orchestrator rate, so under a ratchet efficacy pinned to 1.0 within
+    // seconds regardless of acoustic fit (illusory convergence). With the EMA +
+    // acoustic-fit gating, a long stream of closures whose heard-self does NOT
+    // match the target must keep efficacy LOW (bounded near the low competence),
+    // never saturating.
+    let mut low = [0.0f64; VIB_BANDS];
+    let mut high = [0.0f64; VIB_BANDS];
+    for i in 0..4 {
+        low[i] = 1.0;
+        high[VIB_BANDS - 1 - i] = 1.0;
+    }
+
+    let vp = Arc::new(Viewport::new());
+    vp.observe_vocal_target_bands(1, 0.6, 0.4, 0.7, 0.6, low); // target = low shape
+    *vp.self_vocal_bands.write().unwrap() = (high, 1); // heard-self = unlike (high)
+
+    // 5000 full-support closures (far more than saturate a ratchet in seconds).
+    for k in 0..5000u64 {
+        *vp.self_vocal_bands.write().unwrap() = (high, 1 + k);
+        vp.observe_vocal_reflex_closure(1 + k, 1.0, true);
+    }
+    let eff_unlike = vp.read_learned_bias().vocal_efficacy;
+    assert!(
+        eff_unlike < 0.5,
+        "high-rate unlike closures must NOT saturate efficacy (got {eff_unlike})"
     );
 
-    // Newborn body (m=0): identity pass-through preserves the cold-start
-    // bootstrap — the motor→sound contingency alone seeds the loop, so a poor
-    // acoustic fit does NOT collapse the support. The two cases stay close.
-    let naive_match = self_play_efficacy_for(0.0, low, low);
-    let naive_mismatch = self_play_efficacy_for(0.0, high, low);
+    // Now matching closures: efficacy must rise well above the unlike case toward
+    // the genuine competence level — efficacy reports present ability.
+    let vp2 = Arc::new(Viewport::new());
+    vp2.observe_vocal_target_bands(1, 0.6, 0.4, 0.7, 0.6, low);
+    for k in 0..5000u64 {
+        *vp2.self_vocal_bands.write().unwrap() = (low, 1 + k); // heard == target
+        vp2.observe_vocal_reflex_closure(1 + k, 1.0, true);
+    }
+    let eff_match = vp2.read_learned_bias().vocal_efficacy;
     assert!(
-        (naive_match - naive_mismatch).abs() < naive_match * 0.05 + 1e-9,
-        "newborn: acoustic fit must NOT gate the bootstrap closure \
-         (matched={naive_match}, mismatched={naive_mismatch})"
+        eff_match > eff_unlike * 2.0,
+        "matching closures must raise efficacy well above unlike ones \
+         (match={eff_match}, unlike={eff_unlike})"
     );
-    // And the newborn still earns a positive bootstrap closure regardless.
-    assert!(naive_mismatch > 0.0, "newborn bootstrap must not be zeroed: {naive_mismatch}");
 }
 
 #[test]

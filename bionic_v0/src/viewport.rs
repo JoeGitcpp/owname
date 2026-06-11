@@ -3672,44 +3672,12 @@ impl Viewport {
         if self_match > 0.85 {
             let last_sp = self.last_self_play_t_us.load(Ordering::Relaxed);
             if now_us.saturating_sub(last_sp) >= crate::VOCAL_SELF_PLAY_MIN_INTERVAL_US {
-                // Continuous-field honesty: the self-play closure_support is
-                // additionally weighted by how closely the heard self matches
-                // the target contour — a prediction-error-derived neutral
-                // quantity (NOT a value/incentive channel). This removes the
-                // former illusion that "having voiced at all" counts as a
-                // learned closure: a babble that sounds nothing like the target
-                // now yields a small support, so the closure stays honest.
-                //
-                // acoustic_fit ∈ [0,1]: 1 = heard self matches target shape,
-                // →0 = unlike. With no acoustic evidence yet (self not voiced /
-                // no self-hearing data) it is 1.0 — no penalty, preserving the
-                // cold-start bootstrap (the motor→sound contingency must be able
-                // to seed the loop before any spectral data exists).
-                let (self_bands, _) = self.read_self_vocal_bands();
-                let acoustic_fit = if self_bands.iter().sum::<f64>() > 1e-6 {
-                    let target = self.read_vocal_target();
-                    (1.0
-                        - crate::vocal_self_analysis::spectral_shape_distance(
-                            &self_bands,
-                            &target.target_bands,
-                        ))
-                    .clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                // Coarse→fine anneal on the SAME developmental clock the rest of
-                // the precision schedule rides: m=0 (newborn) → acoustic_weight
-                // ≡ 1, identity pass-through so the 0×x=0 cold start can boot off
-                // the motor→sound contingency alone; m→1 (mature) → support is
-                // governed entirely by acoustic fit (sounds-unlike → low closure
-                // → efficacy stops being ratcheted by mere voicing). Continuous
-                // interpolation — no boolean / threshold qualification gate.
-                let m = self.developmental_maturity();
-                let acoustic_weight = (1.0 - m) + m * acoustic_fit;
-                let support = (self_match
-                    * vib.event_energy.clamp(0.0, 1.0)
-                    * acoustic_weight)
-                    .clamp(0.0, 1.0);
+                // closure_support here is the motor→sound contingency strength.
+                // The acoustic-fit honesty (heard-self vs target) is applied
+                // uniformly to ALL closure paths inside observe_vocal_reflex_
+                // closure, so both this self-play path and the action-consequence
+                // pair path are gated the same way — not just here.
+                let support = (self_match * vib.event_energy.clamp(0.0, 1.0)).clamp(0.0, 1.0);
                 self.observe_vocal_reflex_closure(now_us, support, true);
                 self.last_self_play_t_us.store(now_us, Ordering::Relaxed);
             }
@@ -4175,31 +4143,67 @@ impl Viewport {
             let mut reflex = self.vocal_reflex.write().unwrap();
             reflex.observe_closure(now_us, closure_support, vocalized)
         };
-        // 改造1: voicing that brought a real closure proves voicing was useful
-        // → vocal_efficacy grows → the gate lowers (更爱叫). Slow 死后保留
-        // sediment (closure * 0.01), the same scale as the other vocal biases.
-        let delta_eff = if vocalized {
-            closure_support.clamp(0.0, 1.0) * 0.01
+        // Acoustic-fit honesty (uniform across ALL closure paths). A closure
+        // only counts as vocal *competence* to the degree the body's heard-self
+        // actually matches the current target contour. acoustic_fit ∈ [0,1]:
+        // 1 = heard self matches target shape, →0 = unlike. With no acoustic
+        // evidence yet (self silent / no self-hearing data) it is 1.0 — no
+        // penalty, preserving the cold-start bootstrap before any spectral data
+        // exists. shape_dist is a prediction-error-derived neutral quantity,
+        // applied as a continuous multiplicative field — NOT a reward, NOT a
+        // threshold gate. This is what makes "I voiced" stop masquerading as
+        // "I voiced *like the target*".
+        let acoustic_fit = if vocalized {
+            let (self_bands, _) = self.read_self_vocal_bands();
+            if self_bands.iter().sum::<f64>() > 1e-6 {
+                let target = self.read_vocal_target();
+                (1.0 - crate::vocal_self_analysis::spectral_shape_distance(
+                    &self_bands,
+                    &target.target_bands,
+                ))
+                .clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
         } else {
-            0.0
+            1.0
+        };
+        // efficacy is an exponential moving average of the acoustic-fit-weighted
+        // closure level, NOT a monotonic ratchet. The action-consequence pair
+        // path fires at the orchestrator rate (tens of Hz); a ratchet (even with
+        // slow decay) saturates to 1.0 within seconds regardless of fit, which
+        // is exactly the illusory convergence we are removing. An EMA instead
+        // converges toward the *recent average* competence: it rises only as the
+        // heard-self genuinely approaches the target and falls when it does not,
+        // so efficacy reports present ability rather than "ever voiced".
+        let competence = if vocalized {
+            (closure_support.clamp(0.0, 1.0) * acoustic_fit).clamp(0.0, 1.0)
+        } else {
+            // non-vocalized closure carries no vocal-competence evidence; pull
+            // efficacy toward 0 only gently by leaving it untouched here.
+            f64::NAN
         };
         {
             let mut bias = self.learned_bias.write().unwrap();
-            // B2 机制A: suppression 的时间遗忘与其累积共用同一把写锁、
-            // 同一节律（tick_vocal_reflex_from_pairs → 本闭环观察路径），
-            // 不新增 ticker、不依赖外部驱动。先半衰再沉积。
+            // B2 机制A: suppression 的时间遗忘与其累积共用同一把写锁、同一节律。
             bias.decay_vocal_suppression(now_us);
-            // efficacy 的纯时间松弛与其沉积共用同一把写锁、同一节律。
-            // 无语义时间松弛：非惩罚、非 reward。先半衰再沉积，使 efficacy
-            // 表征近期真实发声能力而非单调棘轮（打破钉死 1.0 的幻觉收敛）。
+            // efficacy 的纯时间松弛保留为重启松弛兜底（不持久化时戳）；
+            // 生命期内的真正调节由下面的 EMA 完成。
             bias.decay_vocal_efficacy(now_us);
             bias.prediction_familiarity = (bias.prediction_familiarity + delta_fam).min(1.0);
             bias.action_suppression = (bias.action_suppression + delta_sup).min(1.0);
-            bias.vocal_efficacy = (bias.vocal_efficacy + delta_eff).min(1.0);
+            if competence.is_finite() {
+                // EMA toward the acoustic-fit-weighted competence level.
+                bias.vocal_efficacy +=
+                    crate::VOCAL_EFFICACY_EMA_ALPHA * (competence - bias.vocal_efficacy);
+                bias.vocal_efficacy = bias.vocal_efficacy.clamp(0.0, 1.0);
+            }
         }
-        // Developmental clock: an earned vocal closure (self-play or a paired
-        // caregiver response) is competence — advance maturity (coarse→fine).
-        self.advance_maturity(closure_support);
+        // Developmental clock: maturity advances on *earned acoustic competence*,
+        // not on mere voicing — gate the advance by the same acoustic fit so the
+        // coarse→fine schedule tracks real progress instead of saturating in
+        // seconds from high-rate content-blind closures.
+        self.advance_maturity(closure_support * acoustic_fit);
     }
 
     pub fn tick_vocal_reflex_from_pressure(&self, now_us: u64) {

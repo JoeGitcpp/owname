@@ -590,6 +590,14 @@ pub const MATURITY_GAIN: f64 = 0.01;
 /// accrues efficacy/maturity at a developmental pace rather than per-tick.
 pub const VOCAL_SELF_PLAY_MIN_INTERVAL_US: u64 = 250_000;
 
+/// EMA smoothing for vocal_efficacy. Closures arrive at the orchestrator rate
+/// (tens of Hz via the action-consequence pair path), so vocal_efficacy is an
+/// exponential moving average of the acoustic-fit-weighted closure level rather
+/// than a ratchet — it converges toward recent competence (and falls when the
+/// heard-self stops matching the target) instead of saturating to 1.0 from mere
+/// high-rate voicing. Small alpha → a smoothing window of order ~10s at 30 Hz.
+pub const VOCAL_EFFICACY_EMA_ALPHA: f64 = 0.003;
+
 /// Newborn-neutral midpoint for pair-evidence classification. At maturity 0 the
 /// align/deviate thresholds collapse to this midpoint (no dead zone), so a rough
 /// match still yields a weak signal; they widen to the strict ALIGN_MIN /
