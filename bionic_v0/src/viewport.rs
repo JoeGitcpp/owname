@@ -1266,6 +1266,16 @@ pub struct Viewport {
     pub self_ear: RwLock<crate::vocal_self_analysis::SelfEar>,
     /// P3 acoustic loop: latest self-heard 16 VIB bands + timestamp.
     pub self_vocal_bands: RwLock<([f64; VIB_BANDS], u64)>,
+    /// Finer acoustic representation: latest self-heard 64-mel fingerprint +
+    /// timestamp. Runtime-derived each vocal tick from the body's own synthesized
+    /// PCM (the same window the 16-band view comes from); feeds the vocal
+    /// self-supervision loop at formant resolution. Not persisted.
+    pub self_vocal_mel64: RwLock<([f64; crate::vocal_self_analysis::BANDS], u64)>,
+    /// Finer acoustic representation: latest raw 64-mel target fingerprint from
+    /// the live audio frame + timestamp, staged by the sensory adapter before the
+    /// gated vocal-target write copies it (fresh-only) into VocalTargetState.
+    /// Runtime-derived each sensory tick; not persisted.
+    pub latest_target_mel64: RwLock<([f64; crate::vocal_self_analysis::BANDS], u64)>,
     /// P3 Stage 3: active acoustic servo — learned pitch/resonance correction that
     /// hill-climbs to minimize the heard shape error (steers, not just credits).
     pub vocal_servo: RwLock<crate::vocal_servo::VocalServoState>,
@@ -1433,6 +1443,8 @@ impl Viewport {
                 crate::vocal_synthesis::VOCAL_SAMPLE_RATE as f64,
             )),
             self_vocal_bands: RwLock::new(([0.0; VIB_BANDS], 0)),
+            self_vocal_mel64: RwLock::new(([0.0; crate::vocal_self_analysis::BANDS], 0)),
+            latest_target_mel64: RwLock::new(([0.0; crate::vocal_self_analysis::BANDS], 0)),
             vocal_servo: RwLock::new(crate::vocal_servo::VocalServoState::default()),
             familiar_objects: RwLock::new(
                 crate::familiar_objects::FamiliarObjectsState::default(),
@@ -3753,13 +3765,27 @@ impl Viewport {
             / (vib.event_energy.abs() + vib.surprise.abs() + f64::EPSILON))
             .clamp(0.0, 1.0);
 
-        self.observe_vocal_target_bands(
+        // Finer acoustic representation: carry the raw 64-mel target fingerprint
+        // alongside the 16-band contour, but only if the staged frame is fresh
+        // (same QUIET_WINDOW_US freshness the band reconstruction above requires).
+        // A stale/absent mel frame stays zeros → the self-supervision loop falls
+        // back to the 16-band path (no spurious "match" from an empty fingerprint).
+        let target_mel64 = {
+            let (mel, t) = *self.latest_target_mel64.read().unwrap();
+            if now_us.saturating_sub(t) <= QUIET_WINDOW_US {
+                mel
+            } else {
+                [0.0; crate::vocal_self_analysis::BANDS]
+            }
+        };
+        self.observe_vocal_target_full(
             now_us,
             vib.event_energy.clamp(0.0, 1.0),
             spectral_center.clamp(0.0, 1.0),
             resonance.clamp(0.0, 1.0),
             envelope,
             bands,
+            target_mel64,
         );
     }
 
@@ -3812,7 +3838,9 @@ impl Viewport {
     }
 
     /// P3: like observe_vocal_target but retains the full 16-band target contour
-    /// for band-wise self↔target comparison (the acoustic loop).
+    /// for band-wise self↔target comparison (the acoustic loop). The fine 64-mel
+    /// target fingerprint defaults to zeros on this path (callers without a raw
+    /// mel frame, e.g. tests/parametric ingress).
     pub fn observe_vocal_target_bands(
         &self,
         now_us: u64,
@@ -3822,8 +3850,29 @@ impl Viewport {
         envelope: f64,
         bands: [f64; VIB_BANDS],
     ) {
+        self.observe_vocal_target_full(
+            now_us, energy, pitch, resonance, envelope, bands,
+            [0.0; crate::vocal_self_analysis::BANDS],
+        );
+    }
+
+    /// P3 (finer acoustic representation): retain BOTH the 16-band VIB contour
+    /// and the full 64-mel target fingerprint. The 64-mel path feeds the vocal
+    /// self-supervision loop (imitation / efficacy / developmental clock), which
+    /// needs formant-level resolution to tell whether the body's own voice
+    /// actually matches the target — the 16-band view collapses distinct vowels.
+    pub fn observe_vocal_target_full(
+        &self,
+        now_us: u64,
+        energy: f64,
+        pitch: f64,
+        resonance: f64,
+        envelope: f64,
+        bands: [f64; VIB_BANDS],
+        mel64: [f64; crate::vocal_self_analysis::BANDS],
+    ) {
         let mut vt = self.vocal_target.write().unwrap();
-        vt.observe_external_contour(now_us, energy, pitch, resonance, envelope, bands);
+        vt.observe_external_contour(now_us, energy, pitch, resonance, envelope, bands, mel64);
     }
 
     pub fn read_vocal_target(&self) -> VocalTargetState {
@@ -3833,12 +3882,30 @@ impl Viewport {
     /// P3: hear our own synthesized PCM through the same analyzer the target
     /// uses, storing the resulting 16 VIB bands. Called after synthesis each tick.
     pub fn observe_self_vocal_pcm(&self, now_us: u64, samples: &[f32]) {
-        let bands = self.self_ear.write().unwrap().observe(samples);
+        let (bands, mel64) = {
+            let mut ear = self.self_ear.write().unwrap();
+            let bands = ear.observe(samples);
+            (bands, ear.read_self_mel64())
+        };
         *self.self_vocal_bands.write().unwrap() = (bands, now_us);
+        *self.self_vocal_mel64.write().unwrap() = (mel64, now_us);
     }
 
     pub fn read_self_vocal_bands(&self) -> ([f64; VIB_BANDS], u64) {
         *self.self_vocal_bands.read().unwrap()
+    }
+
+    /// Latest self-heard 64-mel fingerprint + timestamp.
+    pub fn read_self_vocal_mel64(&self) -> ([f64; crate::vocal_self_analysis::BANDS], u64) {
+        *self.self_vocal_mel64.read().unwrap()
+    }
+
+    /// Stage the latest raw 64-mel target fingerprint from the sensory frame.
+    /// The gated vocal-target write (tick_vocal_target_from_vib) later copies it,
+    /// fresh-only, into VocalTargetState so the fine target tracks the same gating
+    /// as the 16-band contour.
+    pub fn stage_target_mel64(&self, now_us: u64, mel64: [f64; crate::vocal_self_analysis::BANDS]) {
+        *self.latest_target_mel64.write().unwrap() = (mel64, now_us);
     }
 
     /// P3 (observable): band-wise perceptual distance between what we just heard
@@ -4159,12 +4226,28 @@ impl Viewport {
             let (self_bands, _) = self.read_self_vocal_bands();
             if self_bands.iter().sum::<f64>() > 1e-6 {
                 let target = self.read_vocal_target();
-                let fit = (1.0
-                    - crate::vocal_self_analysis::spectral_shape_distance(
+                // Finer acoustic representation: when BOTH self and target carry a
+                // 64-mel fingerprint, compute the shape fit at formant resolution
+                // (resolves vowels/syllables the 16-band view collapses → does not
+                // hand out credit for a coarse "looks-close" match). Otherwise fall
+                // back to the 16-band shape distance (still valid). The 64-mel-empty
+                // case here is only a representation fallback, NOT the evidence gate:
+                // the self_bands>1e-6 check above is what gates "no evidence → None".
+                let (self_mel64, _) = self.read_self_vocal_mel64();
+                let self_mel_has = self_mel64.iter().sum::<f64>() > 1e-6;
+                let target_mel_has = target.target_mel64.iter().sum::<f64>() > 1e-6;
+                let shape_dist = if self_mel_has && target_mel_has {
+                    crate::vocal_self_analysis::spectral_shape_distance_mel64(
+                        &self_mel64,
+                        &target.target_mel64,
+                    )
+                } else {
+                    crate::vocal_self_analysis::spectral_shape_distance(
                         &self_bands,
                         &target.target_bands,
-                    ))
-                .clamp(0.0, 1.0);
+                    )
+                };
+                let fit = (1.0 - shape_dist).clamp(0.0, 1.0);
                 Some((closure_support.clamp(0.0, 1.0) * fit).clamp(0.0, 1.0))
             } else {
                 None
@@ -4370,8 +4453,21 @@ impl Viewport {
             let (self_bands_now, _) = *self.self_vocal_bands.read().unwrap();
             let acoustic_dist =
                 crate::vocal_self_analysis::spectral_distance(&self_bands_now, &target.target_bands);
-            let shape_dist =
-                crate::vocal_self_analysis::spectral_shape_distance(&self_bands_now, &target.target_bands);
+            // Finer acoustic representation for the imitation/servo error: prefer
+            // the 64-mel shape distance when both fingerprints are present, so the
+            // learning gap and the servo's hill-climb track real formant error
+            // rather than a coarse 16-band proxy. Fall back to 16-band otherwise.
+            let (self_mel64_now, _) = *self.self_vocal_mel64.read().unwrap();
+            let shape_dist = if self_mel64_now.iter().sum::<f64>() > 1e-6
+                && target.target_mel64.iter().sum::<f64>() > 1e-6
+            {
+                crate::vocal_self_analysis::spectral_shape_distance_mel64(
+                    &self_mel64_now,
+                    &target.target_mel64,
+                )
+            } else {
+                crate::vocal_self_analysis::spectral_shape_distance(&self_bands_now, &target.target_bands)
+            };
             let self_voiced = self_bands_now.iter().sum::<f64>() > 1e-6;
             let learning_gap = if self_voiced { shape_dist } else { total_gap };
             {

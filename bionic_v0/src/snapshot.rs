@@ -2429,6 +2429,7 @@ fn read_vocal_target_snapshot(bytes: &[u8], cur: &mut usize) -> VocalTargetState
         resonance_hint: rd_f64(bytes, cur),
         envelope_hint: rd_f64(bytes, cur),
         target_bands: [0.0; crate::VIB_BANDS],
+        target_mel64: [0.0; crate::vocal_self_analysis::BANDS],
         last_update_t_us: rd_u64(bytes, cur),
     }
 }

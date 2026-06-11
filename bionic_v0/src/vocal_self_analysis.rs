@@ -159,6 +159,30 @@ pub fn vib_resonance(bands: &[f64; VIB_BANDS]) -> f64 {
     high / sum
 }
 
+/// Shape-based spectral distance on the FULL 64-mel fingerprint → [0,1].
+/// Identical form to `spectral_shape_distance` (unit-sum normalize each side,
+/// then total-variation = ½·L1 between the two distributions), but computed on
+/// 64 mel bands instead of 16 VIB bands. The extra resolution resolves formant /
+/// vowel differences that collapse together after the 64→16 downsample, so the
+/// vocal self-supervision loop can tell its own babble from a target syllable.
+/// 0 = identical shape, 1 = disjoint. Loudness-invariant. One side silent → 1.0
+/// (maximally far — caller treats an empty fingerprint as "no evidence", same as
+/// the 16-band path).
+pub fn spectral_shape_distance_mel64(a: &[f64; BANDS], b: &[f64; BANDS]) -> f64 {
+    let sa: f64 = a.iter().sum();
+    let sb: f64 = b.iter().sum();
+    if sa <= f64::EPSILON || sb <= f64::EPSILON {
+        return 1.0; // one side silent → maximally far in shape
+    }
+    let tv: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x / sa - y / sb).abs())
+        .sum::<f64>()
+        * 0.5;
+    clamp01(tv)
+}
+
 /// Normalized band-wise distance between two VIB band vectors → [0,1].
 /// Mean absolute difference (L1/n): self vs target perceptual error.
 pub fn spectral_distance(a: &[f64; VIB_BANDS], b: &[f64; VIB_BANDS]) -> f64 {
@@ -198,6 +222,10 @@ pub struct SelfEar {
     smoothed: Vec<f64>,      // EMA magnitude state, NUM_BINS
     re: Vec<f64>,
     im: Vec<f64>,
+    /// The full 64-mel fingerprint of the most recent `observe` — retained
+    /// before the 64→16 VIB downsample so the vocal self-supervision loop can
+    /// compare self vs target at formant resolution (the 16-band view loses it).
+    last_mel64: [f64; BANDS],
 }
 
 impl SelfEar {
@@ -209,7 +237,14 @@ impl SelfEar {
             smoothed: vec![0.0; NUM_BINS],
             re: vec![0.0; FFT_SIZE],
             im: vec![0.0; FFT_SIZE],
+            last_mel64: [0.0; BANDS],
         }
+    }
+
+    /// The 64-mel fingerprint computed by the most recent `observe` call (zeros
+    /// before any observation, or after observing silence).
+    pub fn read_self_mel64(&self) -> [f64; BANDS] {
+        self.last_mel64
     }
 
     /// Slide `samples` into the ring (keep last FFT_SIZE), analyze, return 16 VIB bands.
@@ -280,6 +315,7 @@ impl SelfEar {
                 bands64[b] = if band_count > 0.0 { clamp01((band_energy / band_count) * 1.4) } else { 0.0 };
             }
         }
+        self.last_mel64 = bands64;
         downsample_to_vib(&bands64)
     }
 }

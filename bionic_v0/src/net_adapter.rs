@@ -275,6 +275,17 @@ impl ModalityAdapter for NetSensesAdapter {
             vp.push_observation(b, now_us, avg as f64);
         }
 
+        // Finer acoustic representation: stage the raw 64-mel target fingerprint
+        // for the vocal self-supervision loop. The gated vocal-target write
+        // (tick_vocal_target_from_vib) copies it fresh-only, so it inherits the
+        // same echo-guard / energy gating as the 16-band contour. The general VIB
+        // hearing axis above is untouched (still 16 bands).
+        let mut target_mel64 = [0.0f64; BANDS];
+        for (i, m) in target_mel64.iter_mut().enumerate() {
+            *m = frame.bands[i] as f64;
+        }
+        vp.stage_target_mel64(now_us, target_mel64);
+
         // ── VIB event nomination (parity with hardware VibAdapter) ──────────
         // Without this, ambient VIB candidate_flag stays false forever, so
         // tick_vocal_target_from_vib always returns early → no vocal target →
