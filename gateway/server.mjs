@@ -39,6 +39,8 @@ import { join, resolve }    from 'node:path'
 import { createReadStream } from 'node:fs'
 import { extname }          from 'node:path'
 import { createHash }       from 'node:crypto'
+import { gzipSync }         from 'node:zlib'
+import { existsSync as fileExists } from 'node:fs'
 
 // ── Local env-file override (gateway.env in the deploy root) ─────────────────
 // Lets operators set/override env vars without editing the systemd unit file.
@@ -101,6 +103,38 @@ import { EphemeralSessionManager } from './ephemeral_session.mjs'
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT             = parseInt(process.env.ABORN_PORT     || '3900',   10)
 const BODY_BIN         = process.env.ABORN_BODY_BIN  || resolve('../bionic_v0/target/release/body')
+
+// ── body sandbox (defence-in-depth) ──────────────────────────────────────────
+// Visitor frames are attacker-controlled input. body is 0-unsafe Rust (very low
+// RCE surface), but as a second wall we run each visitor body inside a
+// bubblewrap user-namespace sandbox: no network (unix socket only), a private
+// tmpfs /tmp, read-only system + body binary, and the ONLY writable path is the
+// session dir. A compromised body therefore cannot reach the source tree, SSH
+// keys, the cloudflared tunnel credentials, other sessions, or the network.
+// Set ABORN_SANDBOX=0 to disable (e.g. if bwrap is unavailable on a host).
+const SANDBOX = (process.env.ABORN_SANDBOX ?? '1') !== '0'
+const BWRAP   = process.env.ABORN_BWRAP || '/usr/bin/bwrap'
+function wrapBodyCmd(runtimeDir, socketPath) {
+  if (!SANDBOX || !fileExists(BWRAP)) return [BODY_BIN, [runtimeDir, '--headless', socketPath]]
+  // Inside the sandbox the session dir is /session and the body binary is
+  // /aborn/body. The unix socket lives inside the bound session dir, so the
+  // gateway (outside) still reaches it at the real socketPath.
+  const sockName = socketPath.slice(runtimeDir.length).replace(/^\/+/, '') || 'net.sock'
+  const args = [
+    '--ro-bind', '/usr', '/usr',
+    '--ro-bind', '/lib', '/lib',
+    '--ro-bind', '/lib64', '/lib64',
+    '--ro-bind', '/etc/ld.so.cache', '/etc/ld.so.cache',
+    '--ro-bind', BODY_BIN, '/aborn/body',
+    '--bind', runtimeDir, '/session',
+    '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
+    '--unshare-all',        // no net / ipc / pid / user namespaces shared
+    '--die-with-parent',    // body dies if gateway dies
+    '--new-session',        // no controlling tty (blocks TIOCSTI injection)
+    '/aborn/body', '/session', '--headless', `/session/${sockName}`,
+  ]
+  return [BWRAP, args]
+}
 const SESSIONS_DIR     = process.env.ABORN_SESSIONS  || '/tmp/aborn-sessions'
 const STATIC_DIR       = process.env.ABORN_STATIC    || resolve('../site/dist')
 const GLOBAL_MAX       = parseInt(process.env.ABORN_MAX      || '8',      10)
@@ -491,7 +525,8 @@ wss.on('connection', (ws, req) => {
   // Spawn body in headless mode
   const modeLabel = identity ? `persistent:${identity.key}` : 'ephemeral'
   glog(`[body] spawn: session=${sessionId} mode=${modeLabel}`)
-  const child = spawn(BODY_BIN, [runtimeDir, '--headless', socketPath], {
+  const [spawnBin, spawnArgs] = wrapBodyCmd(runtimeDir, socketPath)
+  const child = spawn(spawnBin, spawnArgs, {
     stdio: 'ignore',
     detached: false,
   })
@@ -606,11 +641,20 @@ wss.on('connection', (ws, req) => {
   }
   setTimeout(() => tryConnect(), 300)
 
-  // Flush the freshest surface frame whenever the socket has drained.
+  // Flush the freshest surface frame whenever the socket has drained. The frame
+  // is gzip-compressed before sending (tag 0x05): downsampled RGBA pixels are
+  // highly compressible (large flat/black regions), typically 14 KB → ~2-4 KB,
+  // a 4-6× bandwidth cut over the ~100 KB/s tunnel. The client gunzips back to
+  // the raw 0x04 frame. Clients that predate 0x05 still get nothing worse than
+  // before; the gateway only emits 0x05 once both ends are deployed.
   surfaceTimer = setInterval(() => {
     if (!latestSurface || ws.readyState !== 1) return
     if (ws.bufferedAmount > SURFACE_BACKLOG_MAX) return  // still draining — retry next tick
-    ws.send(XorCipher.apply(latestSurface, xorKey))
+    const gz = gzipSync(latestSurface, { level: 6 })
+    const framed = Buffer.allocUnsafe(1 + gz.length)
+    framed[0] = 0x05            // gzip-compressed surface frame
+    gz.copy(framed, 1)
+    ws.send(XorCipher.apply(framed, xorKey))
     latestSurface = null
   }, SURFACE_FLUSH_MS)
 

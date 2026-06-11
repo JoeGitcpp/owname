@@ -18,9 +18,22 @@ const GATEWAY_WS = (() => {
 })()
 
 const TAG_SENSES  = 0x01
-const TAG_VOCAL   = 0x02
-const TAG_STATE   = 0x03
-const TAG_SURFACE = 0x04
+const TAG_VOCAL       = 0x02
+const TAG_STATE       = 0x03
+const TAG_SURFACE     = 0x04
+const TAG_SURFACE_GZ  = 0x05   // gzip-compressed surface frame (body→gateway→browser)
+
+// Inflate a gzip-compressed payload using the platform DecompressionStream.
+// Supported on iOS Safari 16.4+, Chrome/Edge 80+, Firefox 113+ — i.e. all
+// current mobile browsers. Returns the raw bytes (a 0x04 surface frame).
+async function gunzip(payload: Uint8Array): Promise<Uint8Array> {
+  const ds = new DecompressionStream('gzip')
+  // Copy into a fresh ArrayBuffer-backed view so the Blob part type is exact
+  // (the incoming view may be backed by a SharedArrayBuffer-typed buffer).
+  const part = payload.slice()
+  const stream = new Blob([part]).stream().pipeThrough(ds)
+  return new Uint8Array(await new Response(stream).arrayBuffer())
+}
 const BANDS       = 64
 const GW          = 160
 const GH          = 120
@@ -158,26 +171,35 @@ function useBodyBridge(
         }
 
       } else if (tag === TAG_SURFACE) {
-        if (buf.byteLength < 5) return
-        const w = view.getUint16(1, true)
-        const h = view.getUint16(3, true)
-        if (buf.byteLength < 5 + w * h * 4) return
-        const cv = surfaceRef.current
-        if (!cv) return
-        const ctx2d = cv.getContext('2d')
-        if (!ctx2d) return
-        if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h }
-        const src = new Uint8Array(buf.buffer, buf.byteOffset + 5, w * h * 4)
-        const img = ctx2d.createImageData(w, h)
-        const GAIN = 3
-        for (let i = 0; i < src.length; i += 4) {
-          img.data[i]   = Math.min(255, src[i]   * GAIN)
-          img.data[i+1] = Math.min(255, src[i+1] * GAIN)
-          img.data[i+2] = Math.min(255, src[i+2] * GAIN)
-          img.data[i+3] = 255
-        }
-        ctx2d.putImageData(img, 0, 0)
+        drawSurface(buf)
+      } else if (tag === TAG_SURFACE_GZ) {
+        // Decompress off the hot path; surface frames are independent, so a
+        // late/out-of-order inflate just paints a slightly older frame — fine.
+        void gunzip(buf.subarray(1)).then(drawSurface).catch(() => {})
       }
+    }
+
+    function drawSurface(frame: Uint8Array) {
+      if (frame.byteLength < 5) return
+      const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+      const w = dv.getUint16(1, true)
+      const h = dv.getUint16(3, true)
+      if (frame.byteLength < 5 + w * h * 4) return
+      const cv = surfaceRef.current
+      if (!cv) return
+      const ctx2d = cv.getContext('2d')
+      if (!ctx2d) return
+      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h }
+      const src = new Uint8Array(frame.buffer, frame.byteOffset + 5, w * h * 4)
+      const img = ctx2d.createImageData(w, h)
+      const GAIN = 3
+      for (let i = 0; i < src.length; i += 4) {
+        img.data[i]   = Math.min(255, src[i]   * GAIN)
+        img.data[i+1] = Math.min(255, src[i+1] * GAIN)
+        img.data[i+2] = Math.min(255, src[i+2] * GAIN)
+        img.data[i+3] = 255
+      }
+      ctx2d.putImageData(img, 0, 0)
     }
 
     ws.onclose = (ev) => {
