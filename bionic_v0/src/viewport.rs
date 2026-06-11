@@ -1382,6 +1382,10 @@ pub struct Viewport {
     /// (coarse→fine). Runtime-only for now; TODO: persist into learned_bias.bin
     /// so maturity is inheritable via checkpoint (factory_dna).
     pub developmental_maturity: RwLock<f64>,
+    /// Rate-limit cursor for maturity advances (see MATURITY_ADVANCE_MIN_INTERVAL_US).
+    /// Also shared with the familiarity throttle in observe_vocal_reflex_closure
+    /// so both tick at the same developmental pace.
+    pub last_maturity_advance_us: AtomicU64,
     /// Rate-limit cursor for vocal self-play closures (see
     /// VOCAL_SELF_PLAY_MIN_INTERVAL_US).
     pub last_self_play_t_us: AtomicU64,
@@ -1496,6 +1500,7 @@ impl Viewport {
             efference_copy: RwLock::new(EfferenceCopyState::default()),
             gaussian_field: RwLock::new(crate::phot_gaussian::GaussianField::new()),
             developmental_maturity: RwLock::new(0.0),
+            last_maturity_advance_us: AtomicU64::new(0),
             last_self_play_t_us: AtomicU64::new(0),
             phoneme_memory: RwLock::new(crate::phoneme_memory::PhonemeMemory::new()),
         }
@@ -4306,7 +4311,17 @@ impl Viewport {
             bias.decay_vocal_suppression(now_us);
             // efficacy 的纯时间松弛保留为重启松弛兜底（不持久化时戳）。
             bias.decay_vocal_efficacy(now_us);
-            bias.prediction_familiarity = (bias.prediction_familiarity + delta_fam).min(1.0);
+            // familiarity 的纯时间松弛（τ=2 min）——让遗忘律与限速积累共同
+            // 把平衡点压到 ~0.5–0.7，而非钉死 1.0 压制内生 babble 基线。
+            bias.decay_prediction_familiarity(now_us);
+            // familiarity 限速积累：至多 1 tick/FAMILIARITY_ADVANCE_MIN_INTERVAL_US，
+            // 防止密集 nursery 对（~6/s）在几十秒内把 familiarity 打到 1.0。
+            if now_us.saturating_sub(bias.last_familiarity_advance_us)
+                >= crate::FAMILIARITY_ADVANCE_MIN_INTERVAL_US
+            {
+                bias.prediction_familiarity = (bias.prediction_familiarity + delta_fam).min(1.0);
+                bias.last_familiarity_advance_us = now_us;
+            }
             bias.action_suppression = (bias.action_suppression + delta_sup).min(1.0);
             // efficacy is an EMA of the acoustic-fit-weighted competence, updated
             // ONLY on closures that carry heard-self evidence. It converges toward
@@ -4324,11 +4339,16 @@ impl Viewport {
                 bias.vocal_efficacy = bias.vocal_efficacy.clamp(0.0, 1.0);
             }
         }
-        // Developmental clock advances on earned acoustic competence only —
-        // evidence-less closures do not move it, so the coarse→fine schedule
-        // tracks real vocal progress instead of saturating in seconds.
+        // Developmental clock: advances on earned acoustic competence only, and
+        // at most once per MATURITY_ADVANCE_MIN_INTERVAL_US. The nursery produces
+        // ~6 heard-self evidence closures/s; capping at 1/s stretches the infant
+        // period from ~3 min to ~25 min, making the 8× EMA anneal window matter.
         if let Some(c) = acoustic_competence {
-            self.advance_maturity(c);
+            let last = self.last_maturity_advance_us.load(Ordering::Relaxed);
+            if now_us.saturating_sub(last) >= crate::MATURITY_ADVANCE_MIN_INTERVAL_US {
+                self.last_maturity_advance_us.store(now_us, Ordering::Relaxed);
+                self.advance_maturity(c);
+            }
         }
     }
 

@@ -21,6 +21,13 @@ pub const SUPPRESSION_HALF_LIFE_US: f64 = 300_000_000.0;
 /// 非惩罚、非 reward、不带正负价。单个闭环间隔内衰减极小（在场持续沉积
 /// 仍稳定爬升），但有限——长期无真实拟合时松弛，消除棘轮锁死的退化不动点。
 pub const EFFICACY_HALF_LIFE_US: f64 = 1_800_000_000.0;
+/// prediction_familiarity 的纯时间半衰期（2 分钟）。意图：familiarity 应
+/// 表征**近期学分密度**（最近 ~2 分钟有无持续的预测性闭环），而非"曾经见过"
+/// 的单调棘轮。与 MATURITY_ADVANCE_MIN_INTERVAL_US 配合（每秒最多一次积累
+/// tick）：在密集 nursery 下（~6 证据闭环/秒 → 1 tick/秒）平衡点 ≈ 0.5–0.7，
+/// 使 exploration_drive = (1−fam)*0.60 ≈ 0.18–0.30 维持内生 babble 不熄；
+/// 沉默 ~2 分钟后松弛到低位，babble 基线重新抬头。无语义的数值松弛：非惩罚。
+pub const FAMILIARITY_HALF_LIFE_US: f64 = 120_000_000.0;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BiasLocator {
@@ -99,6 +106,12 @@ pub struct LearnedBiasState {
     /// 重启后该字段为 0 → 首次 decay 的 elapsed 巨大 → efficacy 大幅松弛，把
     /// 跨重启累积的"曾经叫过"幻觉在结构上根除。工程时戳，非语义状态。
     pub last_efficacy_decay_us: u64,
+    /// prediction_familiarity 的纯时间松弛时刻（µs）。不持久化：重启后 = 0
+    /// → 首次 decay elapsed 巨大 → 陈旧 familiarity 立刻松弛。工程时戳。
+    pub last_familiarity_decay_us: u64,
+    /// 上次 familiarity 积累 tick 的时刻（µs）。配合 FAMILIARITY_ADVANCE_MIN_INTERVAL_US
+    /// 限速：nursery 密集闭环下至多 1 tick/秒，防止几十秒内钉死 1.0。不持久化。
+    pub last_familiarity_advance_us: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -282,6 +295,20 @@ impl LearnedBiasState {
         self.vocal_efficacy *= k;
         self.last_efficacy_decay_us = now_us;
     }
+
+    /// prediction_familiarity 的纯时间半衰（τ = FAMILIARITY_HALF_LIFE_US = 2 min）。
+    /// 与 FAMILIARITY_ADVANCE_MIN_INTERVAL_US（1s 积累限速）配合，使平衡点在
+    /// 密集 nursery 下落在 ~0.5–0.7，让 exploration_drive 维持非零 babble 基线。
+    /// 逐行仿 decay_vocal_suppression；不持久化时戳设计同款。
+    pub fn decay_prediction_familiarity(&mut self, now_us: u64) {
+        let elapsed = now_us.saturating_sub(self.last_familiarity_decay_us);
+        if elapsed == 0 {
+            return;
+        }
+        let k = 0.5_f64.powf(elapsed as f64 / FAMILIARITY_HALF_LIFE_US);
+        self.prediction_familiarity *= k;
+        self.last_familiarity_decay_us = now_us;
+    }
 }
 
 
@@ -390,6 +417,10 @@ pub fn read_learned_bias_checkpoint(path: &Path) -> std::io::Result<LearnedBiasS
         // 同款不持久化：重启后从 0 起 → efficacy 首次大幅松弛，跨重启的
         // "曾经叫过"幻觉累积在结构上被根除。
         last_efficacy_decay_us: 0,
+        // 同款不持久化：重启后从 0 → familiarity 首次大幅松弛 + 积累限速
+        // 重置，跨重启的钉死 1.0 在结构上被根除。
+        last_familiarity_decay_us: 0,
+        last_familiarity_advance_us: 0,
     })
 }
 

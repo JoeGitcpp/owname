@@ -225,8 +225,15 @@ impl crate::viewport::Viewport {
         });
         // Developmental clock: a confirmed Align from real pair evidence is
         // earned competence — advance maturity so precision tightens over time.
+        // Throttled to MATURITY_ADVANCE_MIN_INTERVAL_US so the binding path
+        // (like the vocal path) cannot saturate maturity faster than 1/second.
         if feedback == BindingFeedback::Align {
-            self.advance_maturity(pair.curve_similarity);
+            let last = self.last_maturity_advance_us.load(std::sync::atomic::Ordering::Relaxed);
+            if pair.pair_t_us.saturating_sub(last) >= crate::MATURITY_ADVANCE_MIN_INTERVAL_US {
+                self.last_maturity_advance_us
+                    .store(pair.pair_t_us, std::sync::atomic::Ordering::Relaxed);
+                self.advance_maturity(pair.curve_similarity);
+            }
         }
         true
     }

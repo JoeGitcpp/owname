@@ -586,6 +586,19 @@ pub const BINDING_PAIR_DEVIATE_MAX: f64 = 0.30;
 /// developmental timescale (hundreds of strong closures to mature).
 pub const MATURITY_GAIN: f64 = 0.01;
 
+/// Minimum spacing between maturity-advancing closures. The nursery produces
+/// ~6 heard-self evidence closures per second; capping at 1/s stretches the
+/// infant period from ~3 minutes to ~25 minutes at nursery density, making the
+/// 8× EMA anneal window long enough to matter. Applies at the call-site chokepoints
+/// in observe_vocal_reflex_closure and language_binding.
+pub const MATURITY_ADVANCE_MIN_INTERVAL_US: u64 = 1_000_000;
+
+/// Minimum spacing between prediction_familiarity accumulation ticks. Mirrors
+/// MATURITY_ADVANCE_MIN_INTERVAL_US — prevents the dense pair path from pinning
+/// familiarity to 1.0 in seconds, which would silence the endogenous babble
+/// baseline before the body has learned anything.
+pub const FAMILIARITY_ADVANCE_MIN_INTERVAL_US: u64 = 1_000_000;
+
 /// Minimum spacing between vocal self-play closures, so continuous babble
 /// accrues efficacy/maturity at a developmental pace rather than per-tick.
 pub const VOCAL_SELF_PLAY_MIN_INTERVAL_US: u64 = 250_000;
