@@ -416,8 +416,17 @@ function seedFromMaster(runtimeDir) {
   }
 }
 
-// ── vocal_efficacy = last 8 bytes of learned_bias.bin (final write_f64) ───────
+// ── learned_bias.bin v5 tail = [..., prediction_familiarity, action_suppression,
+// vocal_efficacy, developmental_maturity] (4 trailing f64). Under v4 the last
+// f64 was vocal_efficacy; v5 appended maturity, so efficacy is now at -16.
 function readVocalEfficacy(path) {
+  if (!existsSync(path)) return null
+  try {
+    const buf = readFileSync(path)
+    return buf.length >= 16 ? buf.readDoubleLE(buf.length - 16) : null
+  } catch { return null }
+}
+function readMaturity(path) {
   if (!existsSync(path)) return null
   try {
     const buf = readFileSync(path)
@@ -465,7 +474,7 @@ const child = spawn(BODY_BIN, [RUNTIME_DIR, '--nursery-bias', '--headless', sock
 child.on('exit', (code) => { log(`body exited code=${code}`); sandbox.kill('SIGTERM'); process.exit(code ?? 0) })
 
 const startEff = readVocalEfficacy(biasPath)
-log(`seed vocal_efficacy=${startEff ?? 'n/a'} reserve=${readReserve(RUNTIME_DIR) ?? 'n/a'}`)
+log(`seed vocal_efficacy=${startEff ?? 'n/a'} maturity=${readMaturity(biasPath) ?? 'n/a'} reserve=${readReserve(RUNTIME_DIR) ?? 'n/a'}`)
 loadCorpus()
 
 let sock = null
@@ -530,7 +539,7 @@ async function feedLoop() {
       const now = Date.now()
       if (now - lastReport >= 30_000) {
         lastReport = now
-        log(`t=${Math.round((now - startMs) / 1000)}s vocal_efficacy=${fmt(readVocalEfficacy(biasPath))} reserve=${fmt(readReserve(RUNTIME_DIR))}`)
+        log(`t=${Math.round((now - startMs) / 1000)}s vocal_efficacy=${fmt(readVocalEfficacy(biasPath))} maturity=${fmt(readMaturity(biasPath))} reserve=${fmt(readReserve(RUNTIME_DIR))}`)
       }
       if (MASTER_BIAS && now - lastHarvest >= HARVEST_S * 1000) {
         lastHarvest = now
