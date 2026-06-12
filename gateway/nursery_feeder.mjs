@@ -398,6 +398,12 @@ const MASTER_ARTIFACTS = [
   ['familiar_objects.bin', MASTER_DIR ? join(MASTER_DIR, 'master_familiar_objects.bin') : null],
   ['vital_core.bin',      MASTER_DIR ? join(MASTER_DIR, 'master_vital_core.bin') : null],
   ['vocal_memory.bin',    MASTER_DIR ? join(MASTER_DIR, 'master_vocal_memory.bin') : null],
+  // Phase 2: the mainline must carry its full vocal + abstraction level.
+  // vocal_target_recall (target→correction) and snapshot (cross-layer
+  // predictors) were orphaned — harvested/seeded nowhere — so the mainline
+  // re-solved them every restart. Include them so the mainline accumulates.
+  ['vocal_target_recall.bin', MASTER_DIR ? join(MASTER_DIR, 'master_vocal_target_recall.bin') : null],
+  ['snapshot.bin',        MASTER_DIR ? join(MASTER_DIR, 'master_snapshot.bin') : null],
 ]
 
 function harvestMasterArtifacts(runtimeDir) {
@@ -450,7 +456,7 @@ const biasPath   = join(RUNTIME_DIR, 'learned_bias.bin')
 rmSync(RUNTIME_DIR, { recursive: true, force: true })
 mkdirSync(RUNTIME_DIR, { recursive: true })
 if (SEED_DIR) {
-  for (const f of ['learned_bias.bin', 'vital_core.bin', 'familiar_objects.bin', 'self_model.bin', 'phoneme_memory.bin', 'vocal_memory.bin']) {
+  for (const f of ['learned_bias.bin', 'vital_core.bin', 'familiar_objects.bin', 'self_model.bin', 'phoneme_memory.bin', 'vocal_memory.bin', 'vocal_target_recall.bin', 'snapshot.bin']) {
     const src = join(SEED_DIR, f)
     if (existsSync(src)) { try { copyFileSync(src, join(RUNTIME_DIR, f)) } catch {} }
   }

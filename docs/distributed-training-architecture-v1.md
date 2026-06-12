@@ -71,8 +71,11 @@
 - 单测：reinforce 共享 / 吸收 novel / 不被更差分支拉低 / 尊重 cap。
 - 待补：`PhonemeMemory::merge`、`snapshot` 合并（EMA，同结构）、`learned_bias` 已有 EMA。
 
-### 增量 2：分支 seed 补全（低风险纯增量）
-`server.mjs` seed 循环加主线声学 5 件（`master_phoneme_memory.bin` 等），让分支**基于当前主线水平**起步。
+### ✅ 增量 2（已落 2026-06-12）：分支基于当前主线水平
+- `nursery_feeder.mjs`：`MASTER_ARTIFACTS` + 重启 seed 列表补上 `vocal_target_recall.bin` 与 `snapshot.bin`（此前孤立，主线每次重解）。主线现在 harvest 出完整 master_ 产物集。
+- `server.mjs`：新增 `MAINLINE_VOCAL_FILES = [phoneme_memory, vocal_memory, vocal_target_recall, snapshot]`，分支 seed 时从 `master_<name>.bin` 复制进 runtime（fallback MASTER_RUNTIME），与 PERSONAL_FILES（按用户）分流。
+- 验证：① 跑 `nursery_feeder --master` 35s → 产出 `master_vocal_target_recall.bin`(9条目) + `master_snapshot.bin`(12MB) 等；② 用这些 master 文件播种一个全新 body → 首行 **recall_entries=9 / maturity=0.10 / efficacy=0.38**（继承主线水平，非从零）。40 个网关实例/会话测试绿。
+- ⚠️ 线上落地需部署：`deploy_aborn.sh` 同步网关。
 
 ### 增量 3：分支 harvest 回收声学件 + 主线摄取
 - 分支结束：把声学件复制进 `training_pool`（沿用 learned_bias 路径）。

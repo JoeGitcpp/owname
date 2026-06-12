@@ -35,7 +35,7 @@ import {
   readFileSync, existsSync, mkdirSync, rmSync, copyFileSync,
   appendFileSync, readdirSync,
 }                           from 'node:fs'
-import { join, resolve }    from 'node:path'
+import { join, resolve, dirname } from 'node:path'
 import { createReadStream } from 'node:fs'
 import { extname }          from 'node:path'
 import { createHash }       from 'node:crypto'
@@ -159,6 +159,19 @@ const EPHEMERAL_TIMEOUT_MIN = parseInt(process.env.ABORN_EPH_IDLE_MIN   || '30',
 
 // Personal checkpoint files that belong to the user and must never be merged into master.
 const PERSONAL_FILES = ['familiar_objects.bin', 'vital_core.bin', 'self_model.bin']
+
+// Mainline GENERAL skill (vocal repertoire + cross-layer abstraction) seeded into
+// every branch so a new conversation starts at the CURRENT mainline level rather
+// than from zero. Stored as master_<name>.bin alongside MASTER_BIAS, written by
+// the mainline's harvest (nursery_feeder MASTER_ARTIFACTS). These are shared
+// skill — distinct from PERSONAL_FILES (relationship, kept per-user).
+const MASTER_DIR = dirname(MASTER_BIAS)
+const MAINLINE_VOCAL_FILES = [
+  'phoneme_memory.bin',
+  'vocal_memory.bin',
+  'vocal_target_recall.bin',
+  'snapshot.bin',
+]
 
 mkdirSync(SESSIONS_DIR, { recursive: true })
 mkdirSync(USERS_DIR,    { recursive: true })
@@ -508,6 +521,14 @@ wss.on('connection', (ws, req) => {
     const fromUser   = join(userDir, f)
     const fromMaster = join(MASTER_RUNTIME, f)
     SEED_FILES.push([f, existsSync(fromUser) ? fromUser : fromMaster])
+  }
+  // Mainline general skill: seed each branch from master_<name>.bin so it starts
+  // at the current mainline vocal/abstraction level (not from zero). Falls back
+  // to MASTER_RUNTIME/<name> if the master_ file isn't present yet.
+  for (const f of MAINLINE_VOCAL_FILES) {
+    const fromMaster = join(MASTER_DIR, 'master_' + f)
+    const fallback   = join(MASTER_RUNTIME, f)
+    SEED_FILES.push([f, existsSync(fromMaster) ? fromMaster : fallback])
   }
   for (const [dst, src] of SEED_FILES) {
     if (existsSync(src)) {
