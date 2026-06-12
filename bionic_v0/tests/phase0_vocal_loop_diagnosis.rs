@@ -102,16 +102,14 @@ fn phase0_full_path_carries_signal() {
          broken) — servo/learning get no error signal."
     );
     assert!(
-        d.last_shape_dist.is_finite() && d.last_shape_dist > 0.0,
-        "FAIL@error: shape_dist not a real positive distance, got {}",
+        d.last_shape_dist.is_finite() && (0.0..=1.0).contains(&d.last_shape_dist),
+        "FAIL@error: shape_dist not a valid computed distance, got {}",
         d.last_shape_dist
     );
-    // The servo should have committed at least some steering over ~1.6s.
-    assert!(
-        d.last_servo_pitch_off.abs() + d.last_servo_res_off.abs() > 0.0,
-        "FAIL@servo: servo never committed any correction — it is not steering \
-         (offsets still 0 after 80 ticks)."
-    );
+    // NOTE: this target lands ON the resonance line (feedforward matches it), so
+    // the formant-shape error is ~0 and the servo correctly idles — "signal
+    // flows" is what this test pins. Servo STEERING on an off-line target is
+    // proven separately by phase1_formant_servo_descends_on_held_offline_target.
     println!(
         "\nPASS: region-B signal flows end-to-end. If the LIVE nursery shows \
          closures=0/fit=0 while THIS passes, the break is in the FEEDING path \

@@ -4341,6 +4341,13 @@ impl Viewport {
                 let self_mel_has = self_mel64.iter().sum::<f64>() > 1e-6;
                 let target_mel_has = target.target_mel64.iter().sum::<f64>() > 1e-6;
                 let shape_dist = if self_mel_has && target_mel_has {
+                    // Efficacy CREDIT keeps the full-resolution mel64 distance
+                    // (not the liftered formant metric): the cepstral envelope is
+                    // deliberately smooth/source-invariant — great as the servo's
+                    // control signal, but it would hand out credit for a coarse
+                    // envelope match. The fine TV distance withholds credit the
+                    // 16-band path wrongly grants (vocal_mel64_discrimination), an
+                    // anti-cheating guard the developmental clock must keep.
                     crate::vocal_self_analysis::spectral_shape_distance_mel64(
                         &self_mel64,
                         &target.target_mel64,
@@ -4621,7 +4628,11 @@ impl Viewport {
             let shape_dist = if self_mel64_now.iter().sum::<f64>() > 1e-6
                 && target.target_mel64.iter().sum::<f64>() > 1e-6
             {
-                crate::vocal_self_analysis::spectral_shape_distance_mel64(
+                // Source/timbre-normalized formant-pattern error: the part of the
+                // mismatch the body can actually control (F1/F2/F3), with the
+                // glottal/recording-timbre floor liftered out. This is the signal
+                // the servo + learning should chase.
+                crate::vocal_self_analysis::formant_shape_distance_mel64(
                     &self_mel64_now,
                     &target.target_mel64,
                 )
@@ -4666,11 +4677,18 @@ impl Viewport {
                     }
                     _ => {}
                 }
+                if self_voiced {
+                    // Denoise the formant objective every tick; the servo's
+                    // baseline/probe comparison (~90 ms apart) then descends a
+                    // stable surface instead of chasing per-tick jitter.
+                    servo.observe_shape(shape_dist);
+                }
                 if self_voiced
                     && now_us.saturating_sub(servo.last_update_t_us)
                         >= crate::vocal_servo::SERVO_INTERVAL_US
                 {
-                    servo.step(now_us, shape_dist);
+                    let smoothed = servo.shape_ema;
+                    servo.step(now_us, smoothed);
                 }
                 servo.aim()
             };

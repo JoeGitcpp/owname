@@ -183,6 +183,62 @@ pub fn spectral_shape_distance_mel64(a: &[f64; BANDS], b: &[f64; BANDS]) -> f64 
     clamp01(tv)
 }
 
+/// Cepstral liftering bounds for the formant-shape distance. Drop c0 (overall
+/// log-energy/level) and c1 (broad spectral TILT — dominated by glottal source
+/// rolloff and recording timbre, NOT vocal-tract shape), keep c2..C_HI (the
+/// formant ripple the body actually controls via F1/F2/F3).
+const CEPSTRUM_LO: usize = 2;
+const CEPSTRUM_HI: usize = 14;
+
+/// Liftered log-mel cepstrum coefficients [CEPSTRUM_LO, CEPSTRUM_HI) via DCT-II
+/// over the unit-sum-normalized, log-compressed mel bands.
+fn liftered_cepstrum(a: &[f64; BANDS]) -> [f64; CEPSTRUM_HI - CEPSTRUM_LO] {
+    let sa: f64 = a.iter().sum();
+    let inv = if sa > f64::EPSILON { 1.0 / sa } else { 0.0 };
+    // log-compressed, level-normalized mel envelope
+    let mut l = [0.0f64; BANDS];
+    for (i, &v) in a.iter().enumerate() {
+        l[i] = (v * inv + 1e-6).ln();
+    }
+    let n = BANDS as f64;
+    let mut out = [0.0f64; CEPSTRUM_HI - CEPSTRUM_LO];
+    for k in CEPSTRUM_LO..CEPSTRUM_HI {
+        let mut c = 0.0;
+        for (i, &li) in l.iter().enumerate() {
+            c += li * (std::f64::consts::PI * k as f64 * (i as f64 + 0.5) / n).cos();
+        }
+        out[k - CEPSTRUM_LO] = c;
+    }
+    out
+}
+
+/// Formant-pattern distance in [0,1] — a SOURCE/TIMBRE-normalized shape error.
+/// Where `spectral_shape_distance_mel64` compares the full energy distribution
+/// (so overall tilt and glottal/recording timbre dominate, leaving a high floor
+/// the body cannot close), this compares only the liftered cepstrum (c2..c13):
+/// the smooth vocal-tract envelope that F1/F2/F3 actually shape. Cosine distance
+/// over those coefficients → invariant to level and broad tilt, sensitive to
+/// formant placement. This is the error the body CAN drive to zero, so it is the
+/// right learning/servo signal for imitation across a synth-quality gap.
+pub fn formant_shape_distance_mel64(a: &[f64; BANDS], b: &[f64; BANDS]) -> f64 {
+    if a.iter().sum::<f64>() <= f64::EPSILON || b.iter().sum::<f64>() <= f64::EPSILON {
+        return 1.0;
+    }
+    let ca = liftered_cepstrum(a);
+    let cb = liftered_cepstrum(b);
+    let (mut dot, mut na, mut nb) = (0.0, 0.0, 0.0);
+    for (x, y) in ca.iter().zip(cb.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na <= 1e-12 || nb <= 1e-12 {
+        return 1.0; // a flat (formant-less) envelope on either side → maximally far
+    }
+    let cos = (dot / (na.sqrt() * nb.sqrt())).clamp(-1.0, 1.0);
+    clamp01((1.0 - cos) * 0.5)
+}
+
 /// Normalized band-wise distance between two VIB band vectors → [0,1].
 /// Mean absolute difference (L1/n): self vs target perceptual error.
 pub fn spectral_distance(a: &[f64; VIB_BANDS], b: &[f64; VIB_BANDS]) -> f64 {
@@ -547,5 +603,49 @@ mod tests {
         b[5] = 0.5; b[6] = 0.5; // shares band 5
         let d = spectral_shape_distance(&a, &b);
         assert!(d > 0.0 && d < 1.0, "partial overlap distance out of range: {d}");
+    }
+
+    // ── formant_shape_distance_mel64: source/timbre-normalized ────────────────
+    fn two_formant_mel(p1: usize, p2: usize) -> [f64; BANDS] {
+        // Two gaussian "formant" bumps on a mild baseline → a vowel-like envelope.
+        let mut m = [0.05; BANDS];
+        for (i, v) in m.iter_mut().enumerate() {
+            let d1 = i as f64 - p1 as f64;
+            let d2 = i as f64 - p2 as f64;
+            *v += (-(d1 * d1) / 20.0).exp() + 0.7 * (-(d2 * d2) / 24.0).exp();
+        }
+        m
+    }
+
+    #[test]
+    fn formant_dist_invariant_to_tilt_that_fools_raw_shape() {
+        // Same formant pattern, but b has a strong spectral TILT applied (a source/
+        // timbre difference, not a vowel difference). The formant metric should call
+        // them close; the raw shape metric should be misled into calling them far.
+        let a = two_formant_mel(16, 38);
+        let mut b = a;
+        for (i, v) in b.iter_mut().enumerate() {
+            *v *= (0.06 * i as f64).exp(); // rising tilt
+        }
+        let f = formant_shape_distance_mel64(&a, &b);
+        let raw = spectral_shape_distance_mel64(&a, &b);
+        assert!(f < 0.15, "formant dist should ignore pure tilt, got {f}");
+        assert!(raw > f + 0.1, "raw shape ({raw}) should be fooled by tilt more than formant ({f})");
+    }
+
+    #[test]
+    fn formant_dist_sensitive_to_formant_shift() {
+        // Different vowel (F2 moved a lot) → formant distance must be clearly large.
+        let a = two_formant_mel(16, 30);
+        let b = two_formant_mel(16, 46);
+        let f = formant_shape_distance_mel64(&a, &b);
+        assert!(f > 0.2, "formant dist should react to a real formant shift, got {f}");
+    }
+
+    #[test]
+    fn formant_dist_zero_for_identical_and_one_for_silent() {
+        let a = two_formant_mel(20, 40);
+        assert!(formant_shape_distance_mel64(&a, &a) < 1e-9);
+        assert_eq!(formant_shape_distance_mel64(&a, &[0.0; BANDS]), 1.0);
     }
 }

@@ -37,6 +37,11 @@ pub struct VocalServoState {
     dir_idx: u8,
     phase: Phase,
     baseline_shape: f64,
+    /// Per-tick EMA of the (noisy) formant-shape error. The hill-climb compares
+    /// baseline vs probe across a ~90 ms gap; feeding the raw single-tick error
+    /// lets synth jitter/shimmer dominate the comparison and the search wanders.
+    /// Smoothing the objective every tick gives a stable surface to descend.
+    pub shape_ema: f64,
     pub last_update_t_us: u64,
 }
 
@@ -48,8 +53,16 @@ impl Default for VocalServoState {
             dir_idx: 0,
             phase: Phase::Baseline,
             baseline_shape: 1.0,
+            shape_ema: 1.0,
             last_update_t_us: 0,
         }
+    }
+}
+
+impl VocalServoState {
+    /// Per-tick: fold the latest heard formant error into the smoothed objective.
+    pub fn observe_shape(&mut self, shape_dist: f64) {
+        self.shape_ema = self.shape_ema * 0.85 + shape_dist * 0.15;
     }
 }
 
