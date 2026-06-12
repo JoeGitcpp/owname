@@ -344,3 +344,42 @@
   .commune__ctrl { width: 48px; height: 48px; }
   .commune__hangup { width: 58px; height: 58px; }
 }
+
+/* ── No-vision hint (camera off / not granted) ──────────────────────────────
+   The surface is legitimately black when aborn has no camera input. Explain it
+   over the black canvas instead of leaving a dead screen. */
+.commune__novision {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 32px;
+  text-align: center;
+  color: var(--ink-dim);
+  pointer-events: none;
+}
+.commune__novision svg { width: 30px; height: 30px; opacity: 0.5; }
+.commune__novision-text {
+  margin: 0;
+  max-width: 30ch;
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: var(--ink-faint);
+}
+.commune__novision-btn {
+  pointer-events: all;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: var(--ink-dim);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  padding: 9px 24px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+.commune__novision-btn:hover { border-color: var(--accent); color: var(--ink); }

@@ -38,6 +38,11 @@ export const dict = {
   'commune.unmute': { zh: '取消静音', en: 'Unmute' },
   'commune.camoff': { zh: '关闭摄像头', en: 'Camera off' },
   'commune.camon': { zh: '开启摄像头', en: 'Camera on' },
+  'commune.novision': {
+    zh: 'aborn 通过摄像头“看”——现在镜头关着，它看不到你，画面是黑的。它仍能听见你。',
+    en: 'aborn “sees” through your camera — it is off, so the view is dark. It can still hear you.',
+  },
+  'commune.enable-cam': { zh: '开启摄像头', en: 'Turn on camera' },
   'commune.duration': { zh: '通话中', en: 'In call' },
   'commune.unsupported.title': { zh: '此环境不支持感官通道', en: 'Sensory channels unsupported' },
   'commune.unsupported.body': {

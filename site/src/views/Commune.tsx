@@ -252,6 +252,7 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
   const [phase, setPhase] = useState<Phase>({ k: 'requesting' })
   const [muted, setMuted] = useState(false)
   const [camOff, setCamOff] = useState(false)
+  const [hasVideo, setHasVideo] = useState(true)
   const [lifeState, setLifeState] = useState<LifeState | null>(null)
 
   const perceptionRef  = useRef<Perception | null>(null)
@@ -283,7 +284,9 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
       return
     }
     streamRef.current = res.stream
-    if (selfVideoRef.current) {
+    setHasVideo(res.video)
+    setCamOff(!res.video)
+    if (res.video && selfVideoRef.current) {
       selfVideoRef.current.srcObject = res.stream
       selfVideoRef.current.muted = true
       selfVideoRef.current.playsInline = true
@@ -361,6 +364,22 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
     <div className="commune">
       {/* Surface canvas — raw body visual from surface_render.rs */}
       <canvas ref={surfaceRef} className="commune__surface" aria-hidden="true" />
+
+      {/* No-vision hint: when the camera is off or was never granted, the surface
+          is legitimately black (aborn renders what it SEES). Explain it instead
+          of leaving a dead black screen, and offer one tap to enable the camera. */}
+      {isLive && (camOff || !hasVideo) && (
+        <div className="commune__novision fade-in">
+          <CamOffIcon />
+          <p className="commune__novision-text">{t('commune.novision')}</p>
+          <button
+            className="commune__novision-btn"
+            onClick={() => (hasVideo ? toggleCam() : retry())}
+          >
+            {t('commune.enable-cam')}
+          </button>
+        </div>
+      )}
 
       {/* Top-left: live indicator with life-state feedback */}
       {isLive && (

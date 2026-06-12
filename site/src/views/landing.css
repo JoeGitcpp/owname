@@ -4,28 +4,11 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.landing__field {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 0;
-}
-
-/* darken the ambient field so foreground type stays legible */
-.landing__veil {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  background: radial-gradient(
-    ellipse at center,
-    rgba(5, 7, 10, 0.35) 0%,
-    rgba(5, 7, 10, 0.72) 70%,
-    rgba(5, 7, 10, 0.9) 100%
-  );
-  pointer-events: none;
+  /* Minimalist: flat near-black with one calm, static radial — no generative
+     field, no motion. Quiet on purpose. */
+  background:
+    radial-gradient(58% 48% at 50% 40%, rgba(95, 211, 196, 0.055), transparent 70%),
+    var(--bg, #05070a);
 }
 
 .landing__top {
@@ -33,7 +16,7 @@
   z-index: 2;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 22px 26px;
 }
 
@@ -71,55 +54,18 @@
   justify-content: center;
   text-align: center;
   padding: 0 24px;
-  gap: 26px;
+  gap: 22px;
 }
 
-/* the one big button */
-.commune-btn {
-  position: relative;
-  width: min(58vw, 280px);
-  height: min(58vw, 280px);
-  border-radius: 50%;
-  border: none;
-  background: radial-gradient(
-    circle at 50% 45%,
-    rgba(95, 211, 196, 0.16),
-    rgba(95, 211, 196, 0.04) 60%,
-    transparent 72%
-  );
-  display: grid;
-  place-items: center;
-  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.commune-btn:hover {
-  transform: scale(1.04);
-}
-.commune-btn:active {
-  transform: scale(0.98);
-}
-
-.commune-btn__ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1px solid rgba(95, 211, 196, 0.45);
-  animation: breathe 4.2s ease-in-out infinite;
-}
-.commune-btn::before {
-  content: '';
-  position: absolute;
-  inset: -14px;
-  border-radius: 50%;
-  border: 1px solid rgba(95, 211, 196, 0.14);
-  animation: breathe 4.2s ease-in-out infinite reverse;
-}
-
-.commune-btn__label {
-  font-size: clamp(34px, 9vw, 52px);
-  font-weight: 300;
-  letter-spacing: 0.18em;
+/* Typographic hero — the wordmark IS the focal point. Light, spacious, still. */
+.landing__hero {
+  margin: 0;
+  font-size: clamp(56px, 16vw, 116px);
+  font-weight: 200;
+  letter-spacing: 0.14em;
+  line-height: 1;
   color: var(--ink);
-  text-indent: 0.18em;
+  text-indent: 0.14em;
 }
 
 .landing__tagline {
@@ -127,6 +73,45 @@
   font-size: 15px;
   color: var(--ink-dim);
   letter-spacing: 0.04em;
+}
+
+.landing__actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+/* primary entry */
+.landing__enter {
+  background: transparent;
+  border: 1px solid rgba(95, 211, 196, 0.5);
+  color: var(--ink);
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  padding: 11px 30px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.landing__enter:hover {
+  border-color: var(--accent);
+  background: rgba(95, 211, 196, 0.08);
+}
+
+/* secondary — sign in */
+.landing__login {
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  padding: 11px 16px;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.landing__login:hover {
+  color: var(--ink);
 }
 
 .landing__sub {
@@ -230,24 +215,3 @@
     padding: 32px 22px 28px;
   }
 }
-
-/* ── Login section ───────────────────────────────────────────────────────── */
-.landing__login-section {
-  margin-top: 28px;
-  display: flex; flex-direction: column; align-items: center; gap: 12px;
-}
-.landing__login-hint {
-  margin: 0;
-  font-size: 12.5px; line-height: 1.7;
-  color: var(--ink-faint);
-  max-width: 320px; text-align: center;
-}
-.landing__login-btn {
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, .18);
-  color: var(--ink-dim);
-  font-size: 13px; letter-spacing: .08em;
-  padding: 9px 26px; border-radius: 999px;
-  cursor: pointer; transition: all .2s;
-}
-.landing__login-btn:hover { border-color: var(--accent); color: var(--ink); }
