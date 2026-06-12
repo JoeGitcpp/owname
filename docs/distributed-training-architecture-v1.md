@@ -85,10 +85,19 @@
 - **意义**：闭环成立——seed(增量2)→学→harvest 进 pool→merge 进 master→下个分支 seed 更强。同课程下主线 recall **收敛+逐分支改进校正**(非无限膨胀)。
 - ⚠️ 线上需部署：网关 + `merge_artifacts` 二进制(服务器 cargo 重编)。
 
-### 增量 4：运维与健壮性
-- 主线自动常驻（gateway 启动时 spawn `nursery_feeder --forever --master`，崩溃重启 / systemd）。
-- 重置被污染的 master maturity（一次性，从干净新生儿重起谱系）。
-- 并发文件锁（flock）包住 master/pool 写。
+### ✅ 增量 4（部分已落 2026-06-12）：运维与健壮性
+- **主线自动常驻**（已落）：`server.mjs` 在 listen 后 env-gated（`ABORN_MAINLINE=1`）spawn `nursery_feeder --forever --master`，崩溃**指数退避重启**（2s→cap 60s，健康运行后复位）。冒烟验证：日志 `[mainline] spawning continuous life`，主线 runtime 创建。
+- **原子 harvest 写**（已落）：分支 harvest 到 pool 改为写 `.tmp` 再 `renameSync`，使周期 merge 永不读到半写文件而静默丢弃。
+- **重置污染 master maturity**（脚本已落，待你在服务器跑）：`gateway/reset_master_maturity.mjs [master路径]`——清零 learned_bias 末 f64（developmental_maturity），带时间戳备份，biases/efficacy 保留。验证：0.10→0。
+- 并发锁：周期 merge 单线程（主竞争已避免）+ 原子 rename（pool 竞争已避免）；个人文件 same-user 并发写仍 last-writer-wins（低 severity，下次会话自愈），暂不加 flock。
+
+### 服务器部署清单（Joe 执行）
+1. `git pull`（已 push 到 main）。
+2. 服务器 `cd bionic_v0 && source ~/.cargo/env && cargo build --release`（编出新的 `body` + `merge_artifacts`）。
+3. `deploy_aborn.sh` 同步网关（参 server-deploy-ops）。
+4. **一次性**：`node gateway/reset_master_maturity.mjs <master_learned_bias.bin>`（清幻觉成熟度）。
+5. 启动网关时设 `ABORN_MAINLINE=1`（开主线常驻）；`ABORN_MERGE_MIN` 控制摄取周期。
+6. 跑一段后核对：`master_vocal_target_recall.bin` 等随时间增长/改进，访客新会话 recall>0、maturity 继承。
 
 ### 未来（Joe）：账号登录 → 长期持久实例 → 按 AI 持久记忆（接 `memory_store.mjs`），沟通验证后开放。
 

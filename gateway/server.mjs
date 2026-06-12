@@ -33,9 +33,10 @@ import { createConnection } from 'node:net'
 import { spawn }            from 'node:child_process'
 import {
   readFileSync, existsSync, mkdirSync, rmSync, copyFileSync,
-  appendFileSync, readdirSync,
+  appendFileSync, readdirSync, renameSync,
 }                           from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
+import { fileURLToPath }    from 'node:url'
 import { createReadStream } from 'node:fs'
 import { extname }          from 'node:path'
 import { createHash }       from 'node:crypto'
@@ -790,7 +791,11 @@ wss.on('connection', (ws, req) => {
             for (const f of MAINLINE_HARVEST_FILES) {
               const src = join(runtimeDir, f)
               if (existsSync(src)) {
-                try { copyFileSync(src, join(POOL_DIR, `${stamp}__${f}`)) } catch { }
+                // Write atomically: copy to .tmp then rename, so the periodic
+                // merge_artifacts (which globs *__<name>.bin) never reads a
+                // half-written file and silently drops the harvest.
+                const dst = join(POOL_DIR, `${stamp}__${f}`)
+                try { copyFileSync(src, dst + '.tmp'); renameSync(dst + '.tmp', dst) } catch { }
               }
             }
           }
@@ -819,3 +824,36 @@ http.listen(PORT, '127.0.0.1', () => {
   glog(`[aborn-gateway] body=${BODY_BIN} sessions=${SESSIONS_DIR}`)
   glog(`[aborn-gateway] harvest: relaxed=${process.env.ABORN_HARVEST_RELAXED === '1'} merge_min=${MERGE_INTERVAL_MIN}`)
 })
+
+// ── Continuous mainline life ────────────────────────────────────────────────
+// A persistent server-side body that keeps growing and harvests into the master
+// every HARVEST seconds; visitor branches seed from that master. Off by default
+// (dev/test); enable in production with ABORN_MAINLINE=1. Supervised: respawn on
+// exit with exponential backoff so a crash doesn't stop the mainline growing.
+if (process.env.ABORN_MAINLINE === '1') {
+  const FEEDER = fileURLToPath(new URL('./nursery_feeder.mjs', import.meta.url))
+  const MAINLINE_RUNTIME = process.env.ABORN_MAINLINE_RUNTIME || resolve('../runtime-mainline')
+  const SANDBOX_BIN = process.env.ABORN_SANDBOX_BIN || resolve('../bionic_v0/target/release/sandbox_runner')
+  const HARVEST_S = process.env.ABORN_MAINLINE_HARVEST || '120'
+  let backoffMs = 2000
+  let healthyTimer = null
+  const spawnMainline = () => {
+    glog(`[mainline] spawning continuous life (master=${MASTER_BIAS}, runtime=${MAINLINE_RUNTIME})`)
+    const args = [
+      FEEDER, '--forever', '--master', MASTER_BIAS,
+      '--body', BODY_BIN, '--sandbox', SANDBOX_BIN,
+      '--runtime', MAINLINE_RUNTIME, '--harvest', String(HARVEST_S),
+    ]
+    const m = spawn(process.execPath, args, { stdio: 'ignore' })
+    m.on('error', (e) => glog(`[mainline] spawn error: ${e.message}`))
+    m.on('exit', (code) => {
+      if (healthyTimer) clearTimeout(healthyTimer)
+      glog(`[mainline] exited code=${code}; respawning in ${backoffMs}ms`)
+      setTimeout(spawnMainline, backoffMs)
+      backoffMs = Math.min(backoffMs * 2, 60_000) // cap 60s
+    })
+    // Reset backoff after it has stayed up a while (healthy run).
+    healthyTimer = setTimeout(() => { backoffMs = 2000 }, 60_000)
+  }
+  spawnMainline()
+}
