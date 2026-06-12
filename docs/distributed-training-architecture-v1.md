@@ -77,9 +77,13 @@
 - 验证：① 跑 `nursery_feeder --master` 35s → 产出 `master_vocal_target_recall.bin`(9条目) + `master_snapshot.bin`(12MB) 等；② 用这些 master 文件播种一个全新 body → 首行 **recall_entries=9 / maturity=0.10 / efficacy=0.38**（继承主线水平，非从零）。40 个网关实例/会话测试绿。
 - ⚠️ 线上落地需部署：`deploy_aborn.sh` 同步网关。
 
-### 增量 3：分支 harvest 回收声学件 + 主线摄取
-- 分支结束：把声学件复制进 `training_pool`（沿用 learned_bias 路径）。
-- 主线/合并器周期性 **merge 摄取** pool（调用增量 1 的 merge）。建议：扩展现有 pool-merge 为一个 Rust `merge_artifacts` 工具（merge 逻辑随数据结构在 Rust），网关周期调用。
+### ✅ 增量 3（已落 2026-06-12）：回收（分支→pool→主线 merge 摄取）
+- **补齐 merge 内核**：`PhonemeMemory::merge`（按 rehearsal 证据加权合并匹配原型、novel 填空槽/满则换更弱者、不回归；单测：reinforce 共享/吸收 novel/identical 不重复）。recall+vocal_memory 已于增量 1 做。snapshot 定为 **seed-only**（主线自养，分支继承不回合——EMA 合并 12MB 结构化跨层状态风险高、短会话漂移不值得）；learned_bias 走 Node EMA。
+- **`bin/merge_artifacts`**（Rust 工具）：`merge_artifacts <master_dir> <pool_dir>`，逐类型读 `master_<name>.bin` + 合并所有 `*__<name>.bin` pool 文件 + 写回 + 消费 pool 文件。**单线程**运行（网关周期 tick）→ 分支只写 pool、绝不与 master 竞争。
+- **`server.mjs` 接线**：① 分支结束(过质量门)把 `MAINLINE_HARVEST_FILES`(recall/vocal_memory/phoneme) 复制进 pool，命名 `{ts}_{sid}__<name>.bin`；② 周期(MERGE_INTERVAL_MIN)在 merge_pool 之后 spawn `merge_artifacts` 摄取。
+- **验证**：merge 单测全绿；工具端到端(ingest+消费 pool)；72 网关测试绿；同课程分支合并正确**去重**(9→9，保留最优不膨胀)，distinct-target union 增长由单测保证。
+- **意义**：闭环成立——seed(增量2)→学→harvest 进 pool→merge 进 master→下个分支 seed 更强。同课程下主线 recall **收敛+逐分支改进校正**(非无限膨胀)。
+- ⚠️ 线上需部署：网关 + `merge_artifacts` 二进制(服务器 cargo 重编)。
 
 ### 增量 4：运维与健壮性
 - 主线自动常驻（gateway 启动时 spawn `nursery_feeder --forever --master`，崩溃重启 / systemd）。

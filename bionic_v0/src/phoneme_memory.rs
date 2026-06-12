@@ -349,6 +349,75 @@ impl PhonemeMemory {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
+    // Distributed-training merge: fold another life's phoneme pool into this one
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Mainline ← branch. For each active proto in `other`, find the nearest
+    /// active local proto within MATCH_RADIUS and combine them EVIDENCE-WEIGHTED
+    /// (motor/acoustic averaged by rehearsal_count, rehearsal + social counts
+    /// SUM) so a phoneme independently rehearsed across branches grows stronger;
+    /// a novel proto fills an inactive slot, or evicts the weakest only if the
+    /// incoming proto is stronger (no regression). Mirrors record_voiced's
+    /// matching/eviction policy.
+    pub fn merge(&mut self, other: &PhonemeMemory) {
+        const MATCH_RADIUS: f64 = 0.25;
+        let strength = |p: &PhonemeProto| p.rehearsal_count as f64 + p.social_response_count as f64 * 10.0;
+        for op in other.protos.iter().filter(|p| p.active) {
+            let best = self
+                .protos
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.active)
+                .min_by(|(_, a), (_, b)| {
+                    a.motor
+                        .dist(&op.motor)
+                        .partial_cmp(&b.motor.dist(&op.motor))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i);
+            match best {
+                Some(i) if self.protos[i].motor.dist(&op.motor) < MATCH_RADIUS => {
+                    let p = &mut self.protos[i];
+                    let wa = p.rehearsal_count.max(1) as f64;
+                    let wb = op.rehearsal_count.max(1) as f64;
+                    let w = wa + wb;
+                    p.motor.pitch_tension = (p.motor.pitch_tension * wa + op.motor.pitch_tension * wb) / w;
+                    p.motor.resonance_pos = (p.motor.resonance_pos * wa + op.motor.resonance_pos * wb) / w;
+                    p.motor.noise_mix = (p.motor.noise_mix * wa + op.motor.noise_mix * wb) / w;
+                    p.acoustic.spectral_center =
+                        (p.acoustic.spectral_center * wa + op.acoustic.spectral_center * wb) / w;
+                    p.acoustic.resonance = (p.acoustic.resonance * wa + op.acoustic.resonance * wb) / w;
+                    p.acoustic.envelope = (p.acoustic.envelope * wa + op.acoustic.envelope * wb) / w;
+                    p.social_response_rate = (p.social_response_rate * wa + op.social_response_rate * wb) / w;
+                    p.rehearsal_count += op.rehearsal_count;
+                    p.social_response_count += op.social_response_count;
+                    p.last_voiced_us = p.last_voiced_us.max(op.last_voiced_us);
+                }
+                _ => {
+                    if let Some(i) = self.protos.iter().position(|p| !p.active) {
+                        self.protos[i] = op.clone();
+                    } else {
+                        // Pool full: evict the weakest, but only if the incoming
+                        // proto carries more evidence (never regress the pool).
+                        if let Some((wi, _)) = self
+                            .protos
+                            .iter()
+                            .enumerate()
+                            .min_by(|(_, a), (_, b)| {
+                                strength(a).partial_cmp(&strength(b)).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                        {
+                            if strength(op) > strength(&self.protos[wi]) {
+                                self.protos[wi] = op.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
     // L1/L2: refine acoustic fingerprint from self-play echo
     // ──────────────────────────────────────────────────────────────────────────
 
@@ -675,6 +744,50 @@ impl PhonemeMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ms(p: f64, r: f64, n: f64) -> MotorState {
+        MotorState { pitch_tension: p, resonance_pos: r, noise_mix: n }
+    }
+    fn ac(s: f64, r: f64, e: f64) -> AcousticState {
+        AcousticState { spectral_center: s, resonance: r, envelope: e }
+    }
+
+    #[test]
+    fn merge_reinforces_shared_phoneme_and_absorbs_novel() {
+        let mut mainline = PhonemeMemory::new();
+        // mainline has one phoneme, rehearsed once
+        mainline.record_voiced(ms(0.5, 0.4, 0.1), ac(0.5, 0.4, 0.6), 1_000);
+
+        let mut branch = PhonemeMemory::new();
+        // branch independently rehearsed the SAME phoneme 3× ...
+        for _ in 0..3 { branch.record_voiced(ms(0.51, 0.41, 0.1), ac(0.5, 0.4, 0.6), 2_000); }
+        // ... and discovered a DISTINCT phoneme (far in motor space)
+        branch.record_voiced(ms(0.05, 0.9, 0.8), ac(0.2, 0.8, 0.5), 3_000);
+
+        let before = mainline.active_count();
+        mainline.merge(&branch);
+        assert_eq!(mainline.active_count(), before + 1, "novel phoneme absorbed, shared one merged");
+        // The shared proto's evidence summed (1 + 3 rehearsals).
+        let shared = mainline.protos.iter()
+            .filter(|p| p.active)
+            .find(|p| p.motor.dist(&ms(0.5, 0.4, 0.1)) < 0.25).unwrap();
+        assert_eq!(shared.rehearsal_count, 4, "rehearsal evidence summed across branches");
+    }
+
+    #[test]
+    fn merge_identical_pool_does_not_duplicate() {
+        let build = || {
+            let mut m = PhonemeMemory::new();
+            m.record_voiced(ms(0.5, 0.4, 0.1), ac(0.5, 0.4, 0.6), 1_000);
+            m.record_voiced(ms(0.1, 0.8, 0.7), ac(0.2, 0.7, 0.5), 1_000);
+            m
+        };
+        let mut a = build();
+        let b = build(); // an identical pool
+        let n = a.active_count();
+        a.merge(&b); // each proto matches its twin → combine, not birth
+        assert_eq!(a.active_count(), n, "merging an identical pool must not duplicate protos");
+    }
 
     #[test]
     fn record_voiced_births_proto() {

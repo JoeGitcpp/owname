@@ -172,6 +172,13 @@ const MAINLINE_VOCAL_FILES = [
   'vocal_target_recall.bin',
   'snapshot.bin',
 ]
+// Prototype vocal artifacts harvested branch→pool→mainline by structure-aware
+// MERGE (merge_artifacts). snapshot is seed-only (not merged back). learned_bias
+// is harvested separately via collect_to_pool + EMA merge_pool.
+const MAINLINE_HARVEST_FILES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin']
+// Rust tool that merges pooled branch artifacts into master_<name>.bin.
+const MERGE_ARTIFACTS_BIN = process.env.ABORN_MERGE_BIN
+  || resolve('../bionic_v0/target/release/merge_artifacts')
 
 mkdirSync(SESSIONS_DIR, { recursive: true })
 mkdirSync(USERS_DIR,    { recursive: true })
@@ -256,6 +263,13 @@ if (MERGE_INTERVAL_MIN > 0) {
         console.log(`[pool] merged ${r.merged} sessions into master (skipped ${r.skipped})`)
       }
     } catch { /* pool not ready yet */ }
+    // Increment 3: fold pooled branch VOCAL artifacts into the mainline by
+    // structure-aware merge (single-threaded here → no race with branches that
+    // only write into the pool). Spawned tool consumes the pool files it merges.
+    try {
+      const m = spawn(MERGE_ARTIFACTS_BIN, [MASTER_DIR, POOL_DIR], { stdio: 'ignore' })
+      m.on('error', () => { /* tool missing / not built — skip */ })
+    } catch { /* skip */ }
   }, MERGE_INTERVAL_MIN * 60_000)
 }
 
@@ -768,6 +782,17 @@ wss.on('connection', (ws, req) => {
           })
           if (result.pass) {
             collect_to_pool(runtimeDir, POOL_DIR, sessionId)
+            // Increment 3: harvest the branch's VOCAL learning into the pool too,
+            // to be merged (not overwritten) into the mainline by merge_artifacts.
+            // Named {ts}_{sid}__<name>.bin to match that tool's glob. learned_bias
+            // is handled by collect_to_pool above; snapshot is seed-only.
+            const stamp = `${Date.now()}_${sessionId}`
+            for (const f of MAINLINE_HARVEST_FILES) {
+              const src = join(runtimeDir, f)
+              if (existsSync(src)) {
+                try { copyFileSync(src, join(POOL_DIR, `${stamp}__${f}`)) } catch { }
+              }
+            }
           }
           // else: session did not meet quality threshold — discard
         } catch { /* evaluation error: skip collection */ }
