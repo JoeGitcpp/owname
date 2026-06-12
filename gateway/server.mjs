@@ -659,8 +659,14 @@ wss.on('connection', (ws, req) => {
   let latestSurface  = null
   let surfaceTimer   = null
   const SURFACE_FLUSH_MS      = 250         // ≤ 4 fps to the browser
-  const SURFACE_BACKLOG_MAX   = 64 * 1024   // flush only when queue is short
-  const VOCAL_BACKLOG_MAX     = 256 * 1024  // drop vocal only past this
+  const SURFACE_BACKLOG_MAX   = 96 * 1024   // flush surface when queue is short
+  // Keep the vocal ceiling BELOW the surface gate. Vocal is sent eagerly up to
+  // this backlog; if it sits above the surface gate, the shared ws buffer never
+  // drains under it and the surface frame is starved forever — a black screen
+  // over a slow (Cloudflare) tunnel. Capping vocal under the surface gate lets
+  // the buffer fall below it each cycle so the surface actually flushes. Vocal
+  // still flows; it just yields to the (small) surface frame under congestion.
+  const VOCAL_BACKLOG_MAX     = 48 * 1024   // drop vocal past this (< surface gate)
   // Tunnel goodput measured at ~100 KB/s: a raw 320×180 RGBA frame (230 KB)
   // alone exceeds it. Downsample 4× (80×45, ~14 KB) before relaying — the
   // client draws whatever w×h the frame declares and CSS scales it up.

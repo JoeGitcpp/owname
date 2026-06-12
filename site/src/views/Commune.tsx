@@ -207,13 +207,20 @@ function useBodyBridge(
       onDisconnect(mapCloseCode(ev.code))
     }
 
+    // Senses upload: one frame is ~230 KB (the camera grid). At 50 ms that was
+    // ~4.6 MB/s up — beyond a typical mobile uplink, congesting the link and
+    // starving the downstream surface/vocal (black screen). 100 ms (~2.3 MB/s,
+    // 10 fps) still feeds the body's perception while leaving headroom; only
+    // send when the ws isn't already backed up so we never queue senses ahead
+    // of what the link can carry.
     const interval = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return
       const key = xorKeyRef.current
       if (!key) return
+      if (ws.bufferedAmount > 512 * 1024) return  // link saturated — skip this frame
       const plain = new Uint8Array(packSenses(getSenses()))
       ws.send(xorApply(plain, key))
-    }, 50)
+    }, 100)
 
     return () => {
       liveRef.current = false  // mark intentional before close
