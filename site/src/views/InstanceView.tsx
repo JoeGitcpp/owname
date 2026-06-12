@@ -10,6 +10,13 @@ interface InstanceViewProps {
 export function InstanceView({ instanceId: _instanceId, instanceName, onLeave }: InstanceViewProps) {
   const { t } = useI18n()
 
+  // Real logout: clear the session cookie server-side, then leave. (Previously
+  // this button only navigated home, leaving the user still logged in.)
+  const handleLogout = async () => {
+    try { await fetch('/auth/logout', { method: 'POST' }) } catch {}
+    onLeave()
+  }
+
   return (
     <div style={{ position: 'fixed', inset: 0 }}>
       {/* Gradient header strip — sits above the Commune canvas */}
@@ -54,7 +61,7 @@ export function InstanceView({ instanceId: _instanceId, instanceName, onLeave }:
             cursor: 'pointer', pointerEvents: 'all',
             transition: 'border-color .2s',
           }}
-          onClick={onLeave}
+          onClick={handleLogout}
         >
           {t('instance.logout')}
         </button>

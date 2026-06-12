@@ -88,13 +88,13 @@ export function AuthFlow({ onComplete, onBack }: AuthFlowProps) {
     if (!name.trim()) return
     setError(null)
     setLoading(true)
-    const res = await jsonPost('/instances', {})
+    const res = await jsonPost('/instances', { name: name.trim() })
     setLoading(false)
     if (!res.ok && res.error !== 'instance_exists') {
       setError(res.error ?? 'error')
       return
     }
-    onComplete(res.instance?.id ?? 'ok', name.trim())
+    onComplete(res.instance?.id ?? 'ok', res.instance?.name ?? name.trim())
   }
 
   return (

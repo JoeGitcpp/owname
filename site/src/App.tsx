@@ -21,6 +21,7 @@ function initialLang(): Lang {
 export function App() {
   const [lang, setLangState]    = useState<Lang>(initialLang)
   const [stage, setStage]       = useState<Stage>('landing')
+  const [booting, setBooting]   = useState(true)
   const [debriefSecs, setDebriefSecs]   = useState(0)
   const [instanceId, setInstanceId]     = useState<string | null>(null)
   const [instanceName, setInstanceName] = useState<string | null>(null)
@@ -31,6 +32,39 @@ export function App() {
   }
 
   useEffect(() => { document.documentElement.lang = lang }, [lang])
+
+  // On load, restore login: if a valid session cookie exists, resume the user's
+  // persistent instance instead of showing landing. This is what makes a
+  // returning logged-in user reconnect to THEIR AI (and survive a reload),
+  // rather than starting a fresh anonymous session.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const chk = await fetch('/auth/check').then(r => r.json())
+        if (!cancelled && chk?.authed) {
+          const me = await fetch('/instances/me').then(r => r.json())
+          if (!cancelled && me?.instance) {
+            setInstanceId(me.instance.id)
+            setInstanceName(me.instance.name ?? me.instance.identityKey ?? 'instance')
+            setStage('instance')
+          }
+        }
+      } catch { /* offline / not authed → stay on landing */ }
+      if (!cancelled) setBooting(false)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  if (booting) {
+    return (
+      <I18nContext.Provider value={{ lang, setLang }}>
+        <div style={{ position: 'fixed', inset: 0, display: 'grid', placeItems: 'center',
+                      color: 'var(--ink-dim)', fontFamily: 'var(--font-mono)',
+                      fontSize: 12, letterSpacing: '.12em' }}>···</div>
+      </I18nContext.Provider>
+    )
+  }
 
   return (
     <I18nContext.Provider value={{ lang, setLang }}>
