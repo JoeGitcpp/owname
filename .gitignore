@@ -29,3 +29,10 @@ bionic_v0/--help/
 /site/node_modules/
 /gateway/node_modules/
 /sillytavern/
+
+# Gateway runtime artifacts (account/instance/memory persistence, logs, secret)
+/instances.json
+/user-memory-kv/
+/user-memories/
+/.session_secret
+/gateway.log
