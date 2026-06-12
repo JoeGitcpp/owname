@@ -129,6 +129,72 @@ impl VocalTargetRecall {
             last_update_t_us: now_us,
         });
     }
+
+    // ── Persistence ──────────────────────────────────────────────────────────
+    // Mirrors vocal_memory.bin so learned target→correction mappings ACCUMULATE
+    // across nursery restarts instead of being re-solved from zero every session
+    // (the project's standing "doesn't grow across sessions" pain). Layout:
+    //   [4] magic b"VTRC"  [1] version  [8] n_entries u64-le
+    //   per entry: [64×8] target_mel64 f64-le, [8] f1_off, [8] f2_off, [8] fit,
+    //              [8] last_update_t_us u64-le   (= 544 bytes)
+    const MAGIC: [u8; 4] = *b"VTRC";
+    const VERSION: u8 = 0x01;
+    const ENTRY_BYTES: usize = BANDS * 8 + 4 * 8;
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let n = self.entries.len();
+        let mut out = Vec::with_capacity(4 + 1 + 8 + n * Self::ENTRY_BYTES);
+        out.extend_from_slice(&Self::MAGIC);
+        out.push(Self::VERSION);
+        out.extend_from_slice(&(n as u64).to_le_bytes());
+        for e in &self.entries {
+            for v in &e.target_mel64 {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&e.f1_off.to_le_bytes());
+            out.extend_from_slice(&e.f2_off.to_le_bytes());
+            out.extend_from_slice(&e.fit.to_le_bytes());
+            out.extend_from_slice(&e.last_update_t_us.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        if data.len() < 13 || data[0..4] != Self::MAGIC || data[4] != Self::VERSION {
+            return None;
+        }
+        let n = (u64::from_le_bytes(data[5..13].try_into().ok()?) as usize).min(RECALL_CAP);
+        if data.len() < 13 + n * Self::ENTRY_BYTES {
+            return None;
+        }
+        let mut off = 13usize;
+        let mut rd_f64 = |off: &mut usize| {
+            let v = f64::from_le_bytes(data[*off..*off + 8].try_into().unwrap());
+            *off += 8;
+            v
+        };
+        let mut entries = Vec::with_capacity(n);
+        for _ in 0..n {
+            let mut mel = [0.0; BANDS];
+            for m in mel.iter_mut() {
+                *m = rd_f64(&mut off);
+            }
+            let f1_off = rd_f64(&mut off);
+            let f2_off = rd_f64(&mut off);
+            let fit = rd_f64(&mut off);
+            // u64 field: read the raw bytes as u64, NOT via the f64 reader.
+            let last_update_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+            off += 8;
+            entries.push(RecallEntry {
+                target_mel64: mel,
+                f1_off,
+                f2_off,
+                fit,
+                last_update_t_us,
+            });
+        }
+        Some(VocalTargetRecall { entries })
+    }
 }
 
 #[cfg(test)]
@@ -180,6 +246,41 @@ mod tests {
         let mut mem = VocalTargetRecall::default();
         mem.store(1, &mel_with_peak(20), 0.1, 0.1, 0.20); // below RECALL_STORE_MIN_FIT
         assert!(mem.entries.is_empty(), "a correction that didn't work must not be memorised");
+    }
+
+    #[test]
+    fn serialize_roundtrip_preserves_entries() {
+        let mut mem = VocalTargetRecall::default();
+        mem.store(1, &mel_with_peak(12), 0.10, 0.30, 0.85);
+        mem.store(2, &mel_with_peak(40), -0.05, 0.22, 0.78);
+        let back = VocalTargetRecall::deserialize(&mem.serialize()).expect("roundtrip");
+        assert_eq!(back.entries.len(), 2);
+        for (a, b) in mem.entries.iter().zip(back.entries.iter()) {
+            assert!((a.f1_off - b.f1_off).abs() < 1e-12);
+            assert!((a.f2_off - b.f2_off).abs() < 1e-12);
+            assert!((a.fit - b.fit).abs() < 1e-12);
+            assert_eq!(a.last_update_t_us, b.last_update_t_us);
+            for (x, y) in a.target_mel64.iter().zip(b.target_mel64.iter()) {
+                assert!((x - y).abs() < 1e-12);
+            }
+        }
+        // A recalled target still resolves to the same correction after reload.
+        let (idx, _) = back.recall(&mel_with_peak(12)).expect("recall after reload");
+        assert!((back.entries[idx].f2_off - 0.30).abs() < 1e-9);
+    }
+
+    #[test]
+    fn deserialize_rejects_corrupt() {
+        assert!(VocalTargetRecall::deserialize(&[]).is_none());
+        assert!(VocalTargetRecall::deserialize(b"JUNKjunkjunk").is_none());
+        // A header claiming entries but with a truncated body must be rejected.
+        let mut mem = VocalTargetRecall::default();
+        mem.store(1, &mel_with_peak(20), 0.1, 0.2, 0.9);
+        let bytes = mem.serialize();
+        assert!(VocalTargetRecall::deserialize(&bytes[..bytes.len() - 1]).is_none());
+        // The empty (header-only) blob round-trips to empty.
+        let empty = VocalTargetRecall::deserialize(&VocalTargetRecall::default().serialize());
+        assert!(empty.map(|m| m.entries.is_empty()).unwrap_or(false));
     }
 
     #[test]

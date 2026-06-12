@@ -276,6 +276,14 @@ fn main() {
             *vp.vocal_memory.write().unwrap() = vm;
         }
     }
+    // Phase 2: target→correction recall persists across sessions so learned vowel
+    // corrections accumulate instead of re-solving from zero every restart.
+    let vocal_recall_path = runtime_dir.join("vocal_target_recall.bin");
+    if let Ok(bytes) = std::fs::read(&vocal_recall_path) {
+        if let Some(vr) = bionic_v0::vocal_target_recall::VocalTargetRecall::deserialize(&bytes) {
+            *vp.vocal_target_recall.write().unwrap() = vr;
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     // Register SIGTERM so the OS-level kill causes a graceful flush rather than
     // instant termination.  signal_flag::register atomically sets `stop` on
@@ -527,6 +535,7 @@ fn main() {
         let self_cp = bionic_v0::self_model::SelfModelCheckpointPaths::new(&runtime_dir);
         let phoneme_cp = runtime_dir.join("phoneme_memory.bin");
         let vocal_mem_cp = runtime_dir.join("vocal_memory.bin");
+        let vocal_recall_cp = runtime_dir.join("vocal_target_recall.bin");
         let vocal_diag_cp = runtime_dir.join("vocal_diag.csv");
         spawn_ticker(vp.clone(), profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
@@ -610,6 +619,12 @@ fn main() {
                 .unwrap_or_else(|e| e.into_inner())
                 .serialize();
             let _ = std::fs::write(&vocal_mem_cp, &vm_bytes);
+            let vr_bytes = vp_checkpoint
+                .vocal_target_recall
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .serialize();
+            let _ = std::fs::write(&vocal_recall_cp, &vr_bytes);
         })
     };
 
@@ -724,6 +739,12 @@ fn main() {
     {
         let vm_bytes = vp.vocal_memory.read().unwrap().serialize();
         let _ = std::fs::write(&vocal_memory_path, &vm_bytes);
+    }
+    // Target→correction recall: persist at shutdown so learned vowel corrections
+    // accumulate across sessions (Phase 2).
+    {
+        let vr_bytes = vp.vocal_target_recall.read().unwrap().serialize();
+        let _ = std::fs::write(&vocal_recall_path, &vr_bytes);
     }
 
     std::process::exit(0);

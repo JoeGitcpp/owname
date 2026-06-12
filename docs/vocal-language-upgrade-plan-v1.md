@@ -101,6 +101,8 @@
 > - **意义**：前面 2D 伺服 + 目标召回的成果——被音质地板盖住的部分——在正确的控制度量下显形了。身体确实在**可控的共振峰空间**逼近目标且越练越准。残差非 0（喂养器解析包络非完美声道目标 + 伺服有界）。
 > - **开放决策**：efficacy 该用哪个度量是控制 vs 信用的取舍——TV（守护栏、但被音质地板压低）vs 共振峰（反映可控能力、但放松护栏）。当前选 TV 保守。
 
+> **增量 3 已落（2026-06-12 · 召回持久化）。** `vocal_target_recall` 加 serialize/deserialize（magic VTRC，每条目 544B：64-mel+f1/f2/fit+时戳），body.rs 启动加载 + checkpoint/退出写 `vocal_target_recall.bin`，对齐 `vocal_memory.bin` 模式。验证：7 单测（往返、重载后召回、损坏拒绝）；直接跑 body（预置 9 条目 .bin）→ `vocal_diag.csv` 首行 recall_entries=9（重启即加载）。**边界**：`nursery_feeder.mjs:450` 每次 spawn `rmSync` 清空 runtime 目录（设计为从 master 播种），故 recall 不跨**喂养器**会话累积——需 master-harvest（网关侧，项目已知"跨会话成长"机制，未来项）。对保留 runtime 目录重启的部署体已生效。
+
 > **增量 1 已落（2026-06-12 · 目标键控运动召回）。** 数据驱动定优先级：第二刀证明伺服能匹配**静止**目标，但在育婴的**重复**目标上每次都冷启动重爬。增量 1 = 内容寻址记忆，存「目标 64-mel 指纹 → 伺服(F1,F2)偏移」，目标复现时 warm-start 伺服。
 > - 新增 `vocal_target_recall.rs`（`recall`/`store`，cap 16，最近最少用淘汰，5 单测）；`vocal_servo.rs` 加 `warm_start`/`reset`；`viewport.rs` 在伺服块按目标(再)出现 warm-start、好拟合时 store（含 `last_recall_idx` 游标 + `recall_entries` 遥测）。
 > - 验证：`phase2_recall_speeds_up_recurring_target`——目标 A 首次出现 early shape_dist=0.130，学过后复现=**0.046（↓65%，约快 3 倍）**，且 A/B 两目标正确分桶（2 条目）。全测试套件 + 55 lib 单测绿、零回归。
