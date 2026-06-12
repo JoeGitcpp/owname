@@ -34,9 +34,15 @@
 - ⚠️ 部署务必设 `ABORN_SESSION_SECRET`（强随机）；`ABORN_ADMIN_SECRET` 强随机（admin 端点无限流，靠 secret 强度）。
 - ⚠️ 无状态 cookie 改格式 → 上线后现有 cookie 失效，用户需重新登录一次（一次性）。
 
-## 待办（前端 + 后续）
-- 前端 SPA：启动调 `/auth/check` 恢复登录态、加 logout 按钮、显示实例名/登录态、可选记忆查看页。需 `site` 重新构建部署。
-- 后续优化：body↔记忆 socket 桥、活进程 warm-resume、admin 端点限流。
+## 前端 SPA（已接并上线 2026-06-12）
+- `App.tsx`：启动 `GET /auth/check` → authed 则 `GET /instances/me` 自动恢复进持久实例（跨刷新、回访重连到自己的 AI）。
+- `AuthFlow.tsx`：建实例发 `{name}`（原发 `{}` 丢名字）。
+- `InstanceView.tsx`：退出按钮 `POST /auth/logout` 真清 cookie（原只回首页）。
+- 已部署，线上 bundle 确认含 `/auth/check`。注意：landing 的「进入」=匿名 commune、「登录」=持久实例——要持久必须走登录。
+
+## 待办（后续优化）
+- body↔记忆 socket 桥（body 进程内读写 KV；当前 body 学习经按用户二进制文件持久化=基质级记忆已工作）。
+- 活进程 warm-resume、admin 端点限流、记忆查看页 UI。
 
 ## 部署清单（线上 aborn.live）
 1. `git pull`（main）。
