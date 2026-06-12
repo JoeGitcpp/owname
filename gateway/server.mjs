@@ -177,9 +177,11 @@ const MAINLINE_VOCAL_FILES = [
 // MERGE (merge_artifacts). snapshot is seed-only (not merged back). learned_bias
 // is harvested separately via collect_to_pool + EMA merge_pool.
 const MAINLINE_HARVEST_FILES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin']
-// Rust tool that merges pooled branch artifacts into master_<name>.bin.
-const MERGE_ARTIFACTS_BIN = process.env.ABORN_MERGE_BIN
-  || resolve('../bionic_v0/target/release/merge_artifacts')
+// Rust tool that merges pooled branch artifacts into master_<name>.bin. Default
+// to the body binary's own directory — deploy copies both bins side-by-side
+// (server: /home/joe/aborn/{body,merge_artifacts}; local: target/release/*) —
+// so it resolves correctly in both layouts without extra env config.
+const MERGE_ARTIFACTS_BIN = process.env.ABORN_MERGE_BIN || join(dirname(BODY_BIN), 'merge_artifacts')
 
 mkdirSync(SESSIONS_DIR, { recursive: true })
 mkdirSync(USERS_DIR,    { recursive: true })
