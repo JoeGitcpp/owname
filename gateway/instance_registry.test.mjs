@@ -4,6 +4,10 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { rmSync, existsSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { InstanceRegistry } from './instance_registry.mjs'
 
 describe('InstanceRegistry', () => {
@@ -91,5 +95,54 @@ describe('InstanceRegistry', () => {
     const inst = reg.create('email:a@b.com')
     reg.setState(inst.id, 'running')
     assert.equal(reg.get(inst.id).state, 'running')
+  })
+})
+
+describe('InstanceRegistry persistence', () => {
+  const path = join(tmpdir(), `reg-test-${randomBytes(6).toString('hex')}.json`)
+  const cleanup = () => { try { rmSync(path, { force: true }) } catch {} }
+
+  it('survives a restart: a new registry loads the persisted instances', () => {
+    cleanup()
+    const r1 = new InstanceRegistry(path)
+    const inst = r1.create('email:user@aborn.live', 'my-ai')
+    r1.setState(inst.id, 'running')
+    assert.ok(existsSync(path), 'registry file written')
+
+    // Simulate gateway restart: a brand-new registry over the same file.
+    const r2 = new InstanceRegistry(path)
+    const back = r2.getByIdentity('email:user@aborn.live')
+    assert.ok(back, 'returning identity resolves to its persisted instance')
+    assert.equal(back.id, inst.id, 'same instance id across restart')
+    assert.equal(back.state, 'running', 'state persisted')
+    assert.equal(back.name, 'my-ai', 'instance name persisted')
+    cleanup()
+  })
+
+  it('destroy is persisted (not resurrected on reload)', () => {
+    cleanup()
+    const r1 = new InstanceRegistry(path)
+    const inst = r1.create('phone:+15551234567')
+    r1.destroy(inst.id)
+    const r2 = new InstanceRegistry(path)
+    assert.equal(r2.getByIdentity('phone:+15551234567'), null, 'destroyed instance stays gone')
+    cleanup()
+  })
+
+  it('setName updates and persists', () => {
+    cleanup()
+    const r1 = new InstanceRegistry(path)
+    const inst = r1.create('email:x@y.z')
+    r1.setName(inst.id, 'renamed')
+    assert.equal(new InstanceRegistry(path).get(inst.id).name, 'renamed')
+    cleanup()
+  })
+
+  it('corrupt persisted file → starts empty, does not throw', () => {
+    cleanup()
+    writeFileSync(path, 'not json at all {{{')
+    const r = new InstanceRegistry(path)
+    assert.equal(r.count(), 0, 'corrupt registry file yields an empty registry')
+    cleanup()
   })
 })

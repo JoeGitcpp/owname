@@ -28,6 +28,7 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createTransport }    from 'nodemailer'
+import { SESSION_SECRET }     from './session_secret.mjs'
 
 // ── Config (all via env) ──────────────────────────────────────────────────────
 const SMTP_HOST    = process.env.ABORN_SMTP_HOST    || ''
@@ -35,7 +36,7 @@ const SMTP_PORT    = parseInt(process.env.ABORN_SMTP_PORT || '465', 10)
 const SMTP_USER    = process.env.ABORN_SMTP_USER    || ''
 const SMTP_PASS    = process.env.ABORN_SMTP_PASS    || ''
 const FROM_EMAIL   = process.env.ABORN_FROM_EMAIL   || `noreply@aborn.live`
-const SECRET       = process.env.ABORN_SESSION_SECRET || randomBytes(32).toString('hex')
+const SECRET       = SESSION_SECRET
 const OTP_TTL_MS   = 10 * 60 * 1000   // 10 minutes
 const MAX_ATTEMPTS = 3
 const COOKIE_NAME  = '_ab'
@@ -94,13 +95,14 @@ function signToken(token) {
   return createHmac('sha256', SECRET).update(token).digest('hex')
 }
 
+// Stateless signed cookie (see phone_auth for rationale): identity + expiry are
+// inside the signed payload, so login survives a gateway restart. Format:
+// `<base64url(payload)>.<hmac(payload)>`.
 function makeSessionCookie(email) {
-  const token    = randomBytes(24).toString('hex')
-  const expires  = Date.now() + COOKIE_TTL
-  sessionStore.set(token, { email, expiresAt: expires })
-  const sig      = signToken(token)
-  const value    = `${token}.${sig}`
-  const maxAge   = Math.floor(COOKIE_TTL / 1000)
+  const expiresAt = Date.now() + COOKIE_TTL
+  const payload   = Buffer.from(JSON.stringify({ email, expiresAt })).toString('base64url')
+  const value     = `${payload}.${signToken(payload)}`
+  const maxAge     = Math.floor(COOKIE_TTL / 1000)
   return {
     value,
     header: `${COOKIE_NAME}=${value}; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}; Path=/`,
@@ -111,17 +113,19 @@ export function verifySessionCookie(cookieHeader) {
   if (!cookieHeader) return null
   const match = cookieHeader.match(new RegExp(`${COOKIE_NAME}=([^;]+)`))
   if (!match) return null
-  const [token, sig] = match[1].split('.')
-  if (!token || !sig) return null
-  const expected = Buffer.from(signToken(token))
+  const [payload, sig] = match[1].split('.')
+  if (!payload || !sig) return null
+  const expected = Buffer.from(signToken(payload))
   const actual   = Buffer.from(sig)
   if (expected.length !== actual.length) return null
   try {
     if (!timingSafeEqual(expected, actual)) return null
   } catch { return null }
-  const session = sessionStore.get(token)
-  if (!session || session.expiresAt < Date.now()) return null
-  return session
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    if (!session.email || typeof session.expiresAt !== 'number' || session.expiresAt < Date.now()) return null
+    return session
+  } catch { return null }
 }
 
 // ── Route handlers ────────────────────────────────────────────────────────────

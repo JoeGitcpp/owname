@@ -24,9 +24,10 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { normalizePhone, OtpStore }                 from './identity.mjs'
+import { SESSION_SECRET }                           from './session_secret.mjs'
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const SECRET      = process.env.ABORN_SESSION_SECRET || randomBytes(32).toString('hex')
+const SECRET      = SESSION_SECRET
 const COOKIE_NAME = '_ab_phone'
 const COOKIE_TTL  = 7 * 24 * 60 * 60 * 1000  // 7 days
 
@@ -70,12 +71,14 @@ function signToken(token) {
   return createHmac('sha256', SECRET).update(token).digest('hex')
 }
 
+// Stateless signed cookie: the identity + expiry live INSIDE the signed payload,
+// so a returning user stays logged in across a gateway restart (the old random
+// token → in-memory `sessions` Map lookup lost every login on restart). Format:
+// `<base64url(payload)>.<hmac(payload)>`.
 function makePhoneCookie(phone) {
-  const token  = randomBytes(24).toString('hex')
-  const maxAge = Math.floor(COOKIE_TTL / 1000)
-  sessions.set(token, { phone, createdAt: Date.now() })
-  const sig    = signToken(token)
-  const value  = `${token}.${sig}`
+  const maxAge  = Math.floor(COOKIE_TTL / 1000)
+  const payload = Buffer.from(JSON.stringify({ phone, exp: Date.now() + COOKIE_TTL })).toString('base64url')
+  const value   = `${payload}.${signToken(payload)}`
   return {
     value,
     header: `${COOKIE_NAME}=${value}; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}; Path=/`,
@@ -86,18 +89,19 @@ export function verifyPhoneCookie(cookieHeader) {
   if (!cookieHeader) return null
   const match = cookieHeader.match(new RegExp(`${COOKIE_NAME}=([^;]+)`))
   if (!match) return null
-  const [token, sig] = match[1].split('.')
-  if (!token || !sig) return null
-  const expected = Buffer.from(signToken(token))
+  const [payload, sig] = match[1].split('.')
+  if (!payload || !sig) return null
+  const expected = Buffer.from(signToken(payload))
   const actual   = Buffer.from(sig)
   if (expected.length !== actual.length) return null
   try {
     if (!timingSafeEqual(expected, actual)) return null
   } catch { return null }
-  const s = sessions.get(token)
-  if (!s) return null
-  if (Date.now() - s.createdAt > COOKIE_TTL) { sessions.delete(token); return null }
-  return { phone: s.phone }
+  try {
+    const obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    if (!obj.phone || typeof obj.exp !== 'number' || obj.exp < Date.now()) return null
+    return { phone: obj.phone }
+  } catch { return null }
 }
 
 // Periodic session prune

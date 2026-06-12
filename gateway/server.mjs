@@ -203,9 +203,15 @@ const sessionGuard = new SessionGuard({ globalMax: GLOBAL_MAX, perIpMax: PER_IP_
 const idleTracker  = new IdleTracker({ idleMs: IDLE_MIN * 60_000 })
 
 // ── Instance management singletons ───────────────────────────────────────────
-const instanceRegistry = new InstanceRegistry()
+// Persist the instance registry to disk so a returning user's long-term instance
+// survives a gateway restart (was in-memory only → lost on every restart).
+const INSTANCES_PATH   = process.env.ABORN_INSTANCES || resolve('../instances.json')
+const instanceRegistry = new InstanceRegistry(INSTANCES_PATH)
 const resourceGovernor = new ResourceGovernor(INSTANCE_MAX)
-const memoryStore      = new MemoryStore(USERS_DIR)
+// Per-AI structured persistent memory (JSON KV per identity), under a dedicated
+// dir so it never collides with the per-user binary checkpoint files.
+const MEMORY_DIR       = process.env.ABORN_MEMORY_DIR || resolve('../user-memory-kv')
+const memoryStore      = new MemoryStore(MEMORY_DIR)
 const ephemeralMgr     = new EphemeralSessionManager({
   perIpMax:  EPHEMERAL_PERIP_MAX,
   timeoutMs: EPHEMERAL_TIMEOUT_MIN * 60_000,
@@ -296,9 +302,54 @@ const http = createServer(async (req, res) => {
   // ── Auth routes ─────────────────────────────────────────────────────────────
   if (url === '/auth/request' && req.method === 'POST') return handleAuthRequest(req, res)
   if (url === '/auth/verify'  && req.method === 'POST') return handleAuthVerify(req, res)
-  if (url === '/auth/check')                            return handleAuthCheck(req, res)
+  // /auth/check — authed if EITHER the email or phone session cookie is valid
+  // (handleAuthCheck only knew about email). Lets the SPA restore login state.
+  if (url === '/auth/check') {
+    const identity = resolveIdentity(req)
+    return sendJson(res, 200, {
+      authed: !!identity,
+      identity: identity ? { type: identity.type, value: identity.value } : null,
+    })
+  }
   if (url === '/auth/request-phone' && req.method === 'POST') return handlePhoneRequest(req, res)
   if (url === '/auth/verify-phone'  && req.method === 'POST') return handlePhoneVerify(req, res)
+  // POST /auth/logout — clear both session cookies (email + phone).
+  if (url === '/auth/logout' && req.method === 'POST') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Set-Cookie': [
+        '_ab=; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Path=/',
+        '_ab_phone=; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Path=/',
+      ],
+    })
+    return res.end(JSON.stringify({ ok: true }))
+  }
+
+  // ── Per-AI persistent memory (/memory) — structured KV per identity ───────
+  // GET /memory            → all stored key/values for the caller (harvest/export)
+  // GET /memory/keys       → list of keys
+  // PUT /memory/:key  {value}  → write one key (value is the JSON body's `value`)
+  if (url === '/memory' && req.method === 'GET') {
+    const identity = resolveIdentity(req)
+    if (!identity) return sendJson(res, 401, { error: 'unauthorized' })
+    return sendJson(res, 200, { memory: memoryStore.harvest(identity.key) })
+  }
+  if (url === '/memory/keys' && req.method === 'GET') {
+    const identity = resolveIdentity(req)
+    if (!identity) return sendJson(res, 401, { error: 'unauthorized' })
+    return sendJson(res, 200, { keys: memoryStore.listKeys(identity.key) })
+  }
+  if (url.startsWith('/memory/') && req.method === 'PUT') {
+    const identity = resolveIdentity(req)
+    if (!identity) return sendJson(res, 401, { error: 'unauthorized' })
+    const key = decodeURIComponent(url.slice('/memory/'.length))
+    if (!key || key.includes('/') || key === 'keys') return sendJson(res, 400, { error: 'bad_key' })
+    let value
+    try { value = JSON.parse(await readBody(req) || '{}').value } catch { return sendJson(res, 400, { error: 'bad_json' }) }
+    if (value === undefined) return sendJson(res, 400, { error: 'missing_value' })
+    memoryStore.write(identity.key, key, value)
+    return sendJson(res, 200, { ok: true })
+  }
 
   // ── Instance routes (/instances) ─────────────────────────────────────────
   // GET /instances/me — return caller's current instance (null if none)
@@ -321,12 +372,17 @@ const http = createServer(async (req, res) => {
         queued:  resourceGovernor.suspended(),
       })
     }
+    let name = null
     try {
-      const inst     = instanceRegistry.create(identity.key)
+      const parsed = JSON.parse(await readBody(req) || '{}')
+      if (typeof parsed.name === 'string') name = parsed.name.slice(0, 64).trim() || null
+    } catch { /* no/!json body → unnamed */ }
+    try {
+      const inst     = instanceRegistry.create(identity.key, name)
       const newState = transition(inst.state, 'verify')   // pending_verification → running
       instanceRegistry.setState(inst.id, newState)
       resourceGovernor.onStart(inst.id)
-      glog(`[instance] created: id=${inst.id} identity=${identity.key}`)
+      glog(`[instance] created: id=${inst.id} identity=${identity.key} name=${name ?? '(unnamed)'}`)
       return sendJson(res, 201, { instance: instanceRegistry.get(inst.id) })
     } catch (e) {
       if (/already/i.test(e.message)) return sendJson(res, 409, { error: 'instance_exists' })
@@ -771,6 +827,24 @@ wss.on('connection', (ws, req) => {
               try { copyFileSync(src, join(userDir, f)) } catch { }
             }
           }
+        }
+
+        // Per-AI persistent memory: for authenticated users, record cross-session
+        // metadata (visit count, last seen, instance name) into their KV memory
+        // and touch the persistent instance's lastSeen. This is the structured
+        // "this AI remembers you across sessions" layer, distinct from the binary
+        // learning files above.
+        if (identity) {
+          try {
+            const meta = memoryStore.read(identity.key, '_meta') || { sessions: 0 }
+            const inst = instanceRegistry.getByIdentity(identity.key)
+            memoryStore.write(identity.key, '_meta', {
+              sessions: (meta.sessions || 0) + 1,
+              lastSeenAt: Date.now(),
+              instanceName: inst?.name ?? meta.instanceName ?? null,
+            })
+            if (inst) instanceRegistry.touch(inst.id)
+          } catch { /* memory write best-effort */ }
         }
 
         // Evaluate session quality before collecting training result.
