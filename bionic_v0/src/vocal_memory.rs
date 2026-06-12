@@ -47,6 +47,36 @@ impl VocalMemoryState {
         }
     }
 
+    /// Distributed-training merge: fold another life's motor prototypes into
+    /// this one (mainline ← branch). A prototype near an existing one (same
+    /// proximity bin as record_success) reinforces it — stability and
+    /// reuse_success ADD, so a gesture independently confirmed by many branches
+    /// becomes the most stable; novel prototypes are absorbed, then the pool is
+    /// capped to the 8 most stable. Last-writer-wins is avoided: evidence sums.
+    pub fn merge(&mut self, other: &VocalMemoryState) {
+        for p in &other.prototypes {
+            let matching_idx = self.prototypes.iter().position(|q| {
+                (q.breath_drive - p.breath_drive).abs() < 0.1
+                    && (q.pitch_tension - p.pitch_tension).abs() < 0.1
+                    && (q.resonance_position - p.resonance_position).abs() < 0.1
+            });
+            if let Some(idx) = matching_idx {
+                self.prototypes[idx].stability += p.stability;
+                self.prototypes[idx].reuse_success += p.reuse_success;
+                self.prototypes[idx].last_update_t_us =
+                    self.prototypes[idx].last_update_t_us.max(p.last_update_t_us);
+            } else {
+                self.prototypes.push(p.clone());
+            }
+            self.last_update_t_us = self.last_update_t_us.max(p.last_update_t_us);
+        }
+        if self.prototypes.len() > 8 {
+            self.prototypes
+                .sort_by(|a, b| b.stability.partial_cmp(&a.stability).unwrap());
+            self.prototypes.truncate(8);
+        }
+    }
+
     pub fn tick_decay(&mut self, now_us: u64) {
         let elapsed_us = now_us.saturating_sub(self.last_update_t_us);
         if elapsed_us == 0 {
@@ -193,6 +223,32 @@ mod tests {
         for p in &back.prototypes {
             assert!(p.stability > 0.05, "sub-threshold prototype: {}", p.stability);
         }
+    }
+
+    #[test]
+    fn merge_reinforces_shared_and_absorbs_novel() {
+        let mut mainline = VocalMemoryState::default();
+        mainline.record_success(1, 0.3, 0.5, 0.7); // shared gesture, stability 0.1
+        let mut branch = VocalMemoryState::default();
+        branch.record_success(2, 0.3, 0.5, 0.7); // same gesture (reinforces)
+        branch.record_success(2, 0.8, 0.2, 0.4); // novel gesture
+        mainline.merge(&branch);
+        assert_eq!(mainline.prototypes.len(), 2, "shared merged, novel absorbed");
+        // The shared prototype's evidence summed (0.1 + 0.1) and reuse added.
+        let shared = mainline.prototypes.iter()
+            .find(|p| (p.pitch_tension - 0.5).abs() < 0.05).unwrap();
+        assert!(shared.stability > 0.15, "shared gesture reinforced, got {}", shared.stability);
+        assert!(shared.reuse_success >= 2, "reuse evidence summed, got {}", shared.reuse_success);
+    }
+
+    #[test]
+    fn merge_caps_at_eight_most_stable() {
+        let mut a = VocalMemoryState::default();
+        let mut b = VocalMemoryState::default();
+        for i in 0..6u64 { a.record_success(1, 0.1 * i as f64, 0.5, 0.4); }
+        for i in 0..6u64 { b.record_success(2, 0.1 * i as f64, 0.2, 0.7); }
+        a.merge(&b);
+        assert!(a.prototypes.len() <= 8, "merge respects the 8-prototype cap, got {}", a.prototypes.len());
     }
 
     // TDD-1d: corrupt / truncated data returns None safely

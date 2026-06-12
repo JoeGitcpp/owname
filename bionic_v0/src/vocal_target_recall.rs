@@ -130,6 +130,18 @@ impl VocalTargetRecall {
         });
     }
 
+    /// Distributed-training merge: fold another life's recall memory into this
+    /// one (mainline ← branch). For each of the other's entries, route it through
+    /// `store`, which keeps the BEST-fit correction per target and respects the
+    /// cap — so merging N branches converges the mainline toward each branch's
+    /// best-known correction per sound, not last-writer-wins. Commutative up to
+    /// the cap's LRU eviction; idempotent for identical inputs.
+    pub fn merge(&mut self, other: &VocalTargetRecall) {
+        for e in &other.entries {
+            self.store(e.last_update_t_us, &e.target_mel64, e.f1_off, e.f2_off, e.fit);
+        }
+    }
+
     // ── Persistence ──────────────────────────────────────────────────────────
     // Mirrors vocal_memory.bin so learned target→correction mappings ACCUMULATE
     // across nursery restarts instead of being re-solved from zero every session
@@ -246,6 +258,39 @@ mod tests {
         let mut mem = VocalTargetRecall::default();
         mem.store(1, &mel_with_peak(20), 0.1, 0.1, 0.20); // below RECALL_STORE_MIN_FIT
         assert!(mem.entries.is_empty(), "a correction that didn't work must not be memorised");
+    }
+
+    #[test]
+    fn merge_keeps_best_per_target_and_unions_distinct() {
+        let a_key = mel_with_peak(12);
+        let b_key = mel_with_peak(40);
+        // Mainline knows target A (mediocre fit) only.
+        let mut mainline = VocalTargetRecall::default();
+        mainline.store(1, &a_key, 0.0, 0.10, 0.72);
+        // Branch learned A better AND discovered a new target B.
+        let mut branch = VocalTargetRecall::default();
+        branch.store(2, &a_key, 0.0, 0.25, 0.91); // better fit for A
+        branch.store(2, &b_key, 0.0, -0.30, 0.80); // novel B
+
+        mainline.merge(&branch);
+
+        assert_eq!(mainline.entries.len(), 2, "distinct targets union");
+        let (ia, _) = mainline.recall(&a_key).unwrap();
+        assert!((mainline.entries[ia].f2_off - 0.25).abs() < 1e-9, "A adopts branch's better correction");
+        let (ib, _) = mainline.recall(&b_key).unwrap();
+        assert!((mainline.entries[ib].f2_off + 0.30).abs() < 1e-9, "B is absorbed from branch");
+    }
+
+    #[test]
+    fn merge_does_not_regress_on_worse_branch() {
+        let key = mel_with_peak(20);
+        let mut mainline = VocalTargetRecall::default();
+        mainline.store(1, &key, 0.0, 0.30, 0.95); // mainline already strong
+        let mut branch = VocalTargetRecall::default();
+        branch.store(2, &key, 0.0, 0.05, 0.60); // branch worse
+        mainline.merge(&branch);
+        let (i, _) = mainline.recall(&key).unwrap();
+        assert!((mainline.entries[i].f2_off - 0.30).abs() < 1e-9, "mainline keeps its better correction");
     }
 
     #[test]
