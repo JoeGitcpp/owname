@@ -62,6 +62,7 @@ pub mod vocal_self_analysis;
 pub mod vocal_servo;
 pub mod vocal_synthesis;
 pub mod vocal_target;
+pub mod vocal_target_recall;
 pub mod phoneme_memory;
 pub mod vpc;
 pub mod vpc_cross_layer;
@@ -602,6 +603,24 @@ pub const FAMILIARITY_ADVANCE_MIN_INTERVAL_US: u64 = 1_000_000;
 /// Minimum spacing between vocal self-play closures, so continuous babble
 /// accrues efficacy/maturity at a developmental pace rather than per-tick.
 pub const VOCAL_SELF_PLAY_MIN_INTERVAL_US: u64 = 250_000;
+
+/// Phase 1 (2026-06-12): Hz scale for the acoustic servo's two hill-climb knobs,
+/// now repurposed from (pitch, resonance-on-the-1D-line) to INDEPENDENT (F1, F2)
+/// corrections. The servo offset ∈ [-MAX_OFFSET, MAX_OFFSET] (≈±0.45) is scaled
+/// by these to a Hz nudge applied on top of the resonance-derived formant
+/// baseline — this is what lets the body leave the 1-D resonance line and reach
+/// 2-D vowel targets. ±0.45·600≈±270 Hz on F1, ±0.45·1300≈±585 Hz on F2:
+/// enough to cross vowel categories, bounded enough not to destabilise.
+pub const F1_SERVO_HZ: f64 = 600.0;
+pub const F2_SERVO_HZ: f64 = 1300.0;
+
+/// Phase 1 (2026-06-12): minimum `compute_vib_self_match` to treat a VIB return
+/// as self-echo and route a self-play closure. self_match is a time-since-
+/// voicing heuristic over a 150ms half-window, so this threshold maps directly
+/// to a latency window: 0.5 ⇒ "VIB within ≈75ms of voicing". The former 0.85
+/// (≈22ms, ~1 tick at 50Hz) almost never coincided with an echo return, so
+/// solitary babble produced ~0 self-play closures and could not bootstrap.
+pub const VOCAL_SELF_PLAY_MATCH_MIN: f64 = 0.5;
 
 /// EMA smoothing for vocal_efficacy. Closures arrive at the orchestrator rate
 /// (tens of Hz via the action-consequence pair path), so vocal_efficacy is an

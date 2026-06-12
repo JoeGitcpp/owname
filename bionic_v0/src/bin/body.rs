@@ -541,7 +541,7 @@ fn main() {
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
                 let line = format!(
-                    "{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+                    "{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{:.6},{},{}\n",
                     now_us(),
                     d.outlet_ticks,
                     d.bursts,
@@ -555,13 +555,32 @@ fn main() {
                     state.prediction_familiarity,
                     state.action_suppression,
                     state.developmental_maturity,
+                    // Phase 0 diagnosis columns
+                    d.region_b_ticks,
+                    d.last_self_voiced as u8,
+                    d.last_shape_dist,
+                    d.last_learning_gap,
+                    d.last_target_active_energy,
+                    d.last_target_mel64_sum,
+                    d.last_target_bands_sum,
+                    d.last_servo_pitch_off,
+                    d.last_servo_res_off,
+                    d.last_self_match,
+                    d.last_organ_phase,
+                    d.last_breath_drive,
+                    d.last_since_vocal_us,
+                    d.recall_entries,
                 );
+                let new_file = !vocal_diag_cp.exists();
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&vocal_diag_cp)
                 {
                     use std::io::Write as _;
+                    if new_file {
+                        let _ = f.write_all(b"t_us,outlet_ticks,bursts,closures,closures_vocalized,closures_with_evidence,drive_pressure,self_bands_sum,fit,vocal_efficacy,prediction_familiarity,action_suppression,developmental_maturity,region_b_ticks,self_voiced,shape_dist,learning_gap,target_energy,target_mel64_sum,target_bands_sum,servo_pitch_off,servo_res_off,self_match,organ_phase,breath_drive,since_vocal_us,recall_entries\n");
+                    }
                     let _ = f.write_all(line.as_bytes());
                 }
             }

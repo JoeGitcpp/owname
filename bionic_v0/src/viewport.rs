@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::action_consequence::ActionConsequenceState;
@@ -1113,6 +1113,40 @@ pub struct VocalLoopDiag {
     pub last_self_bands_sum: f64,
     /// Last acoustic fit (1-shape_dist) on an evidence-carrying closure.
     pub last_fit: f64,
+
+    // ── Phase 0 diagnosis (2026-06-12) ──────────────────────────────────────
+    // The servo/learning path is gated on `self_voiced`, NOT on the closure
+    // sink — but `last_self_bands_sum`/`last_fit` above only update inside the
+    // closure sink, which fires ~0 times (self_match>0.85 needs a ≈22ms window).
+    // So the live learning path was INVISIBLE to telemetry. These fields capture
+    // it directly each tick, plus the closure-gate components, so a stalled loop
+    // reveals exactly which link is starved. Observer-side only.
+    /// Region-B (external target / imitation) learning-path tick count.
+    pub region_b_ticks: u64,
+    /// Did the self-hearing path register voiced output this tick?
+    pub last_self_voiced: bool,
+    /// Real 64-mel (or 16-band fallback) self↔target shape distance.
+    pub last_shape_dist: f64,
+    /// The gap actually fed to imitation learning (shape_dist if voiced else parametric).
+    pub last_learning_gap: f64,
+    /// Live target energy at the outlet (region B only runs if ≥0.01).
+    pub last_target_active_energy: f64,
+    /// Σ target_mel64 — ZERO means the fine fingerprint path is starved
+    /// (parametric feeding) and shape_dist silently falls back to coarse bands.
+    pub last_target_mel64_sum: f64,
+    /// Σ target_bands (coarse 16-band target contour).
+    pub last_target_bands_sum: f64,
+    /// Servo committed corrections (steering, not just credit).
+    pub last_servo_pitch_off: f64,
+    pub last_servo_res_off: f64,
+    /// Closure-gate components (from compute_vib_self_match): which one fails?
+    pub last_self_match: f64,
+    pub last_organ_phase: u8,
+    pub last_breath_drive: f64,
+    pub last_since_vocal_us: u64,
+    /// Phase 2: number of target→correction entries the recall memory has
+    /// learned. >0 confirms content-addressed recall is populating live.
+    pub recall_entries: u64,
 }
 
 pub struct Viewport {
@@ -1304,6 +1338,13 @@ pub struct Viewport {
     /// P3 Stage 3: active acoustic servo — learned pitch/resonance correction that
     /// hill-climbs to minimize the heard shape error (steers, not just credits).
     pub vocal_servo: RwLock<crate::vocal_servo::VocalServoState>,
+    /// Phase 2 (2026-06-12): content-addressed motor recall — target 64-mel
+    /// fingerprint → the servo (F1,F2) correction that matched it. Lets a
+    /// recurring nursery target warm-start the servo instead of cold-climbing.
+    pub vocal_target_recall: RwLock<crate::vocal_target_recall::VocalTargetRecall>,
+    /// Which recall entry the servo is currently tracking (-1 = none/novel).
+    /// A change signals a target (re)presentation → warm-start; →none → reset.
+    pub last_recall_idx: AtomicI64,
     /// Engineering telemetry for the vocal loop (体检). Written by the live
     /// outlet and the closure sink; read only by the body's checkpoint ticker
     /// to dump a numeric trace file. Never read back into any law — pure
@@ -1389,6 +1430,13 @@ pub struct Viewport {
     /// Rate-limit cursor for vocal self-play closures (see
     /// VOCAL_SELF_PLAY_MIN_INTERVAL_US).
     pub last_self_play_t_us: AtomicU64,
+    /// Phase 1 (2026-06-12): rate-limit cursor for imitation closures routed
+    /// from the region-B servo/self_voiced path. The servo path runs every tick
+    /// with genuine heard-self evidence + a real shape error, but previously
+    /// never reached the closure sink (only the brittle ≈22ms self_match window
+    /// did) — so efficacy/maturity stayed frozen. This routes that working path
+    /// into the SAME honesty-gated sink, rate-limited like self-play.
+    pub last_imitation_closure_t_us: AtomicU64,
 
     // ── Phoneme prototype memory (4-layer vocal self-learning) ───────────────
     /// L1-4 vocal learning substrate.  Prototypes accumulate from babble
@@ -1480,6 +1528,10 @@ impl Viewport {
             self_vocal_mel64: RwLock::new(([0.0; crate::vocal_self_analysis::BANDS], 0)),
             latest_target_mel64: RwLock::new(([0.0; crate::vocal_self_analysis::BANDS], 0)),
             vocal_servo: RwLock::new(crate::vocal_servo::VocalServoState::default()),
+            vocal_target_recall: RwLock::new(
+                crate::vocal_target_recall::VocalTargetRecall::default(),
+            ),
+            last_recall_idx: AtomicI64::new(-1),
             vocal_diag: RwLock::new(VocalLoopDiag::default()),
             familiar_objects: RwLock::new(
                 crate::familiar_objects::FamiliarObjectsState::default(),
@@ -1502,6 +1554,7 @@ impl Viewport {
             developmental_maturity: RwLock::new(0.0),
             last_maturity_advance_us: AtomicU64::new(0),
             last_self_play_t_us: AtomicU64::new(0),
+            last_imitation_closure_t_us: AtomicU64::new(0),
             phoneme_memory: RwLock::new(crate::phoneme_memory::PhonemeMemory::new()),
         }
     }
@@ -3717,7 +3770,15 @@ impl Viewport {
         // deadlock (a newborn's echo-cancelled babble previously produced no
         // learnable consequence at all).
         let self_match = self.compute_vib_self_match(now_us);
-        if self_match > 0.85 {
+        // Phase 1 (2026-06-12): widened from >0.85. compute_vib_self_match is a
+        // pure time-since-voicing heuristic over a 150ms half-window, so 0.85
+        // meant "VIB within ≈22ms of voicing" — at 50Hz essentially only the
+        // single tick right after a burst, which almost never coincides with an
+        // echo return. 0.5 = "within ≈75ms" (≈3-4 ticks), a realistic babble→
+        // hear-self latency, so solitary babble can actually bootstrap. Honesty
+        // is unchanged: the closure sink still re-derives acoustic fit and gates
+        // on self_bands>1e-6; a weak/absent self-echo still credits ~nothing.
+        if self_match > crate::VOCAL_SELF_PLAY_MATCH_MIN {
             let last_sp = self.last_self_play_t_us.load(Ordering::Relaxed);
             if now_us.saturating_sub(last_sp) >= crate::VOCAL_SELF_PLAY_MIN_INTERVAL_US {
                 // closure_support here is the motor→sound contingency strength.
@@ -3831,21 +3892,28 @@ impl Viewport {
     ///   0.0 = VIB signal is entirely external
     fn compute_vib_self_match(&self, now_us: u64) -> f64 {
         let organ = self.read_vocal_organ();
-        if organ.phase != crate::vocal_organ::VocalOrganPhase::Active || organ.breath_drive < 0.01 {
-            return 0.0;
-        }
-
         // Use the tick's now_us so the elapsed time since voicing is correct.
         let since_last_vocal = now_us.saturating_sub(organ.last_update_t_us);
-
         // Guard half-window: 150ms. Past this, treat VIB as external.
         let guard_us = crate::VOCAL_TARGET_WRITE_COUPLED_GUARD_US / 2;
-        if since_last_vocal > guard_us {
-            return 0.0;
-        }
-
+        let active = organ.phase == crate::vocal_organ::VocalOrganPhase::Active
+            && organ.breath_drive >= 0.01;
         // Simple time-based decay: shorter since vocal = more likely self.
-        (1.0 - (since_last_vocal as f64 / guard_us as f64)).clamp(0.0, 1.0)
+        let m = if !active || since_last_vocal > guard_us {
+            0.0
+        } else {
+            (1.0 - (since_last_vocal as f64 / guard_us as f64)).clamp(0.0, 1.0)
+        };
+        // Phase 0 diagnosis: record the gate components so a stalled loop reveals
+        // WHICH condition fails (phase idle? breath decayed? window missed?).
+        {
+            let mut diag = self.vocal_diag.write().unwrap();
+            diag.last_self_match = m;
+            diag.last_organ_phase = organ.phase.as_u8();
+            diag.last_breath_drive = organ.breath_drive;
+            diag.last_since_vocal_us = since_last_vocal;
+        }
+        m
     }
 
     fn has_recent_write_coupled_vib_caution(&self, now_us: u64) -> bool {
@@ -4497,12 +4565,22 @@ impl Viewport {
         };
         {
             // 体检 telemetry: outlet cadence, raw drive, burst count.
+            // Phase 0: also snapshot the live target state here (always runs,
+            // unlike region B which is gated on energy≥0.01) so the CSV shows
+            // whether the caregiver target — and its fine mel64 fingerprint —
+            // is reaching the loop at all. Read target before taking the diag
+            // lock (read_vocal_target returns a copy; no nested lock).
+            let t = self.read_vocal_target();
             let mut diag = self.vocal_diag.write().unwrap();
             diag.outlet_ticks += 1;
             diag.last_drive_pressure = drive_pressure;
             if burst.is_some() {
                 diag.bursts += 1;
             }
+            diag.last_target_active_energy = t.active_energy;
+            diag.last_target_mel64_sum = t.target_mel64.iter().sum();
+            diag.last_target_bands_sum = t.target_bands.iter().sum();
+            diag.recall_entries = self.vocal_target_recall.read().unwrap().entries.len() as u64;
         }
         if let Some(b) = burst {
             contribs.push(VocalDriveContribution {
@@ -4515,6 +4593,10 @@ impl Viewport {
         }
 
         // --- Source region B: external-sound target / imitation pull ---
+        // Phase 1: the acoustic servo's correction, captured here and applied to
+        // the organ's explicit F1/F2 AFTER the outlet voices (voicing overwrites
+        // formants from resonance, so the servo nudge must come last).
+        let mut region_b_formant_offset: Option<(f64, f64)> = None;
         let target = self.read_vocal_target();
         if target.active_energy >= 0.01 {
             let organ = self.read_vocal_organ();
@@ -4553,13 +4635,37 @@ impl Viewport {
                 imit.observe_gap(now_us, learning_gap, organ.breath_drive);
                 imit.last_acoustic_distance = acoustic_dist;
             }
-            // P3 Stage 3: active acoustic servo. The feedforward hint aims coarsely;
-            // the servo hill-climbs a bounded pitch/resonance correction to reduce
-            // the shape error the body actually HEARS. It steps on its own ~90 ms
-            // cadence (the organ's smoothing must settle between probes); the aim is
-            // read every tick so the held probe is applied continuously.
+            // P3 Stage 3 / Phase 1: active acoustic servo. The feedforward hint
+            // sets the vowel BASELINE (resonance→F1/F2 on the 1-D line); the servo
+            // hill-climbs a bounded INDEPENDENT (F1, F2) correction to reduce the
+            // shape error the body actually HEARS — this is what reaches 2-D vowel
+            // targets the single resonance scalar cannot. It steps on its own
+            // ~90 ms cadence (organ smoothing must settle between probes); the aim
+            // is read every tick so the held probe is applied continuously.
             let (servo_p, servo_r) = {
                 let mut servo = self.vocal_servo.write().unwrap();
+                // Phase 2: content-addressed warm-start. On a target
+                // (re)presentation that matches a remembered correction, jump the
+                // servo straight to it (skip the cold climb); on a novel target
+                // after a known one, reset so we don't chase a stale offset.
+                let matched = self
+                    .vocal_target_recall
+                    .read()
+                    .unwrap()
+                    .recall(&target.target_mel64);
+                let last = self.last_recall_idx.load(Ordering::Relaxed);
+                match matched {
+                    Some((idx, _)) if idx as i64 != last => {
+                        let e = self.vocal_target_recall.read().unwrap().entries[idx].clone();
+                        servo.warm_start(e.f1_off, e.f2_off);
+                        self.last_recall_idx.store(idx as i64, Ordering::Relaxed);
+                    }
+                    None if last != -1 => {
+                        servo.reset();
+                        self.last_recall_idx.store(-1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
                 if self_voiced
                     && now_us.saturating_sub(servo.last_update_t_us)
                         >= crate::vocal_servo::SERVO_INTERVAL_US
@@ -4568,6 +4674,53 @@ impl Viewport {
                 }
                 servo.aim()
             };
+            region_b_formant_offset = Some((servo_p, servo_r));
+            // Phase 2: memorise a correction that actually worked, keyed by the
+            // target fingerprint, so the next time this sound recurs the servo is
+            // warm-started above instead of re-solving from zero.
+            if self_voiced {
+                let fit = (1.0 - shape_dist).clamp(0.0, 1.0);
+                if fit >= crate::vocal_target_recall::RECALL_STORE_MIN_FIT {
+                    self.vocal_target_recall.write().unwrap().store(
+                        now_us,
+                        &target.target_mel64,
+                        servo_p,
+                        servo_r,
+                        fit,
+                    );
+                }
+            }
+            // Phase 0: capture the live region-B learning path (invisible before
+            // — it runs off self_voiced, not the closure sink). Reveals whether
+            // the body hears itself, the real shape error, and the servo's steer.
+            {
+                let mut diag = self.vocal_diag.write().unwrap();
+                diag.region_b_ticks += 1;
+                diag.last_self_voiced = self_voiced;
+                diag.last_shape_dist = shape_dist;
+                diag.last_learning_gap = learning_gap;
+                diag.last_servo_pitch_off = servo_p;
+                diag.last_servo_res_off = servo_r;
+            }
+            // Phase 1 (2026-06-12): route the WORKING servo/self_voiced path into
+            // the evidence-gated closure sink. The body genuinely heard its own
+            // voice this round (self_voiced) and has a real self↔target shape
+            // error — credit a rate-limited closure so vocal_efficacy AND the
+            // developmental clock actually advance, instead of staying frozen
+            // behind the ≈22ms self_match window that almost never opens. The sink
+            // re-derives acoustic fit (self vs target) under the SAME honesty gate
+            // (self_bands>1e-6) and weights by closure_support; support reflects
+            // active voicing strength. Not a reward — a prediction-error-weighted
+            // competence level on a path that was already running.
+            if self_voiced {
+                let last_ic = self.last_imitation_closure_t_us.load(Ordering::Relaxed);
+                if now_us.saturating_sub(last_ic) >= crate::VOCAL_SELF_PLAY_MIN_INTERVAL_US {
+                    let support = organ.breath_drive.clamp(0.0, 1.0);
+                    self.observe_vocal_reflex_closure(now_us, support, true);
+                    self.last_imitation_closure_t_us
+                        .store(now_us, Ordering::Relaxed);
+                }
+            }
             // A1: dual-drive confluence flows back here — and ONLY here. The
             // arbitrated reading (already ticked each orchestrator tick) leans
             // the external/attachment-driven voicing continuously: net>0 (bond
@@ -4581,11 +4734,15 @@ impl Viewport {
                 target.active_energy * 0.5,
                 dd.net_toward_bond,
             );
+            // Feedforward only here: pitch from the target's pitch hint, vowel
+            // baseline from its resonance hint. The servo's correction is NOT
+            // folded into resonance any more (that kept it trapped on the 1-D
+            // line) — it is applied as an independent F1/F2 nudge after voicing.
             contribs.push(VocalDriveContribution {
                 intensity: bond_drive,
                 breath: bond_drive,
-                pitch: (target.pitch_hint + servo_p).clamp(0.0, 1.0),
-                resonance: (target.resonance_hint + servo_r).clamp(0.0, 1.0),
+                pitch: target.pitch_hint.clamp(0.0, 1.0),
+                resonance: target.resonance_hint.clamp(0.0, 1.0),
                 noise: 0.0,
             });
         }
@@ -4675,6 +4832,18 @@ impl Viewport {
         if final_noise > 0.0 {
             let mut organ = self.vocal_organ.write().unwrap();
             organ.noise_mix = organ.noise_mix.max(final_noise);
+        }
+        // Phase 1: apply the acoustic servo's INDEPENDENT F1/F2 correction on top
+        // of the resonance-derived baseline the voicing above just set. The servo
+        // hill-climbs these (in normalised units) to minimise the heard shape
+        // error, so this is the step that actually lets the body move OFF the 1-D
+        // resonance line into 2-D vowel space. Bounded + clamped → no instability.
+        if let Some((off_f1, off_f2)) = region_b_formant_offset {
+            let mut organ = self.vocal_organ.write().unwrap();
+            organ.formant_f1 =
+                (organ.formant_f1 + off_f1 * crate::F1_SERVO_HZ).clamp(150.0, 1200.0);
+            organ.formant_f2 =
+                (organ.formant_f2 + off_f2 * crate::F2_SERVO_HZ).clamp(400.0, 3500.0);
         }
     }
 

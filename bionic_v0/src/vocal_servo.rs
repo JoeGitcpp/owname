@@ -59,6 +59,27 @@ fn clamp_off(x: f64) -> f64 {
 }
 
 impl VocalServoState {
+    /// Phase 2: warm-start the committed offsets from a recalled correction
+    /// (content-addressed motor recall) and re-enter the Baseline phase so the
+    /// next probe is evaluated against the recalled point, not a stale one. This
+    /// is what lets a familiar target skip the cold hill-climb.
+    pub fn warm_start(&mut self, off_a: f64, off_b: f64) {
+        self.pitch_offset = clamp_off(off_a);
+        self.resonance_offset = clamp_off(off_b);
+        self.phase = Phase::Baseline;
+        self.baseline_shape = 1.0;
+    }
+
+    /// Phase 2: clean cold start (novel target with no recall) — drop any
+    /// committed offset chased from a previous, now-gone target.
+    pub fn reset(&mut self) {
+        self.pitch_offset = 0.0;
+        self.resonance_offset = 0.0;
+        self.dir_idx = 0;
+        self.phase = Phase::Baseline;
+        self.baseline_shape = 1.0;
+    }
+
     /// The correction to ADD to the feedforward (pitch_hint, resonance_hint) this
     /// period. Includes the live probe step during the Probe phase.
     pub fn aim(&self) -> (f64, f64) {

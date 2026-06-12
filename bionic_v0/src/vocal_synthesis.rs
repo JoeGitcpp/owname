@@ -164,11 +164,22 @@ impl VocalSynthesizer {
         let vib_rate   = 5.2;   // Hz
         let vib_inc    = TAU * vib_rate / sr;
 
-        // Update F1/F2 formants to match resonance (vowel space)
-        let f1_hz = 300.0 + reso * 600.0;    // 300–900 Hz
-        let f2_hz = 850.0 + reso * 1500.0;   // 850–2350 Hz
-        self.formants[0] = FormantFilter::new(f1_hz, 80.0,  sr);
-        self.formants[1] = FormantFilter::new(f2_hz, 100.0, sr);
+        // Vowel space now comes from the organ's EXPLICIT formant state (F1=
+        // height, F2=backness, F3=tract) so the imitation path can reach
+        // independent 2D vowel positions — not just points on the single
+        // resonance line. The 3-scalar voicing path keeps its exact prior sound
+        // because begin_voicing/adjust_toward populate these from
+        // resonance_position via formants_from_resonance. `reso` is kept only as
+        // a safety fallback should formants ever arrive uninitialised (≈0).
+        let (f1_hz, f2_hz, f3_hz) = if organ.formant_f1 >= 1.0 && organ.formant_f2 >= 1.0 {
+            (organ.formant_f1, organ.formant_f2, organ.formant_f3)
+        } else {
+            let (d1, d2) = VocalOrganState::formants_from_resonance(reso);
+            (d1, d2, 2500.0)
+        };
+        self.formants[0] = FormantFilter::new(f1_hz.clamp(150.0, 1200.0), 80.0, sr);
+        self.formants[1] = FormantFilter::new(f2_hz.clamp(400.0, 3500.0), 100.0, sr);
+        self.formants[2] = FormantFilter::new(f3_hz.clamp(1500.0, 4500.0), 150.0, sr);
 
         // Attack coefficient (10 ms)
         let attack = 1.0 - (-1.0 / (0.010 * sr)).exp();
@@ -226,13 +237,17 @@ mod tests {
     use crate::vocal_organ::{VocalOrganState, VocalOrganPhase};
 
     fn make_organ(breath: f64, pitch: f64, reso: f64, noise: f64) -> VocalOrganState {
+        // Mirror begin_voicing: explicit formants derived from the resonance
+        // scalar, so synthesizer tests that vary `reso` still exercise the
+        // vowel-line mapping the synthesizer now reads from the organ.
+        let (f1, f2) = VocalOrganState::formants_from_resonance(reso);
         VocalOrganState {
             breath_drive:       breath,
             pitch_tension:      pitch,
             resonance_position: reso,
             noise_mix:          noise,
-            formant_f1:         500.0,
-            formant_f2:         1500.0,
+            formant_f1:         f1,
+            formant_f2:         f2,
             formant_f3:         2500.0,
             voiced_ratio:       noise,
             breath_noise_ratio: noise,

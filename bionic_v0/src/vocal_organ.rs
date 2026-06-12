@@ -57,10 +57,27 @@ impl Default for VocalOrganState {
 }
 
 impl VocalOrganState {
+    /// Baseline vowel-line mapping resonance_position → (F1, F2) in Hz. This is
+    /// the legacy 1-scalar locus the synthesizer used to derive internally; it
+    /// now lives here so the 3-scalar voicing path writes it into the EXPLICIT
+    /// formant fields and the synthesizer simply reads those. The imitation path
+    /// can then drive F1/F2 OFF this line for independent 2D vowel control —
+    /// which the single resonance scalar physically cannot reach.
+    pub fn formants_from_resonance(reso: f64) -> (f64, f64) {
+        let r = reso.clamp(0.0, 1.0);
+        (300.0 + r * 600.0, 850.0 + r * 1500.0) // F1 300–900 Hz, F2 850–2350 Hz
+    }
+
     pub fn begin_voicing(&mut self, now_us: u64, breath: f64, pitch: f64, resonance: f64) {
         self.breath_drive = breath;
         self.pitch_tension = pitch;
         self.resonance_position = resonance;
+        // Keep explicit formants in sync with the resonance scalar so the
+        // synthesizer (which reads them) reproduces the exact legacy vowel locus.
+        let (f1, f2) = Self::formants_from_resonance(resonance);
+        self.formant_f1 = f1;
+        self.formant_f2 = f2;
+        self.formant_f3 = 2500.0;
         self.phase = VocalOrganPhase::Active;
         self.last_update_t_us = now_us;
     }
@@ -70,6 +87,9 @@ impl VocalOrganState {
         self.breath_drive = self.breath_drive * (1.0 - alpha) + breath * alpha;
         self.pitch_tension = self.pitch_tension * (1.0 - alpha) + pitch * alpha;
         self.resonance_position = self.resonance_position * (1.0 - alpha) + resonance * alpha;
+        let (f1, f2) = Self::formants_from_resonance(self.resonance_position);
+        self.formant_f1 = f1;
+        self.formant_f2 = f2;
         self.last_update_t_us = now_us;
     }
 
