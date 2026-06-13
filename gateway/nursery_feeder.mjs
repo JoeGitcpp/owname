@@ -60,7 +60,13 @@ function arg(name, def = null) {
   return i !== -1 && i + 1 < args.length ? args[i + 1] : def
 }
 const BODY_BIN     = arg('body', '../bionic_v0/target/release/body')
-const SANDBOX_BIN  = arg('sandbox', '../sandbox_runner')
+// Resolve sandbox_runner NEXT TO the body binary, not relative to the feeder's
+// cwd. The old '../sandbox_runner' default resolved (from /home/joe/aborn) to
+// /home/joe/sandbox_runner — ENOENT — so the mainline's bytecode VM never ran
+// and action_consequence.n_windows was pinned at 0 (the live_io capability gate
+// could never pass). dirname(BODY_BIN)/sandbox_runner is correct for both the
+// production absolute --body path and the dev target/release default.
+const SANDBOX_BIN  = arg('sandbox', join(dirname(BODY_BIN), 'sandbox_runner'))
 const RUNTIME_DIR  = arg('runtime', '/tmp/aborn-nursery')
 const MASTER_BIAS  = arg('master', null)         // copy learned_bias here periodically
 const SEED_DIR     = arg('seed', null)           // dir with learned_bias/vital_core to seed from
