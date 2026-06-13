@@ -54,7 +54,9 @@ fn merge_recall(master_dir: &Path, pool_dir: &Path) -> usize {
         let _ = fs::remove_file(&f);
     }
     if n > 0 {
-        let _ = fs::write(&master_path, master.serialize());
+        if let Err(e) = bionic_v0::atomic_write(&master_path, &master.serialize()) {
+            eprintln!("merge_artifacts: write {master_path:?} failed: {e}");
+        }
     }
     n
 }
@@ -74,7 +76,9 @@ fn merge_vocal_memory(master_dir: &Path, pool_dir: &Path) -> usize {
         let _ = fs::remove_file(&f);
     }
     if n > 0 {
-        let _ = fs::write(&master_path, master.serialize());
+        if let Err(e) = bionic_v0::atomic_write(&master_path, &master.serialize()) {
+            eprintln!("merge_artifacts: write {master_path:?} failed: {e}");
+        }
     }
     n
 }
@@ -94,7 +98,9 @@ fn merge_phoneme(master_dir: &Path, pool_dir: &Path) -> usize {
         let _ = fs::remove_file(&f);
     }
     if n > 0 {
-        let _ = fs::write(&master_path, master.serialize());
+        if let Err(e) = bionic_v0::atomic_write(&master_path, &master.serialize()) {
+            eprintln!("merge_artifacts: write {master_path:?} failed: {e}");
+        }
     }
     n
 }

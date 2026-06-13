@@ -864,7 +864,10 @@ wss.on('connection', (ws, req) => {
           for (const f of PERSONAL_FILES) {
             const src = join(runtimeDir, f)
             if (existsSync(src)) {
-              try { copyFileSync(src, join(userDir, f)) } catch { }
+              // Atomic save-back: .tmp + rename so a crash mid-copy never leaves
+              // the user's persistent memory file truncated (audit theme 5).
+              const dst = join(userDir, f)
+              try { copyFileSync(src, dst + '.tmp'); renameSync(dst + '.tmp', dst) } catch { }
             }
           }
         }

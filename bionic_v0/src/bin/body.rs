@@ -610,7 +610,7 @@ fn main() {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .serialize();
-            let _ = std::fs::write(&phoneme_cp, &pm_bytes);
+            if let Err(e) = bionic_v0::atomic_write(&phoneme_cp, &pm_bytes) { eprintln!("[checkpoint] phoneme_memory write failed: {e}"); }
             // Persist motor prototypes so imitation learning accumulates across
             // nursery restarts (without this mn resets to 0 every restart).
             let vm_bytes = vp_checkpoint
@@ -618,13 +618,13 @@ fn main() {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .serialize();
-            let _ = std::fs::write(&vocal_mem_cp, &vm_bytes);
+            if let Err(e) = bionic_v0::atomic_write(&vocal_mem_cp, &vm_bytes) { eprintln!("[checkpoint] vocal_memory write failed: {e}"); }
             let vr_bytes = vp_checkpoint
                 .vocal_target_recall
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .serialize();
-            let _ = std::fs::write(&vocal_recall_cp, &vr_bytes);
+            if let Err(e) = bionic_v0::atomic_write(&vocal_recall_cp, &vr_bytes) { eprintln!("[checkpoint] vocal_target_recall write failed: {e}"); }
         })
     };
 
@@ -732,19 +732,19 @@ fn main() {
     // L1-4: persist phoneme proto pool (vocal repertoire survives restart).
     {
         let pm_bytes = vp.phoneme_memory.read().unwrap().serialize();
-        let _ = std::fs::write(&phoneme_memory_path, &pm_bytes);
+        if let Err(e) = bionic_v0::atomic_write(&phoneme_memory_path, &pm_bytes) { eprintln!("[shutdown] phoneme_memory write failed: {e}"); }
     }
     // Motor prototypes: persist at shutdown so accumulated imitation learning
     // is not lost when the nursery restarts (cumulative across sessions).
     {
         let vm_bytes = vp.vocal_memory.read().unwrap().serialize();
-        let _ = std::fs::write(&vocal_memory_path, &vm_bytes);
+        if let Err(e) = bionic_v0::atomic_write(&vocal_memory_path, &vm_bytes) { eprintln!("[shutdown] vocal_memory write failed: {e}"); }
     }
     // Target→correction recall: persist at shutdown so learned vowel corrections
     // accumulate across sessions (Phase 2).
     {
         let vr_bytes = vp.vocal_target_recall.read().unwrap().serialize();
-        let _ = std::fs::write(&vocal_recall_path, &vr_bytes);
+        if let Err(e) = bionic_v0::atomic_write(&vocal_recall_path, &vr_bytes) { eprintln!("[shutdown] vocal_target_recall write failed: {e}"); }
     }
 
     std::process::exit(0);

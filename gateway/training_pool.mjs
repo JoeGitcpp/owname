@@ -19,7 +19,7 @@
  * merged (noise-gate per axis).
  */
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 
 // ── Evaluation thresholds ─────────────────────────────────────────────────────
@@ -165,8 +165,11 @@ export function collect_to_pool(runtimeDir, poolDir, sessionId) {
   const src = join(runtimeDir, 'learned_bias.bin')
   if (!existsSync(src)) return false
   mkdirSync(poolDir, { recursive: true })
+  // Atomic: copy to .tmp then rename, so the periodic merge never reads a
+  // half-written pool file (audit theme 5).
   const dst = join(poolDir, `${Date.now()}_${sessionId}.bin`)
-  copyFileSync(src, dst)
+  copyFileSync(src, dst + '.tmp')
+  renameSync(dst + '.tmp', dst)
   return dst
 }
 

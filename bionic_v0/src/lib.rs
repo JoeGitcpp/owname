@@ -611,6 +611,18 @@ pub const VOCAL_SELF_PLAY_MIN_INTERVAL_US: u64 = 250_000;
 /// baseline — this is what lets the body leave the 1-D resonance line and reach
 /// 2-D vowel targets. ±0.45·600≈±270 Hz on F1, ±0.45·1300≈±585 Hz on F2:
 /// enough to cross vowel categories, bounded enough not to destabilise.
+/// Atomic file write: write `<path>.tmp` then rename onto `path`. A crash mid-
+/// write leaves the stale-but-valid old file, never a truncated one that
+/// silently deserializes to empty (audit theme 5: persistence non-atomic). One
+/// writer per path. Returns the rename error so callers can stop swallowing it.
+pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 pub const F1_SERVO_HZ: f64 = 600.0;
 pub const F2_SERVO_HZ: f64 = 1300.0;
 

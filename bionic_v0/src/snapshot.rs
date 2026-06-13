@@ -737,7 +737,21 @@ pub struct SnapshotAmbientSub {
     pub candidate_flag: bool,
 }
 
+/// Read a snapshot, converting a parse panic (truncated/corrupt file — the
+/// fixed-offset readers slice unchecked) into Err instead of crashing the body
+/// at boot (audit theme 5: read_snapshot panicked silently on truncation; the
+/// caller already does unwrap_or_default()).
 pub fn read_snapshot(path: &Path) -> std::io::Result<SnapshotData> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_snapshot_inner(path))) {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "snapshot truncated/corrupt (parse panicked)",
+        )),
+    }
+}
+
+fn read_snapshot_inner(path: &Path) -> std::io::Result<SnapshotData> {
     let bytes = std::fs::read(path)?;
     let mut cur = 0usize;
 
