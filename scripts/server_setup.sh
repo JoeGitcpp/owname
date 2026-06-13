@@ -23,6 +23,9 @@ cd "$DEPLOY/bionic_v0_src"
 source "$HOME/.cargo/env" 2>/dev/null || true
 # Install system deps for nokhwa (camera, only used in hardware mode) and cpal (audio)
 apt-get install -y libudev-dev libv4l-dev libclang-dev pkg-config libasound2-dev 2>/dev/null || true
+# bubblewrap: REQUIRED for the body sandbox. The gateway now fails CLOSED (refuses
+# to spawn bodies) if bwrap is missing, so a fresh server must have it.
+apt-get install -y bubblewrap 2>/dev/null || true
 cargo build --release --bin body
 cp target/release/body "$DEPLOY/body"
 chmod 755 "$DEPLOY/body"

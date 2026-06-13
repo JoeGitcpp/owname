@@ -39,7 +39,7 @@ import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath }    from 'node:url'
 import { createReadStream } from 'node:fs'
 import { extname }          from 'node:path'
-import { createHash }       from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { gzipSync }         from 'node:zlib'
 import { existsSync as fileExists } from 'node:fs'
 
@@ -116,7 +116,13 @@ const BODY_BIN         = process.env.ABORN_BODY_BIN  || resolve('../bionic_v0/ta
 const SANDBOX = (process.env.ABORN_SANDBOX ?? '1') !== '0'
 const BWRAP   = process.env.ABORN_BWRAP || '/usr/bin/bwrap'
 function wrapBodyCmd(runtimeDir, socketPath) {
-  if (!SANDBOX || !fileExists(BWRAP)) return [BODY_BIN, [runtimeDir, '--headless', socketPath]]
+  // Explicit opt-out only: run unconfined when ABORN_SANDBOX=0 is set.
+  if (!SANDBOX) return [BODY_BIN, [runtimeDir, '--headless', socketPath]]
+  // FAIL CLOSED (audit #4): sandbox is intended but bwrap is missing — REFUSE to
+  // spawn rather than silently running the body (which processes attacker-
+  // controlled visitor frames) unconfined next to SSH keys / tunnel creds.
+  // Returns null; the caller closes the session with a clear error.
+  if (!fileExists(BWRAP)) return null
   // Inside the sandbox the session dir is /session and the body binary is
   // /aborn/body. The unix socket lives inside the bound session dir, so the
   // gateway (outside) still reaches it at the real socketPath.
@@ -201,6 +207,18 @@ try {
 
 // ── Security instances ────────────────────────────────────────────────────────
 const rateLimiter = new RateLimiter({ maxPerMinute: RATE_PER_MIN, windowMs: 60_000 })
+// Per-IP limiter for sensitive HTTP routes (/auth/*, /admin/*). The WS-upgrade
+// limiter never covered them (audit), leaving OTP/SMS bombing + admin hammering
+// open. 12/min/IP is generous for a human flow, tight for abuse.
+const httpAuthLimiter = new RateLimiter({ maxPerMinute: 12, windowMs: 60_000 })
+
+// Constant-time string compare (admin secret etc.) — avoids the `!==` timing
+// leak the codebase already avoids for cookies.
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a ?? '')), bb = Buffer.from(String(b ?? ''))
+  if (ba.length !== bb.length) return false
+  try { return timingSafeEqual(ba, bb) } catch { return false }
+}
 const sessionGuard = new SessionGuard({ globalMax: GLOBAL_MAX, perIpMax: PER_IP_MAX })
 const idleTracker  = new IdleTracker({ idleMs: IDLE_MIN * 60_000 })
 
@@ -300,6 +318,14 @@ const activeSessions = new Map()
 // ── HTTP server ───────────────────────────────────────────────────────────────
 const http = createServer(async (req, res) => {
   const url = req.url.split('?')[0]
+
+  // Per-IP rate limit on sensitive routes (auth/admin) — blocks OTP/SMS bombing
+  // and admin-secret hammering.
+  if (url.startsWith('/auth/') || url.startsWith('/admin/')) {
+    if (!httpAuthLimiter.allow(clientIp(req))) {
+      return sendJson(res, 429, { error: 'rate_limited' })
+    }
+  }
 
   // ── Auth routes ─────────────────────────────────────────────────────────────
   if (url === '/auth/request' && req.method === 'POST') return handleAuthRequest(req, res)
@@ -415,7 +441,7 @@ const http = createServer(async (req, res) => {
   // Protected by ABORN_ADMIN_SECRET header.
   if (url === '/admin/instances/limit' && req.method === 'POST') {
     const secret = process.env.ABORN_ADMIN_SECRET
-    if (!secret || req.headers['x-admin-secret'] !== secret) {
+    if (!secret || !safeEqual(req.headers['x-admin-secret'], secret)) {
       return sendJson(res, 403, { error: 'forbidden' })
     }
     const body = await readBody(req)
@@ -612,7 +638,13 @@ wss.on('connection', (ws, req) => {
   // Spawn body in headless mode
   const modeLabel = identity ? `persistent:${identity.key}` : 'ephemeral'
   glog(`[body] spawn: session=${sessionId} mode=${modeLabel}`)
-  const [spawnBin, spawnArgs] = wrapBodyCmd(runtimeDir, socketPath)
+  const wrapped = wrapBodyCmd(runtimeDir, socketPath)
+  if (!wrapped) {
+    glog(`[body] REFUSED: sandbox required but bwrap missing at ${BWRAP} — set ABORN_SANDBOX=0 to allow unconfined (NOT recommended), or install bubblewrap`)
+    if (ws.readyState === 1) ws.close(1011, 'sandbox-unavailable')
+    return
+  }
+  const [spawnBin, spawnArgs] = wrapped
   const child = spawn(spawnBin, spawnArgs, {
     stdio: 'ignore',
     detached: false,
@@ -905,6 +937,7 @@ http.listen(PORT, '127.0.0.1', () => {
   glog(`[aborn-gateway] :${PORT} bound to 127.0.0.1 (tunnel only)`)
   glog(`[aborn-gateway] body=${BODY_BIN} sessions=${SESSIONS_DIR}`)
   glog(`[aborn-gateway] harvest: relaxed=${process.env.ABORN_HARVEST_RELAXED === '1'} merge_min=${MERGE_INTERVAL_MIN}`)
+  glog(`[aborn-gateway] sandbox=${SANDBOX ? (fileExists(BWRAP) ? `bwrap(${BWRAP})` : 'REQUIRED-BUT-MISSING — body spawns will be REFUSED') : 'OFF (ABORN_SANDBOX=0, unconfined)'}`)
 })
 
 // ── Continuous mainline life ────────────────────────────────────────────────

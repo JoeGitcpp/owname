@@ -92,7 +92,9 @@ setInterval(() => { pruneOtp(); pruneSessions() }, 5 * 60_000)
 
 // ── Session cookie helpers ────────────────────────────────────────────────────
 function signToken(token) {
-  return createHmac('sha256', SECRET).update(token).digest('hex')
+  // Bind the cookie type into the HMAC so an email-cookie payload can never be
+  // replayed as a phone cookie (and vice-versa), even though both share SECRET.
+  return createHmac('sha256', SECRET).update(COOKIE_NAME + '.' + token).digest('hex')
 }
 
 // Stateless signed cookie (see phone_auth for rationale): identity + expiry are

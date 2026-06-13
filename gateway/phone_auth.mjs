@@ -68,7 +68,9 @@ const otpStore = new OtpStore({
 const sessions = new Map()  // token → { phone, createdAt }
 
 function signToken(token) {
-  return createHmac('sha256', SECRET).update(token).digest('hex')
+  // Bind cookie type into the HMAC (see auth.mjs) — a phone payload can't be
+  // replayed as an email cookie even though both share SECRET.
+  return createHmac('sha256', SECRET).update(COOKIE_NAME + '.' + token).digest('hex')
 }
 
 // Stateless signed cookie: the identity + expiry live INSIDE the signed payload,

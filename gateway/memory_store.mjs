@@ -1,8 +1,13 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 
+// Hash the identity key into the on-disk namespace so raw email/phone never
+// lands in a directory name (audit: the binary-checkpoint dir already does this;
+// the KV store didn't). Matches server.mjs's userKey derivation pattern.
 function nsDir(base, identityKey) {
-  return join(base, encodeURIComponent(identityKey))
+  const h = createHash('sha256').update(String(identityKey)).digest('hex').slice(0, 32)
+  return join(base, h)
 }
 
 function keyFile(dir, key) {
