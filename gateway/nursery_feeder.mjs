@@ -30,7 +30,7 @@
 import { spawn }            from 'node:child_process'
 import { createConnection } from 'node:net'
 import {
-  existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, rmSync,
+  existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, rmSync, renameSync,
 }                           from 'node:fs'
 import { dirname, join }    from 'node:path'
 import { deserializeCorpus } from './audio_to_bands.mjs'
@@ -66,7 +66,12 @@ const MASTER_BIAS  = arg('master', null)         // copy learned_bias here perio
 const SEED_DIR     = arg('seed', null)           // dir with learned_bias/vital_core to seed from
 const DURATION_S   = parseInt(arg('duration', '0'), 10)  // 0 = forever
 const FOREVER      = args.includes('--forever') || DURATION_S === 0
-const HARVEST_S    = parseInt(arg('harvest', '120'), 10) // copy→master every N sec
+const HARVEST_S    = parseInt(arg('harvest', '120'), 10) // harvest every N sec
+// Pool dir the gateway's merge_artifacts ingests from (defaults next to master,
+// = the gateway's POOL_DIR). The mainline harvests its PROTOTYPE skills here as
+// branch-like contributions so merge_artifacts (the SOLE writer of the master
+// prototype files) merges them WITHOUT clobbering visitor contributions.
+const POOL_DIR     = arg('pool', (MASTER_BIAS ? join(dirname(MASTER_BIAS), 'training_pool') : null))
 const CORPUS_PATH  = arg('corpus', null)         // human-speech corpus_frames.bin → real-audio curriculum
 let CORPUS = null                                // loaded utterances [{label, ticks}], or null
 
@@ -406,12 +411,52 @@ const MASTER_ARTIFACTS = [
   ['snapshot.bin',        MASTER_DIR ? join(MASTER_DIR, 'master_snapshot.bin') : null],
 ]
 
+// Prototype skills go through the POOL so merge_artifacts (the single writer of
+// master_*prototype.bin) MERGES the mainline's + visitors' contributions instead
+// of the mainline clobbering them every harvest (the audit's #1: the old
+// copyFileSync made the whole branch→pool→mainline pipeline a steady-state no-op).
+const POOL_PROTOTYPES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin']
+// These the mainline writes directly to master (not merged by anyone else → no
+// clobber). learned_bias is special-cased below to ZERO maturity.
+const DIRECT_TO_MASTER = MASTER_ARTIFACTS.filter(([n]) => !POOL_PROTOTYPES.includes(n) && n !== 'learned_bias.bin')
+
+function atomicWrite(dest, buf) {
+  const tmp = dest + '.tmp'
+  writeFileSync(tmp, buf)
+  renameSync(tmp, dest)
+}
+
 function harvestMasterArtifacts(runtimeDir) {
-  for (const [name, dest] of MASTER_ARTIFACTS) {
+  // 1) Prototype skills → pool as a mainline contribution (merge_artifacts merges).
+  if (POOL_DIR) {
+    try { mkdirSync(POOL_DIR, { recursive: true }) } catch {}
+    const stamp = `${Date.now()}_mainline`
+    for (const name of POOL_PROTOTYPES) {
+      const src = join(runtimeDir, name)
+      if (!existsSync(src)) continue
+      try { atomicWrite(join(POOL_DIR, `${stamp}__${name}`), readFileSync(src)) } catch {}
+    }
+  }
+  // 2) learned_bias → master, but ZERO the trailing maturity f64. Maturity is a
+  //    per-life developmental clock, not a shared skill; transporting the
+  //    mainline's saturated 1.0 made every visitor seed "fake-mature" (low
+  //    plasticity + the mat≈0.9999 illusion). Visitors now start their own clock.
+  if (MASTER_BIAS) {
+    const src = join(runtimeDir, 'learned_bias.bin')
+    if (existsSync(src)) {
+      try {
+        const buf = Buffer.from(readFileSync(src))
+        if (buf.length >= 8) buf.writeDoubleLE(0, buf.length - 8)  // maturity := 0
+        atomicWrite(MASTER_BIAS, buf)
+      } catch {}
+    }
+  }
+  // 3) Relationship / physiological / cross-layer state → direct (no merge conflict).
+  for (const [name, dest] of DIRECT_TO_MASTER) {
     if (!dest) continue
     const src = join(runtimeDir, name)
     if (!existsSync(src)) continue
-    try { copyFileSync(src, dest) } catch {}
+    try { atomicWrite(dest, readFileSync(src)) } catch {}
   }
 }
 

@@ -179,7 +179,10 @@ export function merge_pool(poolDir, masterPath, { maxPoolAgeDays = 7 } = {}) {
   if (!existsSync(poolDir)) return { merged: 0, skipped: 0 }
 
   const poolFiles = readdirSync(poolDir)
-    .filter(f => f.endsWith('.bin'))
+    // learned_bias pool files only ({ts}_{sid}.bin). Exclude the prototype
+    // artifacts ({ts}_..__<name>.bin) — those are merged by merge_artifacts, not
+    // EMA'd as learned_bias (a length guard already skipped them, but be explicit).
+    .filter(f => f.endsWith('.bin') && !f.includes('__'))
     .map(f => join(poolDir, f))
 
   if (poolFiles.length === 0) return { merged: 0, skipped: 0 }
@@ -204,7 +207,12 @@ export function merge_pool(poolDir, masterPath, { maxPoolAgeDays = 7 } = {}) {
       const poolDV   = new DataView(poolBuf.buffer, poolBuf.byteOffset, poolBuf.byteLength)
       let changed = false
 
-      for (let off = 28; off + 8 <= master.length; off += 8) {
+      // NOTE: stop 8 bytes before EOF — the trailing f64 is developmental_maturity,
+      // a monotonic per-life CLOCK, not a skill axis. EMA-merging it (audit #3) let
+      // a high-maturity branch ratchet master maturity regardless of competence
+      // (the "maturity 1.0 / efficacy 0.24" decoupling). Maturity must be derived,
+      // not transported; leave master's maturity untouched here.
+      for (let off = 28; off + 8 <= master.length - 8; off += 8) {
         const mv = masterDV.getFloat64(off, true)
         const pv = poolDV.getFloat64(off, true)
         if (!isFinite(mv) || !isFinite(pv)) continue
