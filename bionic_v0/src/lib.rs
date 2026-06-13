@@ -623,6 +623,18 @@ pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     std::fs::rename(&tmp, path)
 }
 
+/// `atomic_write` that REPORTS a failure to stderr instead of returning it — for
+/// the body's checkpoint/shutdown persistence path, which must not fail silently
+/// (audit theme 5) yet must keep human-text narration OUT of body.rs itself: the
+/// active-surface purity guard forbids `eprintln!`/`println!` on the body runtime
+/// path (pure numeric emergence). Centralising the one log line here satisfies
+/// both — body.rs calls this, the message lives in the (unguarded) library.
+pub fn atomic_write_or_warn(what: &str, path: &std::path::Path, bytes: &[u8]) {
+    if let Err(e) = atomic_write(path, bytes) {
+        eprintln!("[persist] {what} {} write failed: {e}", path.display());
+    }
+}
+
 pub const F1_SERVO_HZ: f64 = 600.0;
 pub const F2_SERVO_HZ: f64 = 1300.0;
 

@@ -36,6 +36,20 @@ pub const RECALL_MATCH_DIST: f64 = 0.04;
 /// (see `store`) and only skip obvious pre-voicing garbage below this floor.
 pub const RECALL_STORE_MIN_FIT: f64 = 0.30;
 
+/// Re-anchor thresholds. Recall originally warm-started the servo ONLY when the
+/// presented target CHANGED (idx != last). But the formant servo hill-climbs a
+/// NOISY mel64 objective and random-walks: left free on a single held target it
+/// drifts off a correction it had already found, and was never pulled back —
+/// so recall's whole point (don't re-solve from zero) was defeated by drift.
+/// When a high-confidence correction is held (`fit >= MIN_FIT`) and the servo's
+/// committed offset has wandered more than `DRIFT` (L1, in offset units) from
+/// it, re-anchor. This bounds the servo to a ball around the best-known offset
+/// while still allowing local probing inside DRIFT. The stored entry is the
+/// best-ever-fit correction (updated by `store`), so re-anchoring can only pull
+/// the servo TOWARD its own best result, never toward a worse one.
+pub const RECALL_REANCHOR_MIN_FIT: f64 = 0.90;
+pub const RECALL_REANCHOR_DRIFT: f64 = 0.10;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecallEntry {
     pub target_mel64: [f64; BANDS],

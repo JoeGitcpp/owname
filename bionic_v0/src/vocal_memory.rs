@@ -30,11 +30,16 @@ impl VocalMemoryState {
             self.prototypes[idx].reuse_success += 1;
             self.prototypes[idx].last_update_t_us = now_us;
         } else {
+            // Birth above the cull floor (0.05) with headroom: at the 10 s
+            // half-life, 0.2 survives ~20 s of true silence (two half-lives)
+            // before crossing 0.05, and a reinforcement (+0.1) buys more.
+            // Born at 0.1 a prototype sat exactly one half-life from the floor
+            // and was culled after a single quiet gap — see tick_decay.
             self.prototypes.push(VocalPrototype {
                 breath_drive: breath,
                 pitch_tension: pitch,
                 resonance_position: resonance,
-                stability: 0.1,
+                stability: 0.2,
                 reuse_success: 1,
                 last_update_t_us: now_us,
             });
@@ -87,6 +92,12 @@ impl VocalMemoryState {
             p.stability *= decay_factor;
         }
         self.prototypes.retain(|p| p.stability > 0.05);
+        // Advance the decay clock so the next tick decays only the NEW elapsed
+        // span. Without this the state clock stayed pinned at the last
+        // record_success, so every quiet tick re-applied an ever-growing gap as
+        // a multiplicative decay — annihilating fresh prototypes within a
+        // fraction of a second instead of over the real 10 s half-life.
+        self.last_update_t_us = now_us;
     }
 
     // ── Persistence ──────────────────────────────────────────────────────────

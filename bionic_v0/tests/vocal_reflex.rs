@@ -1,5 +1,7 @@
 use bionic_v0::action_output::ActionOutputPhase;
-use bionic_v0::learned_bias::{LearnedBiasState, EFFICACY_HALF_LIFE_US, SUPPRESSION_HALF_LIFE_US};
+use bionic_v0::learned_bias::{
+    LearnedBiasState, EFFICACY_HALF_LIFE_US, FAMILIARITY_HALF_LIFE_US, SUPPRESSION_HALF_LIFE_US,
+};
 use bionic_v0::prediction_pressure_field::{PredictionWaveInput, PREDICTION_WAVE_EVENT};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::suppression_damp_floor;
@@ -258,22 +260,51 @@ fn efficacy_half_life_is_longer_than_suppression() {
 }
 
 #[test]
-fn restart_first_decay_relaxes_stale_suppression() {
-    // last_suppression_decay_us is deliberately NOT persisted: after a restart
-    // it is 0, so the first decay sees a huge elapsed and relaxes any stale
-    // accumulated suppression — cross-restart accumulation is structurally
-    // impossible.
+fn restart_first_decay_resumes_without_spurious_wipe() {
+    // Defect #2 fix: last_*_decay_us is NOT persisted, so after a restart it is
+    // 0. now_us is epoch µs (≈1.75e15), so the OLD code computed elapsed =
+    // now_us - 0 = millions of half-lives and multiplied suppression/efficacy/
+    // familiarity by ~0 on the very first post-boot tick — instantly wiping the
+    // substrate's accumulated competence while developmental_maturity (which IS
+    // persisted+restored) keeps ratcheting up. That is the dishonest "maturity
+    // climbs, ability zeroed from nothing" state. The fix treats last==0 as
+    // "not yet stamped": the first tick stamps now_us and does NOT decay.
+    // Forgetting still happens, but only over REAL elapsed time on later ticks.
+    let boot_us = SUPPRESSION_HALF_LIFE_US as u64 * 30; // any realistic epoch µs
     let mut bias = LearnedBiasState {
         action_suppression: 0.155,
+        vocal_efficacy: 0.42,
+        prediction_familiarity: 0.6,
         ..LearnedBiasState::default()
     };
-    // Any realistic boot timestamp (1s of runtime, let alone epoch µs) is many
-    // half-lives.
-    bias.decay_vocal_suppression(SUPPRESSION_HALF_LIFE_US as u64 * 30);
+
+    // First post-restart tick: resume, no spurious decay (values held intact).
+    bias.decay_vocal_suppression(boot_us);
+    bias.decay_vocal_efficacy(boot_us);
+    bias.decay_prediction_familiarity(boot_us);
+    assert_eq!(bias.action_suppression, 0.155, "suppression must resume, not wipe");
+    assert_eq!(bias.vocal_efficacy, 0.42, "efficacy must resume, not wipe");
+    assert_eq!(bias.prediction_familiarity, 0.6, "familiarity must resume, not wipe");
+
+    // The clock is now stamped to boot_us — steady-state decay is unchanged:
+    // one real half-life later each value halves exactly as before.
+    bias.decay_vocal_suppression(boot_us + SUPPRESSION_HALF_LIFE_US as u64);
+    bias.decay_vocal_efficacy(boot_us + EFFICACY_HALF_LIFE_US as u64);
+    bias.decay_prediction_familiarity(boot_us + FAMILIARITY_HALF_LIFE_US as u64);
     assert!(
-        bias.action_suppression < 1e-9,
-        "stale suppression should relax on first post-restart decay: {}",
+        (bias.action_suppression - 0.0775).abs() < 1e-9,
+        "one real half-life after resume should halve suppression: {}",
         bias.action_suppression
+    );
+    assert!(
+        (bias.vocal_efficacy - 0.21).abs() < 1e-9,
+        "one real half-life after resume should halve efficacy: {}",
+        bias.vocal_efficacy
+    );
+    assert!(
+        (bias.prediction_familiarity - 0.3).abs() < 1e-9,
+        "one real half-life after resume should halve familiarity: {}",
+        bias.prediction_familiarity
     );
 }
 

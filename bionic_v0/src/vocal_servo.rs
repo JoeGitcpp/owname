@@ -24,6 +24,16 @@ pub const SERVO_INTERVAL_US: u64 = 90_000; // ~90 ms per period (organ smoothing
 const DIRS: [(f64, f64); 4] = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)];
 const IMPROVE_EPS: f64 = 1e-4;
 
+/// Recall-store warm-up: number of shape observations after a (re)start before
+/// shape_ema is trusted enough to MEMORISE. shape_ema starts at 1.0 and folds in
+/// at α=0.15, so for ~20 ticks it is dominated by the init transient (and the
+/// post-begin_voicing settling spike) — a lucky low-bounce in that window at a
+/// still-suboptimal offset could otherwise be locked in by `store`'s best-ever
+/// fit and then pinned by recall re-anchoring. Gating storage on warm-up also
+/// keeps recall from warm-starting a target within its own first presentation,
+/// so the cold hill-climb is genuinely cold. Reset on warm_start/reset.
+pub const SERVO_RECALL_WARMUP_TICKS: u32 = 24;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Baseline,
@@ -43,6 +53,9 @@ pub struct VocalServoState {
     /// Smoothing the objective every tick gives a stable surface to descend.
     pub shape_ema: f64,
     pub last_update_t_us: u64,
+    /// Shape observations since the last warm_start/reset. shape_ema is only
+    /// trusted for memorisation once this passes SERVO_RECALL_WARMUP_TICKS.
+    obs_count: u32,
 }
 
 impl Default for VocalServoState {
@@ -55,6 +68,7 @@ impl Default for VocalServoState {
             baseline_shape: 1.0,
             shape_ema: 1.0,
             last_update_t_us: 0,
+            obs_count: 0,
         }
     }
 }
@@ -63,6 +77,13 @@ impl VocalServoState {
     /// Per-tick: fold the latest heard formant error into the smoothed objective.
     pub fn observe_shape(&mut self, shape_dist: f64) {
         self.shape_ema = self.shape_ema * 0.85 + shape_dist * 0.15;
+        self.obs_count = self.obs_count.saturating_add(1);
+    }
+
+    /// Has shape_ema settled past the init/settling transient enough to trust for
+    /// memorisation? (See SERVO_RECALL_WARMUP_TICKS.)
+    pub fn is_recall_warm(&self) -> bool {
+        self.obs_count >= SERVO_RECALL_WARMUP_TICKS
     }
 }
 
@@ -81,6 +102,9 @@ impl VocalServoState {
         self.resonance_offset = clamp_off(off_b);
         self.phase = Phase::Baseline;
         self.baseline_shape = 1.0;
+        // Re-warm the ema before this offset is trusted for memorisation again —
+        // the freshly-jumped offset has not yet been sustained-and-heard.
+        self.obs_count = 0;
     }
 
     /// Phase 2: clean cold start (novel target with no recall) — drop any
@@ -91,6 +115,7 @@ impl VocalServoState {
         self.dir_idx = 0;
         self.phase = Phase::Baseline;
         self.baseline_shape = 1.0;
+        self.obs_count = 0;
     }
 
     /// The correction to ADD to the feedforward (pitch_hint, resonance_hint) this

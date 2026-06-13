@@ -97,17 +97,18 @@ pub struct LearnedBiasState {
     pub developmental_maturity: f64,
     /// B2 机制A: 上次 suppression 半衰的时刻（µs）。
     /// 刻意**不持久化**（不入 learned_bias.bin、不动 LEARNED_BIAS_VERSION）：
-    /// 重启后该字段为 0，首次 decay 看到的 elapsed 巨大 → suppression
-    /// 大幅松弛——把"久未刷新"的陈旧抑制当作已遗忘，结构上根除
-    /// 跨重启累积的锁死。工程时戳，非语义状态。
+    /// 重启后该字段为 0，被 decay 当作"尚未起表"——首拍用 now_us 起表、不衰减
+    /// （重启即续航，不伪造遗忘）。遗忘只按真实流逝时间发生：长期无闭环刺激时
+    /// suppression 仍按 τ 松弛，结构上消除单调累积锁死（0×x=0）。工程时戳。
     pub last_suppression_decay_us: u64,
     /// vocal_efficacy 时间遗忘的上次半衰时刻（µs）。与 last_suppression_decay_us
     /// 同款：刻意**不持久化**（不入 learned_bias.bin、不动 LEARNED_BIAS_VERSION）。
-    /// 重启后该字段为 0 → 首次 decay 的 elapsed 巨大 → efficacy 大幅松弛，把
-    /// 跨重启累积的"曾经叫过"幻觉在结构上根除。工程时戳，非语义状态。
+    /// 重启后为 0 → 被 decay 当作"尚未起表"，首拍用 now_us 起表、不衰减（续航）。
+    /// efficacy 仍只由真实声学闭环沉积、按真实流逝时间松弛。工程时戳。
     pub last_efficacy_decay_us: u64,
-    /// prediction_familiarity 的纯时间松弛时刻（µs）。不持久化：重启后 = 0
-    /// → 首次 decay elapsed 巨大 → 陈旧 familiarity 立刻松弛。工程时戳。
+    /// prediction_familiarity 的纯时间松弛时刻（µs）。不持久化：重启后为 0 →
+    /// 被 decay 当作"尚未起表"，首拍用 now_us 起表、不衰减（续航）。按真实流逝
+    /// 时间松弛。工程时戳。
     pub last_familiarity_decay_us: u64,
     /// 上次 familiarity 积累 tick 的时刻（µs）。配合 FAMILIARITY_ADVANCE_MIN_INTERVAL_US
     /// 限速：nursery 密集闭环下至多 1 tick/秒，防止几十秒内钉死 1.0。不持久化。
@@ -267,9 +268,19 @@ impl LearnedBiasState {
     /// 沉积，这里只补一条遗忘律，使它成为"近期未发声闭环的滑动沉积"
     /// 而非永久单调累积。τ 远大于单次闭环间隔（在场安静仍稳定沉积），
     /// 但有限（长期无闭环时松弛），消除自举死锁的退化不动点。
-    /// 重启后 last_suppression_decay_us=0（不持久化）→ 首次调用
-    /// elapsed 巨大 → 陈旧 suppression 直接松弛到 ≈0。
+    /// 重启后 last_suppression_decay_us=0（不持久化）被当作"尚未起表"：首拍用
+    /// now_us 起表、不衰减（续航，不把 epoch µs 当 elapsed 伪造一次归零）。
     pub fn decay_vocal_suppression(&mut self, now_us: u64) {
+        // 重启即续航：last_suppression_decay_us 不持久化 → 重启后为 0。
+        // now_us 是 epoch µs（≈1.75e15），若与 0 求差会得到数百万个半衰期、
+        // 把 suppression 一拍归零——而 developmental_maturity 已被回填并继续
+        // 棘轮上升，造成"成熟度爬升、底层能力被凭空清零"的不诚实状态。
+        // 把 0 视作"尚未起表"：用 now_us 起表、本拍不衰减（无 elapsed 可言）。
+        // 稳态衰减完全不变：起表后每拍 elapsed 仍是真实 tick 间隔。
+        if self.last_suppression_decay_us == 0 {
+            self.last_suppression_decay_us = now_us;
+            return;
+        }
         let elapsed = now_us.saturating_sub(self.last_suppression_decay_us);
         if elapsed == 0 {
             return;
@@ -284,9 +295,17 @@ impl LearnedBiasState {
     /// delta_eff），这里只补一条遗忘律，使它成为"近期真实发声能力的滑动
     /// 沉积"而非永久单调棘轮（打破钉死 1.0 的幻觉收敛）。τ 远大于单次闭环
     /// 间隔（持续真实拟合仍稳定爬升），但有限（长期无真实拟合时松弛）。
-    /// 重启后 last_efficacy_decay_us=0（不持久化）→ 首次调用 elapsed 巨大
-    /// → 陈旧 efficacy 直接松弛。逐行仿 decay_vocal_suppression。
+    /// 重启后 last_efficacy_decay_us=0（不持久化）被当作"尚未起表"：首拍用 now_us
+    /// 起表、不衰减（续航）。逐行仿 decay_vocal_suppression。
     pub fn decay_vocal_efficacy(&mut self, now_us: u64) {
+        // 重启即续航（同 decay_vocal_suppression）：last_efficacy_decay_us=0 表示
+        // 重启后尚未起表，用 now_us 起表、本拍不衰减，避免 epoch µs 与 0 求差把
+        // efficacy 一拍归零。诚实门不受影响：efficacy 仍只由真实声学闭环沉积，
+        // 这里只是不再用"自纪元以来的墙钟"伪造一次巨额遗忘。稳态衰减不变。
+        if self.last_efficacy_decay_us == 0 {
+            self.last_efficacy_decay_us = now_us;
+            return;
+        }
         let elapsed = now_us.saturating_sub(self.last_efficacy_decay_us);
         if elapsed == 0 {
             return;
@@ -301,6 +320,14 @@ impl LearnedBiasState {
     /// 密集 nursery 下落在 ~0.5–0.7，让 exploration_drive 维持非零 babble 基线。
     /// 逐行仿 decay_vocal_suppression；不持久化时戳设计同款。
     pub fn decay_prediction_familiarity(&mut self, now_us: u64) {
+        // 重启即续航（同 decay_vocal_suppression）：last_familiarity_decay_us=0 表示
+        // 重启后尚未起表，用 now_us 起表、本拍不衰减，避免 epoch µs 与 0 求差把
+        // familiarity 一拍归零。稳态衰减不变；与限速积累配合的平衡点（~0.5–0.7）
+        // 在续航后维持，不再因重启被错误重置到 0。
+        if self.last_familiarity_decay_us == 0 {
+            self.last_familiarity_decay_us = now_us;
+            return;
+        }
         let elapsed = now_us.saturating_sub(self.last_familiarity_decay_us);
         if elapsed == 0 {
             return;
@@ -411,14 +438,15 @@ pub fn read_learned_bias_checkpoint(path: &Path) -> std::io::Result<LearnedBiasS
         action_suppression,
         vocal_efficacy,
         developmental_maturity,
-        // B2: 刻意不持久化。重启后从 0 起 → 首次 decay 的 elapsed 巨大
-        // → 陈旧 suppression 大幅松弛，跨重启累积在结构上被根除。
+        // B2: 刻意不持久化。重启后从 0 起 → 被首拍 decay 当作"尚未起表"：用
+        // now_us 起表、不衰减（续航）。此后只按真实流逝时间松弛，不再用 epoch µs
+        // 与 0 求差伪造一次归零（否则 maturity 续航而底层能力被凭空清零）。
         last_suppression_decay_us: 0,
-        // 同款不持久化：重启后从 0 起 → efficacy 首次大幅松弛，跨重启的
-        // "曾经叫过"幻觉累积在结构上被根除。
+        // 同款不持久化：重启后从 0 起 → 首拍起表、不衰减（续航），此后按真实
+        // 流逝时间松弛。
         last_efficacy_decay_us: 0,
-        // 同款不持久化：重启后从 0 → familiarity 首次大幅松弛 + 积累限速
-        // 重置，跨重启的钉死 1.0 在结构上被根除。
+        // 同款不持久化：重启后从 0 → 首拍起表、不衰减（续航）+ 积累限速重置，
+        // 此后按真实流逝时间松弛。
         last_familiarity_decay_us: 0,
         last_familiarity_advance_us: 0,
     })

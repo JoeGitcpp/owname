@@ -1427,6 +1427,16 @@ pub struct Viewport {
     /// Also shared with the familiarity throttle in observe_vocal_reflex_closure
     /// so both tick at the same developmental pace.
     pub last_maturity_advance_us: AtomicU64,
+    /// Dedupe cursor for the vocal_efficacy EMA step (last now_us it stepped on).
+    /// The dense action-consequence pair path calls observe_vocal_reflex_closure K
+    /// times per tick with the SAME now_us; an ungated EMA stepped K times while
+    /// decay sees elapsed=0 — inflating the effective alpha ~K× and collapsing
+    /// VOCAL_EFFICACY_EMA_ALPHA's ~10s window into one tick. Stepping at most once
+    /// per DISTINCT tick (now_us > this) drops the same-tick duplicates while
+    /// keeping the per-tick cadence the alpha was tuned for (unlike the slow 1/s
+    /// maturity clock, efficacy must track at the tick rate). Runtime-only (not
+    /// persisted), like the maturity/self-play cursors.
+    pub last_efficacy_advance_us: AtomicU64,
     /// Rate-limit cursor for vocal self-play closures (see
     /// VOCAL_SELF_PLAY_MIN_INTERVAL_US).
     pub last_self_play_t_us: AtomicU64,
@@ -1553,6 +1563,7 @@ impl Viewport {
             gaussian_field: RwLock::new(crate::phot_gaussian::GaussianField::new()),
             developmental_maturity: RwLock::new(0.0),
             last_maturity_advance_us: AtomicU64::new(0),
+            last_efficacy_advance_us: AtomicU64::new(0),
             last_self_play_t_us: AtomicU64::new(0),
             last_imitation_closure_t_us: AtomicU64::new(0),
             phoneme_memory: RwLock::new(crate::phoneme_memory::PhonemeMemory::new()),
@@ -4404,14 +4415,31 @@ impl Viewport {
             // matching — reporting present ability, not "ever voiced". A ratchet
             // (even with slow decay) saturates under the high-rate pair path; an
             // evidence-gated EMA does not.
+            // Defect #3: step the efficacy EMA at most ONCE per distinct tick
+            // (now_us), not once per closure. The dense action-consequence pair path
+            // fires K closures within a SINGLE tick, all sharing the same now_us;
+            // stepping each compounds alpha*(c-efficacy) K times in zero elapsed time,
+            // inflating the effective alpha ~K× and collapsing VOCAL_EFFICACY_EMA_ALPHA's
+            // ~10s smoothing window into one tick. One step PER TICK is exactly what the
+            // alpha was tuned for (≈10s at the tick rate), so we dedupe by now_us rather
+            // than throttle to a wall-clock interval (efficacy must still track per-tick,
+            // unlike the slow 1/s maturity clock). Honesty gate UNTOUCHED: only
+            // evidence-carrying closures (Some(c), self_bands>1e-6 + fit-weighting) reach
+            // here; we drop same-tick duplicates, never the evidence test.
             if let Some(c) = acoustic_competence {
-                // A3-family anneal: newborns take coarse, fast EMA steps so the
-                // first genuine fits actually lower the reflex gate (bootstrap
-                // escape); the multiplier anneals to exactly 1.0 at m=1.
-                let alpha = crate::VOCAL_EFFICACY_EMA_ALPHA
-                    * crate::vocal_efficacy_alpha_scale(self.developmental_maturity());
-                bias.vocal_efficacy += alpha * (c - bias.vocal_efficacy);
-                bias.vocal_efficacy = bias.vocal_efficacy.clamp(0.0, 1.0);
+                let last_eff = self.last_efficacy_advance_us.load(Ordering::Relaxed);
+                // now_us advances each tick; same-tick (== last) duplicates are dropped.
+                // last==0 (never stepped) ⇒ now_us>0 fires the first step immediately.
+                if now_us > last_eff {
+                    self.last_efficacy_advance_us.store(now_us, Ordering::Relaxed);
+                    // A3-family anneal: newborns take coarse, fast EMA steps so the
+                    // first genuine fits actually lower the reflex gate (bootstrap
+                    // escape); the multiplier anneals to exactly 1.0 at m=1.
+                    let alpha = crate::VOCAL_EFFICACY_EMA_ALPHA
+                        * crate::vocal_efficacy_alpha_scale(self.developmental_maturity());
+                    bias.vocal_efficacy += alpha * (c - bias.vocal_efficacy);
+                    bias.vocal_efficacy = bias.vocal_efficacy.clamp(0.0, 1.0);
+                }
             }
         }
         // Developmental clock: advances on earned acoustic competence only, and
@@ -4653,7 +4681,16 @@ impl Viewport {
             // targets the single resonance scalar cannot. It steps on its own
             // ~90 ms cadence (organ smoothing must settle between probes); the aim
             // is read every tick so the held probe is applied continuously.
-            let (servo_p, servo_r) = {
+            // `recall_snapshot` is Some((committed_pitch, committed_res, shape_ema))
+            // on every voiced tick — the COMMITTED base (not the live probe-perturbed
+            // `aim()`) paired with the SMOOTHED objective (not a raw single-tick error).
+            // It is what gets memorised for content-addressed recall. Snapshotting
+            // every voiced tick (rather than only on a servo-commit) is deliberate:
+            // a converged servo by definition stops producing commits, so a
+            // commit-only snapshot memorises a mid-descent base and never the final
+            // deep one. `store` keeps best-ever (lowest-ema) fit, so the converged
+            // state wins precisely because it is sampled here every tick.
+            let (servo_p, servo_r, recall_snapshot) = {
                 let mut servo = self.vocal_servo.write().unwrap();
                 // Phase 2: content-addressed warm-start. On a target
                 // (re)presentation that matches a remembered correction, jump the
@@ -4670,6 +4707,23 @@ impl Viewport {
                         let e = self.vocal_target_recall.read().unwrap().entries[idx].clone();
                         servo.warm_start(e.f1_off, e.f2_off);
                         self.last_recall_idx.store(idx as i64, Ordering::Relaxed);
+                    }
+                    Some((idx, _)) => {
+                        // Same target still held: re-anchor if a high-confidence
+                        // correction exists and the noisy hill-climb has drifted far
+                        // from it (see RECALL_REANCHOR_*). Recall warm-started only on
+                        // target CHANGE, so a servo that random-walked off a learned
+                        // correction was never pulled back — defeating recall's
+                        // purpose. Bounded re-anchoring keeps it near its own best
+                        // result while still allowing local probing inside DRIFT.
+                        let e = self.vocal_target_recall.read().unwrap().entries[idx].clone();
+                        if e.fit >= crate::vocal_target_recall::RECALL_REANCHOR_MIN_FIT
+                            && (servo.pitch_offset - e.f1_off).abs()
+                                + (servo.resonance_offset - e.f2_off).abs()
+                                > crate::vocal_target_recall::RECALL_REANCHOR_DRIFT
+                        {
+                            servo.warm_start(e.f1_off, e.f2_off);
+                        }
                     }
                     None if last != -1 => {
                         servo.reset();
@@ -4690,20 +4744,40 @@ impl Viewport {
                     let smoothed = servo.shape_ema;
                     servo.step(now_us, smoothed);
                 }
-                servo.aim()
+                // Snapshot the COMMITTED base + smoothed objective for memorisation
+                // (defect #4): the committed offsets — never the probe-perturbed
+                // aim() — and shape_ema — never a raw single-tick error — so a
+                // lucky-noise sample can neither be the stored offset nor clear the
+                // fit gate. Captured every voiced tick (once warm) so the converged
+                // optimum is sampled, then best-ever-fit selection in `store` keeps
+                // it. The warm-up gate (is_recall_warm) refuses to memorise during
+                // the ema init/settling transient, where a lucky low bounce at a
+                // still-suboptimal offset would otherwise be locked in.
+                let snap = if self_voiced && servo.is_recall_warm() {
+                    Some((servo.pitch_offset, servo.resonance_offset, servo.shape_ema))
+                } else {
+                    None
+                };
+                let (ap, ar) = servo.aim();
+                (ap, ar, snap)
             };
             region_b_formant_offset = Some((servo_p, servo_r));
             // Phase 2: memorise a correction that actually worked, keyed by the
             // target fingerprint, so the next time this sound recurs the servo is
-            // warm-started above instead of re-solving from zero.
-            if self_voiced {
-                let fit = (1.0 - shape_dist).clamp(0.0, 1.0);
+            // warm-started above instead of re-solving from zero. Keyed to the
+            // COMMITTED offset + SMOOTHED fit (defect #4): the old code stored the
+            // probe-perturbed `aim()` with a raw per-tick `shape_dist`, so a lucky
+            // single tick could be memorised as "the correction that worked" and
+            // stick (store keeps best-ever fit). Honesty gate preserved: fit is
+            // still real self-heard shape error (shape_ema), only denoised.
+            if let Some((commit_p, commit_r, ema)) = recall_snapshot {
+                let fit = (1.0_f64 - ema).clamp(0.0, 1.0);
                 if fit >= crate::vocal_target_recall::RECALL_STORE_MIN_FIT {
                     self.vocal_target_recall.write().unwrap().store(
                         now_us,
                         &target.target_mel64,
-                        servo_p,
-                        servo_r,
+                        commit_p,
+                        commit_r,
                         fit,
                     );
                 }
