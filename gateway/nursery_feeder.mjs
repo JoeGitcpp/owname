@@ -72,7 +72,15 @@ const MASTER_BIAS  = arg('master', null)         // copy learned_bias here perio
 const SEED_DIR     = arg('seed', null)           // dir with learned_bias/vital_core to seed from
 const DURATION_S   = parseInt(arg('duration', '0'), 10)  // 0 = forever
 const FOREVER      = args.includes('--forever') || DURATION_S === 0
-const HARVEST_S    = parseInt(arg('harvest', '120'), 10) // harvest every N sec
+const HARVEST_S    = parseInt(arg('harvest', '120'), 10) // re-CHECK harvest every N sec
+// Convergence gating (audit: the feeder had zero stop/plateau detection — it
+// merged a saturated body into master every 120 s forever, burning compute and
+// re-merging redundant state). Harvest now fires only when the body actually
+// improved since the last merge, with a periodic forced harvest so non-efficacy
+// gains (new prototypes) and slow drift still propagate; a plateau is logged.
+const HARVEST_MIN_GAIN = parseFloat(arg('harvest-gain', '0.005')) // min Δefficacy to merge
+const HARVEST_MAX_S    = parseInt(arg('harvest-max', '600'), 10)  // force a merge at least this often
+const PLATEAU_S        = parseInt(arg('plateau', '1200'), 10)     // no Δefficacy this long ⇒ log plateau
 // Pool dir the gateway's merge_artifacts ingests from (defaults next to master,
 // = the gateway's POOL_DIR). The mainline harvests its PROTOTYPE skills here as
 // branch-like contributions so merge_artifacts (the SOLE writer of the master
@@ -584,27 +592,45 @@ function* fullPass(getReserve) {
 }
 
 async function feedLoop() {
-  let lastHarvest = Date.now()
-  let lastReport  = Date.now()
+  let lastHarvest    = Date.now()
+  let lastReport     = Date.now()
+  let lastHarvestEff = readVocalEfficacy(biasPath) ?? 0  // efficacy at last harvest
+  let bestEff        = lastHarvestEff                     // high-water mark
+  let curEff         = lastHarvestEff                     // refreshed each report tick
+  let lastImproveMs  = Date.now()                         // last time efficacy rose
+  let plateauLogged  = false
   while (!stopped) {
     for (const tick of fullPass(() => readReserve(RUNTIME_DIR))) {
       if (stopped || !sock || sock.destroyed) return
-      const frame = buildAcousticSyncFrame(tick)
-      sock.write(frame)
+      sock.write(buildAcousticSyncFrame(tick))
       await sleep(DT_MS)
-
       const now = Date.now()
+
       if (now - lastReport >= 30_000) {
         lastReport = now
-        log(`t=${Math.round((now - startMs) / 1000)}s vocal_efficacy=${fmt(readVocalEfficacy(biasPath))} maturity=${fmt(readMaturity(biasPath))} reserve=${fmt(readReserve(RUNTIME_DIR))}`)
+        curEff = readVocalEfficacy(biasPath) ?? 0   // refresh competence signal (avoid per-tick file I/O)
+        if (curEff > bestEff + 1e-4) {
+          bestEff = curEff; lastImproveMs = now; plateauLogged = false
+        } else if (!plateauLogged && now - lastImproveMs >= PLATEAU_S * 1000) {
+          plateauLogged = true
+          log(`[plateau] vocal_efficacy stuck at ${fmt(bestEff)} for ${Math.round((now - lastImproveMs) / 1000)}s — likely architectural ceiling; still living, harvest gated`)
+        }
+        log(`t=${Math.round((now - startMs) / 1000)}s vocal_efficacy=${fmt(curEff)} maturity=${fmt(readMaturity(biasPath))} reserve=${fmt(readReserve(RUNTIME_DIR))}`)
       }
-      if (MASTER_BIAS && now - lastHarvest >= HARVEST_S * 1000) {
+
+      if (MASTER_BIAS && existsSync(biasPath) && now - lastHarvest >= HARVEST_S * 1000) {
+        const improved = curEff >= lastHarvestEff + HARVEST_MIN_GAIN
+        const forced   = now - lastHarvest >= HARVEST_MAX_S * 1000
         lastHarvest = now
-        if (existsSync(biasPath)) {
+        if (improved || forced) {
+          const gain = curEff - lastHarvestEff
+          lastHarvestEff = curEff
           try {
             harvestMasterArtifacts(RUNTIME_DIR)
-            log('harvested runtime artifacts → master')
+            log(`harvested → master (eff=${fmt(curEff)} gain=${fmt(gain)}${(!improved && forced) ? ' forced' : ''})`)
           } catch {}
+        } else {
+          log(`harvest skipped — no efficacy gain since last merge (cur=${fmt(curEff)} last=${fmt(lastHarvestEff)})`)
         }
       }
       if (!FOREVER && now - startMs >= DURATION_S * 1000) { finish(); return }

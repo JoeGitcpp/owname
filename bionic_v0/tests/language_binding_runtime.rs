@@ -8,7 +8,7 @@ use bionic_v0::language_binding::{
 use bionic_v0::phot_camera::{SynthCamStep, SyntheticCameraFrameProvider};
 use bionic_v0::synthetic_vib::SyntheticVibSource;
 use bionic_v0::viewport::{EventEvidence, Viewport};
-use bionic_v0::MOD_VIB;
+use bionic_v0::{MOD_PHOT, MOD_VIB};
 
 #[test]
 fn viewport_adapter_binding_api_records_trace() {
@@ -282,4 +282,81 @@ fn low_pair_evidence_weakens_existing_binding_trace() {
     assert_eq!(after.n_bindings, 1);
     assert_eq!(after.traces[0].status, BindingStatus::Weakened);
     assert!(after.traces[0].strength.value < before);
+}
+
+// Make a VIB slot active AND carry real band evidence (the "heard sound").
+fn claim_and_voice_vib_slot(vp: &Arc<Viewport>, t: u64) -> usize {
+    let sid = claim_vib_slot(vp, t);
+    let observed = [0.5_f64; bionic_v0::VIB_BANDS];
+    let zeros = [0.0_f64; bionic_v0::VIB_BANDS];
+    vp.write_slot_vib(sid, t, &observed, &zeros, &zeros, &zeros);
+    sid
+}
+
+fn claim_phot_slot(vp: &Arc<Viewport>, t: u64) -> usize {
+    let ev = EventEvidence {
+        modality_bit: MOD_PHOT,
+        event_t_us: t,
+        event_energy: 0.6,
+        surprise: 0.2,
+        spatial: None,
+        nomination_seq_hint: 2,
+    };
+    vp.claim_slot_for_event(&ev).slot_id().expect("phot slot")
+}
+
+/// #11 live formation: the SAME call the body's 5 Hz binding ticker makes (NOT
+/// curriculum) must form a binding when a heard sound co-occurs with a seen
+/// object and a real earned pair exists — and must NOT inflate it on repeat.
+#[test]
+fn live_cooccurrence_forms_one_binding_and_does_not_run_away() {
+    let vp = Arc::new(Viewport::new());
+    let t = 2_000u64;
+
+    let phot_slot = claim_phot_slot(&vp, t); // SEEN object
+    let _vib_slot = claim_and_voice_vib_slot(&vp, t); // HEARD sound
+    let _ = paired_write_and_window(&vp, t, 0.7, 0.68); // earned, recent pair
+
+    let formed = vp.tick_form_binding_from_cooccurrence(t + 130);
+    assert!(formed, "real heard+seen+paired co-occurrence must form a binding");
+    let b = vp.read_language_binding();
+    assert_eq!(b.n_bindings, 1);
+    assert_eq!(
+        b.traces[0].target,
+        BindingTargetRef::ObjectSlot { slot_id: phot_slot as u8 }
+    );
+    assert_eq!(b.traces[0].pattern_kind, PatternKind::VibModality);
+    let rc0 = b.traces[0].reinforce_count;
+
+    // Runaway guard: re-fire the SAME pair many times (as the 5 Hz ticker would
+    // while the stimulus persists). One earned pair = one event — neither the
+    // trace count, the reinforce_count, nor the evidence set may inflate.
+    for _ in 0..20 {
+        vp.tick_form_binding_from_cooccurrence(t + 130);
+    }
+    let b2 = vp.read_language_binding();
+    assert_eq!(b2.n_bindings, 1, "must not spawn extra traces");
+    assert_eq!(
+        b2.traces[0].reinforce_count, rc0,
+        "a single earned pair must not inflate reinforce_count per tick"
+    );
+    assert_eq!(
+        b2.traces[0].evidence_refs.len(),
+        1,
+        "one earned co-occurrence = one evidence ref"
+    );
+}
+
+/// Honesty: a sound with NO seen object (no active PHOT slot) must not ground a
+/// symbol, no matter how strong the heard sound or the earned pair.
+#[test]
+fn live_cooccurrence_forms_nothing_without_seen_object() {
+    let vp = Arc::new(Viewport::new());
+    let t = 2_000u64;
+    let _vib_slot = claim_and_voice_vib_slot(&vp, t);
+    let _ = paired_write_and_window(&vp, t, 0.7, 0.68);
+    // NO PHOT slot claimed → no seen object.
+    let formed = vp.tick_form_binding_from_cooccurrence(t + 130);
+    assert!(!formed, "a sound with no seen object must not ground a symbol");
+    assert_eq!(vp.read_language_binding().n_bindings, 0);
 }

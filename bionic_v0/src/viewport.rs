@@ -1437,6 +1437,12 @@ pub struct Viewport {
     /// maturity clock, efficacy must track at the tick rate). Runtime-only (not
     /// persisted), like the maturity/self-play cursors.
     pub last_efficacy_advance_us: AtomicU64,
+    /// Idempotence cursor for live language-binding formation: the handle
+    /// (write_seq.rotate_left(32) ^ window_id) of the last action-consequence pair
+    /// that grounded a binding, so a single earned pair forms at most one binding
+    /// even though the 5 Hz tick re-finds it while the stimulus persists. Inits to
+    /// u64::MAX (no pair consumed yet). Runtime-only (not persisted).
+    pub last_binding_pair_consumed: AtomicU64,
     /// Rate-limit cursor for vocal self-play closures (see
     /// VOCAL_SELF_PLAY_MIN_INTERVAL_US).
     pub last_self_play_t_us: AtomicU64,
@@ -1564,6 +1570,7 @@ impl Viewport {
             developmental_maturity: RwLock::new(0.0),
             last_maturity_advance_us: AtomicU64::new(0),
             last_efficacy_advance_us: AtomicU64::new(0),
+            last_binding_pair_consumed: AtomicU64::new(u64::MAX),
             last_self_play_t_us: AtomicU64::new(0),
             last_imitation_closure_t_us: AtomicU64::new(0),
             phoneme_memory: RwLock::new(crate::phoneme_memory::PhonemeMemory::new()),

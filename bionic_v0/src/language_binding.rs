@@ -106,22 +106,29 @@ impl LanguageBindingState {
                 && trace.pattern_hash == event.pattern_hash
                 && trace.target == event.target
         }) {
+            // Only DISTINCT evidence moves strength/count. The dedup formerly
+            // guarded ONLY the evidence_refs push while strength/reinforce_count
+            // were bumped unconditionally — so a caller re-presenting the SAME
+            // evidence_ref (e.g. the live co-occurrence tick re-finding the same
+            // Paired pair every 5 Hz) inflated ONE earned event into hundreds of
+            // fabricated reinforcements (reinforce_count ≫ evidence_refs.len()).
+            // Re-presenting the same evidence now only refreshes the idle clock.
+            trace.last_update_t_us = event.event_t_us;
             if !trace.evidence_refs.contains(&event.evidence_ref) {
                 trace.evidence_refs.push(event.evidence_ref);
-            }
-            trace.last_update_t_us = event.event_t_us;
-            match event.feedback {
-                BindingFeedback::Align => {
-                    trace.reinforce_count += 1;
-                    trace.strength =
-                        BindingStrength::new(trace.strength.value + 0.25 * update_scale);
-                    trace.status = BindingStatus::Reinforced;
-                }
-                BindingFeedback::Deviate => {
-                    trace.weaken_count += 1;
-                    trace.strength =
-                        BindingStrength::new(trace.strength.value - 0.3 * update_scale);
-                    trace.status = BindingStatus::Weakened;
+                match event.feedback {
+                    BindingFeedback::Align => {
+                        trace.reinforce_count += 1;
+                        trace.strength =
+                            BindingStrength::new(trace.strength.value + 0.25 * update_scale);
+                        trace.status = BindingStatus::Reinforced;
+                    }
+                    BindingFeedback::Deviate => {
+                        trace.weaken_count += 1;
+                        trace.strength =
+                            BindingStrength::new(trace.strength.value - 0.3 * update_scale);
+                        trace.status = BindingStatus::Weakened;
+                    }
                 }
             }
             self.n_bindings = self.traces.len();
@@ -161,6 +168,25 @@ impl LanguageBindingState {
         }
         self.traces = decayed;
         self.n_bindings = self.traces.len();
+    }
+}
+
+/// Stable numeric fingerprint of a heard VIB band contour, for live symbol
+/// grounding. Bands are quantized at 1/32 before folding so jitter in a repeated
+/// sound maps to the same hash (one trace reinforces). FNV-1a fold; never returns
+/// 0 (0 is the "no sound heard" sentinel in tick_form_binding_from_cooccurrence).
+/// Mirrors mark_disturbance::hash_bytes for the byte-mark path.
+fn hash_vib_contour(observed: &[f64]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for band in observed {
+        let q = (band * 32.0).round().clamp(-1.0e9, 1.0e9) as i64;
+        h ^= q as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if h == 0 {
+        1
+    } else {
+        h
     }
 }
 
@@ -236,6 +262,94 @@ impl crate::viewport::Viewport {
             }
         }
         true
+    }
+
+    /// LIVE symbol grounding (#11): when the body genuinely HEARS a sound (a
+    /// fresh active VIB slot) WHILE SEEING an object (a fresh active PHOT slot)
+    /// AND a real, recent earned action-consequence Paired pair exists, form/
+    /// reinforce a (heard-sound → seen-object) binding. Reuses
+    /// try_form_binding_event_from_pair so the maturity-gated align/deviate
+    /// precision, the live-target check, and the no-spurious-deviate rule all
+    /// apply unchanged. This is the production counterpart to the curriculum-only
+    /// formation calls — without it the deployed body could ONLY decay bindings,
+    /// never form one (symbol grounding was structurally dead).
+    ///
+    /// Honesty gates (all reuse existing mechanisms; nothing forms from nothing):
+    ///   • Darkness → no active PHOT slot → return.
+    ///   • Silence → no active VIB slot / empty contour → return.
+    ///   • No coherent motor/consequence state → no recent Paired pair → return.
+    ///   • One earned pair grounds AT MOST ONE binding event (idempotence below),
+    ///     so a sustained stimulus cannot inflate one event into a per-tick
+    ///     runaway of fabricated reinforcements.
+    pub fn tick_form_binding_from_cooccurrence(&self, now_us: u64) -> bool {
+        // Seen object: a fresh, active PHOT slot.
+        let Some(phot_slot) = self.find_active_slot_for(crate::MOD_PHOT, now_us) else {
+            return false;
+        };
+        let target = BindingTargetRef::ObjectSlot {
+            slot_id: phot_slot as u8,
+        };
+
+        // Heard sound: a fresh, active VIB slot carrying real band evidence. The
+        // quantized observed contour is a stable fingerprint of the sound, so the
+        // same sound reinforces the same trace instead of spawning new ones.
+        let mut pattern_hash = 0u64;
+        for sid in 0..crate::N_OBJECT_SLOTS {
+            if let Some(slot) = self.read_slot(sid) {
+                if slot.active
+                    && (slot.source_modality & crate::MOD_VIB) != 0
+                    && now_us.saturating_sub(slot.last_update_t_us) <= crate::SLOT_IDLE_US
+                {
+                    if let Some(ref vib) = slot.vib {
+                        let h = hash_vib_contour(&vib.observed);
+                        if h != 0 {
+                            pattern_hash = h;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if pattern_hash == 0 {
+            return false;
+        }
+
+        // Earned, CONTEMPORANEOUS evidence: the latest action-consequence Paired
+        // pair, only if recent (within TEMPORAL_PAIR_MAX_DELAY_US of now) so the
+        // binding grounds on a CURRENT consequence, not an arbitrarily stale one.
+        let (write_seq, window_id) = {
+            let ac = self.read_action_consequence();
+            match ac.pairs.iter().rev().find(|p| {
+                p.status == crate::action_consequence::ConsequencePairStatus::Paired
+                    && now_us.saturating_sub(p.pair_t_us) <= crate::TEMPORAL_PAIR_MAX_DELAY_US
+            }) {
+                Some(p) => (p.write_seq, p.window_id),
+                None => return false,
+            }
+        };
+
+        // Per-pair idempotence: a single earned pair grounds AT MOST ONE binding
+        // event. Without this the same still-Paired pair re-fires every 5 Hz tick
+        // while the stimulus persists, repeatedly advancing maturity and (absent
+        // the source-level evidence_ref dedup) inflating strength from one event.
+        let handle = write_seq.rotate_left(32) ^ window_id;
+        if self
+            .last_binding_pair_consumed
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == handle
+        {
+            return false;
+        }
+        self.last_binding_pair_consumed
+            .store(handle, std::sync::atomic::Ordering::Relaxed);
+
+        self.try_form_binding_event_from_pair(
+            PatternKind::VibModality,
+            pattern_hash,
+            target,
+            write_seq,
+            window_id,
+        )
     }
 
     fn binding_target_is_live(&self, target: BindingTargetRef) -> bool {

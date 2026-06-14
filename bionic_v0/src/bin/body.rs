@@ -447,6 +447,14 @@ fn main() {
         let t = now_us();
         vp_binding.tick_binding_maintenance(t);
         vp_binding.tick_binding_resonance(t);
+        // LIVE symbol grounding (#11): when a heard sound (active VIB slot)
+        // co-occurs with a seen object (active PHOT slot) AND a real, recent
+        // earned action-consequence Paired pair exists, form/reinforce a binding.
+        // Without this the deployed body only ever DECAYED bindings and never
+        // formed any — the formation entry points were called only from the
+        // offline curriculum harness. All maturity-gated precision, liveness, and
+        // anti-runaway (one-binding-per-pair) gates live inside the call.
+        vp_binding.tick_form_binding_from_cooccurrence(t);
     });
 
     // Endogenous activity ticker, 10 Hz.
