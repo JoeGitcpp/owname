@@ -381,7 +381,16 @@ fn main() {
     // so learned source weights survive a restart (死后保留); a missing,
     // older-version, or structurally incompatible snapshot yields a fresh bank.
     let xlayer_axis: Arc<Mutex<Vec<CrossLayerPredictor>>> = {
-        let restored: Vec<CrossLayerPredictor> = read_snapshot(&paths.final_path)
+        let snap = read_snapshot(&paths.final_path).ok();
+        // B1 (#10): re-install the per-slot cross-layer banks (slot_xlayers +
+        // slot_towers) into the live viewport. They were serialized (v50/v51) and
+        // parsed into SnapshotData, but only the AXIS bank below was ever rebuilt
+        // — the slot relation rules ("死后保留") were dropped on every boot. Restore
+        // them so the learned object→object rules actually survive death.
+        if let Some(snap) = snap.as_ref() {
+            vp.restore_slot_cross_layer_banks(&snap.slot_xlayers, &snap.slot_towers);
+        }
+        let restored: Vec<CrossLayerPredictor> = snap
             .map(|snap| {
                 snap.axis_xlayers
                     .iter()

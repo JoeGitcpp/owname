@@ -899,7 +899,9 @@ wss.on('connection', (ws, req) => {
             endedAt: Date.now(),
           })
           if (result.pass) {
-            collect_to_pool(runtimeDir, POOL_DIR, sessionId)
+            // Pass the quality score so merge_pool can weight a rich session's
+            // nudge above a marginal one (it was computed then discarded before).
+            collect_to_pool(runtimeDir, POOL_DIR, sessionId, result.score)
             // Increment 3: harvest the branch's VOCAL learning into the pool too,
             // to be merged (not overwritten) into the mainline by merge_artifacts.
             // Named {ts}_{sid}__<name>.bin to match that tool's glob. learned_bias

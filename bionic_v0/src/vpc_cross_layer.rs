@@ -457,6 +457,54 @@ impl SlotCrossLayerPredictor {
         }
     }
 
+    /// Reconstruct a predictor from its persisted state (snapshot restore). The
+    /// learned RELATION RULES — source slots, their weights, the bias — and the
+    /// learning history (mse, progress, n_updates) are what must survive death
+    /// (死后保留); transient fields (prior_from_above, last_pred, residual) reset
+    /// and re-warm. `target_slot` is positional: SlotCrossLayerState does not
+    /// carry it (the snapshot indexes by slot). Returns None on a malformed state
+    /// so a corrupt block degrades to a fresh predictor, never garbage (mirrors
+    /// the axis-level CrossLayerPredictor::from_state validation).
+    pub fn from_state(target_slot: usize, state: &SlotCrossLayerState) -> Option<Self> {
+        if target_slot >= crate::N_OBJECT_SLOTS {
+            return None;
+        }
+        if state.source_slots.len() != state.source_weights.len() {
+            return None;
+        }
+        if state.source_slots.iter().any(|&s| s >= crate::N_OBJECT_SLOTS) {
+            return None;
+        }
+        let finite = state.bias.is_finite()
+            && state.err_pred_mse.is_finite()
+            && state.learning_progress.is_finite()
+            && state.source_weights.iter().all(|w| w.is_finite());
+        if !finite {
+            return None;
+        }
+        let mut p = Self::new(target_slot);
+        let clip = p.clip;
+        p.source_slots = state.source_slots.clone();
+        p.source_weights = state.source_weights.iter().map(|w| w.clamp(-clip, clip)).collect();
+        p.bias = state.bias.clamp(-clip, clip);
+        p.err_pred_mse = state.err_pred_mse;
+        p.prev_mse = state.err_pred_mse;
+        p.learning_progress = state.learning_progress;
+        p.n_updates = state.n_updates;
+        // explained_fraction = 1 - err_pred_mse/target_err_var ⇒ back out the
+        // variance so the noise/learnability gate (read by the capability
+        // governor) round-trips. Tier-1 (v50) persists explained_fraction=0 → var
+        // 0 → it re-warms; the tower (v51) persists it → continuity preserved.
+        p.target_err_var = if state.explained_fraction >= 1.0 {
+            state.err_pred_mse.max(1e-12) * 1e6
+        } else if state.explained_fraction > 0.0 {
+            state.err_pred_mse / (1.0 - state.explained_fraction)
+        } else {
+            0.0
+        };
+        Some(p)
+    }
+
     /// Explained fraction = 1 - mse/var, clamped to [0,1]. ≈1 = explains the
     /// target's structure (learnable); ≈0 = target is pure noise. The per-tier
     /// learnability / noise gate (mirrors the axis-level CrossLayerPredictor).
@@ -651,6 +699,46 @@ impl Viewport {
 
     fn put_slot_cross_layer(&self, target_slot: usize, pred: SlotCrossLayerPredictor) {
         self.slots[target_slot].write().unwrap().xlayer = Some(pred);
+    }
+
+    /// Snapshot restore for the per-slot B1 cross-layer banks. These "relation
+    /// rules that must survive death" (死后保留) were serialized (v50 `slot_xlayers`
+    /// / v51 `slot_towers`) and round-tripped into SnapshotData, but the boot path
+    /// only ever rebuilt the AXIS bank — so the slot weights were dropped on every
+    /// restart (the data was built and then discarded). Install them back into the
+    /// live slots, indexed positionally by slot_id exactly as serialized. A
+    /// malformed entry is skipped (from_state → None) so a corrupt block degrades
+    /// to a fresh predictor, never a panic. Call once at boot, before the slot
+    /// tickers run; tick_slot_cross_layer then TAKES and updates these rather than
+    /// recreating from zero (refresh_sources keeps the learned weight per retained
+    /// source), so the restored rules keep training instead of fading.
+    pub fn restore_slot_cross_layer_banks(
+        &self,
+        slot_xlayers: &[Option<SlotCrossLayerState>],
+        slot_towers: &[Vec<SlotCrossLayerState>],
+    ) {
+        for (slot_id, opt) in slot_xlayers.iter().enumerate() {
+            if slot_id >= crate::N_OBJECT_SLOTS {
+                break;
+            }
+            if let Some(state) = opt {
+                if let Some(pred) = SlotCrossLayerPredictor::from_state(slot_id, state) {
+                    self.slots[slot_id].write().unwrap().xlayer = Some(pred);
+                }
+            }
+        }
+        for (slot_id, tower) in slot_towers.iter().enumerate() {
+            if slot_id >= crate::N_OBJECT_SLOTS {
+                break;
+            }
+            let restored: Vec<SlotCrossLayerPredictor> = tower
+                .iter()
+                .filter_map(|st| SlotCrossLayerPredictor::from_state(slot_id, st))
+                .collect();
+            if !restored.is_empty() {
+                self.slots[slot_id].write().unwrap().xstack = restored;
+            }
+        }
     }
 
     /// Read a tier's residual under a read lock. tier `level`: 1 = `xlayer`,

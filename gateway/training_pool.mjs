@@ -27,7 +27,12 @@ const MIN_SESSION_SECS  = 5 * 60          // 5 minutes minimum
 const MIN_RECOG         = 20              // object recognition events
 const DELTA_THRESHOLD   = 0.005          // minimum meaningful bias change
 const VOCAL_EFF_MIN     = 0.01           // vocal_efficacy must have grown past default
-const MERGE_ALPHA       = 0.05           // how strongly each session nudges master
+const MERGE_ALPHA       = 0.05           // max nudge (at score 1); scaled by session score
+// Merge noise gate, DECOUPLED from the admission DELTA_THRESHOLD. Admission asks
+// "did this session learn anything real?" (a coarse 0.005). The merge asks, per
+// axis, "is this axis's move above float noise?" — a finer bar, so a good session
+// moves more of the master instead of being gated out by the admission threshold.
+const MERGE_NOISE_GATE  = 0.0005
 
 // ── Relaxed gate (ABORN_HARVEST_RELAXED=1) ───────────────────────────────────
 // Short sessions (60–300s) qualify on bias delta alone — skips recognition and
@@ -161,16 +166,30 @@ export function evaluate_session({
  * Collect a passing session's learned_bias.bin into the pool.
  * Pool files are named by timestamp to avoid collisions.
  */
-export function collect_to_pool(runtimeDir, poolDir, sessionId) {
+export function collect_to_pool(runtimeDir, poolDir, sessionId, score = 1) {
   const src = join(runtimeDir, 'learned_bias.bin')
   if (!existsSync(src)) return false
   mkdirSync(poolDir, { recursive: true })
+  // Encode the quality score (0–1) as `_s<0..1000>` so merge_pool can weight a
+  // rich session above a marginal one — the score was computed by evaluate_session
+  // then thrown away, so every accepted session nudged the master equally. Single
+  // underscore keeps the file out of merge_artifacts' `__<name>` prototype glob,
+  // and ts is still split('_')[0] for pruning. Clamped+integer so it always parses.
+  const s = Math.max(0, Math.min(1000, Math.round((Number.isFinite(score) ? score : 1) * 1000)))
   // Atomic: copy to .tmp then rename, so the periodic merge never reads a
   // half-written pool file (audit theme 5).
-  const dst = join(poolDir, `${Date.now()}_${sessionId}.bin`)
+  const dst = join(poolDir, `${Date.now()}_${sessionId}_s${s}.bin`)
   copyFileSync(src, dst + '.tmp')
   renameSync(dst + '.tmp', dst)
   return dst
+}
+
+// Parse the `_s<int>` score tag from a pool filename → weight in [0,1].
+// Files without the tag (legacy names) default to 1 (neutral, full weight).
+function poolScoreOf(filename) {
+  const m = /_s(\d+)\.bin$/.exec(filename)
+  if (!m) return 1
+  return Math.max(0, Math.min(1, parseInt(m[1], 10) / 1000))
 }
 
 /**
@@ -197,15 +216,23 @@ export function merge_pool(poolDir, masterPath, { maxPoolAgeDays = 7 } = {}) {
 
   let merged = 0
   let skipped = 0
+  let axesMoved = 0
 
   for (const pf of poolFiles) {
     try {
       const poolBuf = readFileSync(pf)
       if (poolBuf.length !== master.length) { skipped++; continue }
 
+      // Score-weighted EMA: a rich session (score≈1) nudges the master at the full
+      // MERGE_ALPHA; a marginal one (e.g. relaxed-gate score 0.3) nudges ~⅓ as hard,
+      // instead of equally. Zero-score files contribute nothing.
+      const alpha = MERGE_ALPHA * poolScoreOf(pf.split('/').pop() || '')
+      if (alpha <= 0) { skipped++; continue }
+
       // EMA merge: master[i] = (1-alpha)*master[i] + alpha*pool[i]
-      // Only for f64 values after the header (offset 28+), and only if
-      // the pool value differs significantly from master (noise gate).
+      // Only for f64 values after the header (offset 28+), and only if the pool
+      // value differs from master by more than float noise (MERGE_NOISE_GATE,
+      // decoupled from the coarser admission DELTA_THRESHOLD).
       const masterDV = new DataView(master.buffer, master.byteOffset, master.byteLength)
       const poolDV   = new DataView(poolBuf.buffer, poolBuf.byteOffset, poolBuf.byteLength)
       let changed = false
@@ -219,10 +246,11 @@ export function merge_pool(poolDir, masterPath, { maxPoolAgeDays = 7 } = {}) {
         const mv = masterDV.getFloat64(off, true)
         const pv = poolDV.getFloat64(off, true)
         if (!isFinite(mv) || !isFinite(pv)) continue
-        if (Math.abs(pv - mv) < DELTA_THRESHOLD) continue  // noise gate
-        const merged_v = mv * (1 - MERGE_ALPHA) + pv * MERGE_ALPHA
+        if (Math.abs(pv - mv) < MERGE_NOISE_GATE) continue  // float-noise gate
+        const merged_v = mv * (1 - alpha) + pv * alpha
         masterDV.setFloat64(off, merged_v, true)
         changed = true
+        axesMoved++
       }
 
       if (changed) merged++
@@ -234,6 +262,8 @@ export function merge_pool(poolDir, masterPath, { maxPoolAgeDays = 7 } = {}) {
   if (merged > 0) {
     writeFileSync(masterPath, master)
   }
+  // Visibility: how much the master actually moved this cycle (silent before).
+  console.log(`[training_pool] merge_pool: merged=${merged} skipped=${skipped} axes_moved=${axesMoved} pool=${poolFiles.length}`)
 
   // Prune old pool files
   const cutoff = Date.now() - maxPoolAgeDays * 86_400_000

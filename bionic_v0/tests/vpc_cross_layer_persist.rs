@@ -89,6 +89,35 @@ fn cross_layer_weights_survive_snapshot_roundtrip() {
         "persisted bias must match learned"
     );
 
+    // #10: the relation rule must not only round-trip into SnapshotData but be
+    // RE-INSTALLED into a live viewport on restore. Before the fix, the boot path
+    // dropped slot_xlayers entirely (only the axis bank was rebuilt), so every
+    // restart silently relearned from zero. Restore into a FRESH viewport and read
+    // the live predictor back — it must carry the learned sources/weights/bias.
+    let vp2 = Arc::new(Viewport::new());
+    assert!(
+        vp2.read_slot_cross_layer(a).is_none(),
+        "fresh viewport must start with no cross-layer predictor"
+    );
+    vp2.restore_slot_cross_layer_banks(&restored.slot_xlayers, &restored.slot_towers);
+    let live2 = vp2
+        .read_slot_cross_layer(a)
+        .expect("restored viewport must carry slot a's cross-layer predictor (#10)");
+    assert_eq!(
+        live2.source_slots, live.source_slots,
+        "restored source slots must match learned"
+    );
+    for (r, l) in live2.source_weights.iter().zip(live.source_weights.iter()) {
+        assert!(
+            (r - l).abs() < 1e-9,
+            "restored weight must match learned: {r} vs {l}"
+        );
+    }
+    assert!(
+        (live2.bias - live.bias).abs() < 1e-9,
+        "restored bias must match learned"
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
