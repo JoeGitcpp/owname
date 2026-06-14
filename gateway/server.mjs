@@ -77,6 +77,8 @@ import {
   IdleTracker,
   XorCipher,
   SENSES_FRAME_BYTES,
+  TAG_SENSES_COMPACT,
+  expandCompactSenses,
 } from './security.mjs'
 import {
   evaluate_session,
@@ -837,7 +839,16 @@ wss.on('connection', (ws, req) => {
     idleTracker.touch(sessionId)
     if (ephemeralId) ephemeralMgr.heartbeat(ephemeralId)   // reset idle timer for ephemeral
 
-    try { bodySocket?.write(buf) } catch { /* body socket closed */ }
+    // Compact uplink (0x06): expand to the legacy 160×120 f32 frame the body
+    // expects. The browser sends a Cloudflare-tunnel-safe 40×30 u8 grid; the body
+    // socket is LOCAL so it always receives the full 0x01 frame, unchanged (body +
+    // nursery feeder untouched). A plain 0x01 (direct, non-tunnel client) passes
+    // through as-is.
+    let toBody = buf
+    if (buf[0] === TAG_SENSES_COMPACT) {
+      try { toBody = expandCompactSenses(buf) } catch { return }
+    }
+    try { bodySocket?.write(toBody) } catch { /* body socket closed */ }
   })
 
   ws.on('close', (code, reason) => {

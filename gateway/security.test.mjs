@@ -47,6 +47,49 @@ describe('validateFrame', () => {
   })
 })
 
+// ── compact senses uplink (0x06) + expand ──────────────────────────────────────
+import {
+  TAG_SENSES_COMPACT, COMPACT_SENSES_BYTES, SENSES_FRAME_BYTES, expandCompactSenses,
+} from './security.mjs'
+
+describe('compact senses (0x06) + expandCompactSenses', () => {
+  it('validateFrame accepts a correctly-sized compact frame', () => {
+    const buf = Buffer.alloc(COMPACT_SENSES_BYTES) // 3905
+    buf[0] = TAG_SENSES_COMPACT
+    assert.equal(validateFrame(buf), true)
+  })
+
+  it('validateFrame rejects a compact tag with the wrong size', () => {
+    const short = Buffer.alloc(COMPACT_SENSES_BYTES - 1); short[0] = TAG_SENSES_COMPACT
+    const big   = Buffer.alloc(COMPACT_SENSES_BYTES + 1); big[0]   = TAG_SENSES_COMPACT
+    assert.equal(validateFrame(short), false)
+    assert.equal(validateFrame(big), false)
+  })
+
+  it('expands to the legacy 0x01 frame: tag + verbatim audio + 4× upsampled grid', () => {
+    const c = Buffer.alloc(COMPACT_SENSES_BYTES)
+    c[0] = TAG_SENSES_COMPACT
+    c.writeFloatLE(0.5,  1)            // audioLevel
+    c.writeFloatLE(0.25, 5)            // audioFlux
+    const g = 1 + 304                  // 305: u8 grid start
+    c[g + 0]            = 255          // R(dx=0,  dy=0)
+    c[g + 29 * 40 + 39] = 128          // R(dx=39, dy=29) — last R pixel
+
+    const out = expandCompactSenses(c)
+    assert.equal(out.length, SENSES_FRAME_BYTES) // 230705
+    assert.equal(out[0], 0x01)                   // body expects 0x01
+    assert.equal(out.readFloatLE(1), 0.5)        // scalars copied verbatim
+    assert.equal(out.readFloatLE(5), 0.25)
+    // R(x=0,y=0) ← src 255 → 1.0
+    assert.ok(Math.abs(out.readFloatLE(g) - 1.0) < 1e-6)
+    // R(x=159,y=119) ← src R(39,29)=128 → 128/255 (nearest 4× upsample)
+    const lastR = g + (119 * 160 + 159) * 4
+    assert.ok(Math.abs(out.readFloatLE(lastR) - 128 / 255) < 1e-6)
+    // an untouched source pixel stays 0 after expansion
+    assert.equal(out.readFloatLE(g + (5 * 160 + 80) * 4), 0)
+  })
+})
+
 // ── RateLimiter ───────────────────────────────────────────────────────────────
 describe('RateLimiter', () => {
   it('allows connections within the limit', () => {

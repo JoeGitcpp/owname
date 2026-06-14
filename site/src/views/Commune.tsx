@@ -17,7 +17,6 @@ const GATEWAY_WS = (() => {
   return `${proto}//${location.host}/ws`
 })()
 
-const TAG_SENSES  = 0x01
 const TAG_VOCAL       = 0x02
 const TAG_STATE       = 0x03
 const TAG_SURFACE     = 0x04
@@ -35,10 +34,18 @@ async function gunzip(payload: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer())
 }
 const BANDS       = 64
-const GW          = 160
-const GH          = 120
-// tag(1) + (2 + BANDS + 2 + 8)×f32 + GW×GH×3×f32 = 1 + 304 + 230400 = 230705
-const FRAME_BYTES = 1 + (2 + BANDS + 2 + 8) * 4 + GW * GH * 3 * 4  // 230705
+const GW          = 160   // camera grid width (source); height is CH*DS = 120
+// The browser used to send a 230 KB float32 frame (160×120×3 f32) — at 10 fps it
+// saturated the Cloudflare tunnel and was dropped (body blind → black screen). It
+// now sends the COMPACT frame below; the gateway expands it back to 160×120 f32
+// for the (local) body, so the body + nursery feeder are unchanged.
+// Compact uplink: 40×30 u8 grid (downsampled 4×, box-averaged) + same 76 f32
+// scalars. tag(1) + 304 + 40×30×3 = 3905 bytes (≈59× smaller, ~39 KB/s @ 10 fps).
+const TAG_SENSES_COMPACT = 0x06
+const CW          = 40
+const CH          = 30
+const DS          = 4   // 160/40 = 120/30
+const COMPACT_FRAME_BYTES = 1 + (2 + BANDS + 2 + 8) * 4 + CW * CH * 3  // 3905
 
 export interface LifeState {
   reserve: number  // 0..1 — energy/vitality level
@@ -54,11 +61,28 @@ function mapCloseCode(code: number): DisconnectReason {
   return 'kicked'
 }
 
+// 4× box-average downsample of a GW×GH float (0..1) plane → CW×CH u8 (0..255),
+// written planar into `out` at `outOff`. Averaging (not point-sampling) keeps the
+// shrunk grid representative instead of aliased.
+function downsampleU8(src: ArrayLike<number>, out: Uint8Array, outOff: number): void {
+  for (let dy = 0; dy < CH; dy++) {
+    for (let dx = 0; dx < CW; dx++) {
+      let sum = 0
+      for (let oy = 0; oy < DS; oy++) {
+        const row = (dy * DS + oy) * GW + dx * DS
+        for (let ox = 0; ox < DS; ox++) sum += src[row + ox] ?? 0
+      }
+      const v = Math.round((sum / (DS * DS)) * 255)
+      out[outOff + dy * CW + dx] = v < 0 ? 0 : v > 255 ? 255 : v
+    }
+  }
+}
+
 function packSenses(s: import('../lib/perception').Senses): ArrayBuffer {
-  const buf  = new ArrayBuffer(FRAME_BYTES)
+  const buf  = new ArrayBuffer(COMPACT_FRAME_BYTES)
   const view = new DataView(buf)
   let off = 0
-  view.setUint8(off++, TAG_SENSES)
+  view.setUint8(off++, TAG_SENSES_COMPACT)
   view.setFloat32(off, s.audioLevel, true); off += 4
   view.setFloat32(off, s.audioFlux,  true); off += 4
   for (let b = 0; b < BANDS; b++) {
@@ -66,7 +90,7 @@ function packSenses(s: import('../lib/perception').Senses): ArrayBuffer {
   }
   view.setFloat32(off, s.motion, true); off += 4
   view.setFloat32(off, s.luma,   true); off += 4
-  // 8 aux features
+  // 8 aux features (full f32 precision — small and important)
   view.setFloat32(off, s.spectralCentroid ?? 0, true); off += 4
   view.setFloat32(off, s.spectralFlatness  ?? 0, true); off += 4
   view.setFloat32(off, s.spectralRolloff   ?? 0, true); off += 4
@@ -75,19 +99,15 @@ function packSenses(s: import('../lib/perception').Senses): ArrayBuffer {
   view.setFloat32(off, s.hnr               ?? 0, true); off += 4
   view.setFloat32(off, s.onsetStrength     ?? 0, true); off += 4
   view.setFloat32(off, s.temporalFlux      ?? 0, true); off += 4
-  // RGB grid: R plane, then G plane, then B plane (planar SoA)
+  // RGB grid downsampled to CW×CH u8, planar R,G,B. Shares `buf` with the
+  // DataView above (the f32 scalars occupy [1,305), the u8 grid [305,3905)).
+  const u8 = new Uint8Array(buf)
   const gridR = s.gridR ?? s.grid  // fallback to luma if RGB not available
   const gridG = s.gridG ?? s.grid
   const gridB = s.gridB ?? s.grid
-  for (let i = 0; i < GW * GH; i++) {
-    view.setFloat32(off, gridR[i] ?? 0, true); off += 4
-  }
-  for (let i = 0; i < GW * GH; i++) {
-    view.setFloat32(off, gridG[i] ?? 0, true); off += 4
-  }
-  for (let i = 0; i < GW * GH; i++) {
-    view.setFloat32(off, gridB[i] ?? 0, true); off += 4
-  }
+  downsampleU8(gridR, u8, off); off += CW * CH
+  downsampleU8(gridG, u8, off); off += CW * CH
+  downsampleU8(gridB, u8, off); off += CW * CH
   return buf
 }
 
@@ -118,22 +138,19 @@ function useBodyBridge(
     const actx = audioCtxRef.current
     if (!actx) return   // begin() must have created this already
 
-    const ws = new WebSocket(GATEWAY_WS)
-    ws.binaryType = 'arraybuffer'
-    wsRef.current  = ws
-    xorKeyRef.current = null
-    liveRef.current = true
-    nextTimeRef.current = 0
-
-    // Belt-and-suspenders: attempt resume again here and on every interaction.
-    // The AudioContext was created in begin() (gesture context) so it should
-    // already be running, but this handles rare races on some iOS builds.
-    void actx.resume()
+    // Belt-and-suspenders: attempt resume on every interaction. The AudioContext
+    // was created in begin() (gesture context) so it should already be running;
+    // this handles rare races on some iOS builds.
     const unlockAudio = () => { void actx.resume() }
     document.addEventListener('touchstart', unlockAudio, { passive: true })
     document.addEventListener('click',      unlockAudio, { passive: true })
 
-    ws.onmessage = (ev: MessageEvent) => {
+    // Reconnect bookkeeping (see connect()/onclose below).
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+    const MAX_ATTEMPTS = 6
+
+    const handleMessage = (ev: MessageEvent) => {
       if (!(ev.data instanceof ArrayBuffer)) return
       const raw = new Uint8Array(ev.data)
       const key = xorKeyRef.current
@@ -202,32 +219,59 @@ function useBodyBridge(
       ctx2d.putImageData(img, 0, 0)
     }
 
-    ws.onclose = (ev) => {
-      if (!liveRef.current) return  // intentional cleanup close — no error
-      onDisconnect(mapCloseCode(ev.code))
+    const connect = () => {
+      const ws = new WebSocket(GATEWAY_WS)
+      ws.binaryType = 'arraybuffer'
+      wsRef.current  = ws
+      xorKeyRef.current = null
+      nextTimeRef.current = 0
+      void actx.resume()
+      ws.onopen = () => { attempts = 0 }   // a successful open resets the backoff
+      ws.onmessage = handleMessage
+      ws.onclose = (ev) => {
+        if (!liveRef.current) return  // intentional cleanup close — no error
+        // Transient drop (1006 abnormal = the tunnel killed an idle/congested
+        // socket; 1011 body-failed; 1012 restart) → reconnect with exponential
+        // backoff instead of dumping the user to the disconnect modal. Deliberate
+        // closes (1013 capacity, 1001 session-limit) and exhausted retries are
+        // terminal.
+        const code = ev.code
+        const transient = code === 1006 || code === 1011 || code === 1012
+        if (transient && attempts < MAX_ATTEMPTS) {
+          attempts++
+          const delay = Math.min(8000, 500 * 2 ** (attempts - 1))  // 0.5→8 s
+          reconnectTimer = setTimeout(connect, delay)
+          return
+        }
+        onDisconnect(mapCloseCode(code))
+      }
     }
 
-    // Senses upload: one frame is ~230 KB (the camera grid). At 50 ms that was
-    // ~4.6 MB/s up — beyond a typical mobile uplink, congesting the link and
-    // starving the downstream surface/vocal (black screen). 100 ms (~2.3 MB/s,
-    // 10 fps) still feeds the body's perception while leaving headroom; only
-    // send when the ws isn't already backed up so we never queue senses ahead
-    // of what the link can carry.
+    liveRef.current = true
+    connect()
+
+    // Senses upload: the compact frame is ~3.9 KB (40×30 u8 grid + 76 scalars),
+    // ~39 KB/s @ 100 ms — within the Cloudflare tunnel's ~100 KB/s headroom (the
+    // old 230 KB float frame saturated it and was dropped → black screen). Send
+    // only when the socket isn't already backed up, on whichever socket is
+    // currently live (survives reconnects via wsRef).
     const interval = setInterval(() => {
-      if (ws.readyState !== WebSocket.OPEN) return
+      const ws = wsRef.current
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
       const key = xorKeyRef.current
       if (!key) return
-      if (ws.bufferedAmount > 512 * 1024) return  // link saturated — skip this frame
+      if (ws.bufferedAmount > 64 * 1024) return  // link saturated — skip this frame
       const plain = new Uint8Array(packSenses(getSenses()))
       ws.send(xorApply(plain, key))
     }, 100)
 
     return () => {
       liveRef.current = false  // mark intentional before close
+      if (reconnectTimer) clearTimeout(reconnectTimer)
       clearInterval(interval)
       document.removeEventListener('touchstart', unlockAudio)
       document.removeEventListener('click',      unlockAudio)
-      ws.close()
+      wsRef.current?.close()
       wsRef.current = null
       xorKeyRef.current = null
       // AudioContext lifecycle owned by Commune — do NOT close here.

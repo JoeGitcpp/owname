@@ -10,13 +10,21 @@ import { randomBytes } from 'node:crypto'
 // ── Frame validation ──────────────────────────────────────────────────────────
 // Compact binary frame constants (mirrored from net_adapter.rs).
 // Only valid tag is 0x01 (senses). Exact size must match.
-const TAG_SENSES   = 0x01
-const BANDS        = 12
-const GW           = 32
-const GH           = 24
-// tag(1) + (audio_level + audio_flux + 64 mel bands + motion + luma + 8 aux) × f32 + 160×120×3 × f32
-// = 1 + (2 + 64 + 2 + 8) × 4 + 57600 × 4 = 1 + 304 + 230400 = 230705
-export const SENSES_FRAME_BYTES = 1 + (2 + 64 + 2 + 8) * 4 + 160 * 120 * 3 * 4   // 230705
+const TAG_SENSES         = 0x01
+export const TAG_SENSES_COMPACT = 0x06
+const AUDIO_SCALARS      = 2 + 64 + 2 + 8   // audio_level, audio_flux, 64 mel, motion, luma, 8 aux
+const AUDIO_BYTES        = AUDIO_SCALARS * 4 // 304 — the f32 scalar block, identical in both frames
+// Legacy full senses frame (gateway→body, local socket): 160×120×3 f32 grid.
+// tag(1) + 76 f32 scalars (304) + 160×120×3 × f32 (230400) = 230705
+const FULL_GW = 160, FULL_GH = 120
+export const SENSES_FRAME_BYTES = 1 + AUDIO_BYTES + FULL_GW * FULL_GH * 3 * 4   // 230705
+// Compact uplink frame (browser→gateway, Cloudflare-tunnel-safe). The 230 KB
+// float32 frame was dropped by the tunnel → body blind → black screen. The
+// browser now sends a 40×30 u8 grid (downsampled 4×) + the SAME 76 f32 scalars;
+// the gateway expands it back to the legacy 0x01 frame for the (local) body
+// socket, so the body and the nursery feeder stay byte-for-byte unchanged.
+const COMPACT_CW = 40, COMPACT_CH = 30, COMPACT_DS = 4   // 160/40 = 120/30 = 4
+export const COMPACT_SENSES_BYTES = 1 + AUDIO_BYTES + COMPACT_CW * COMPACT_CH * 3  // 3905
 
 /**
  * Validate a binary frame from the browser before forwarding to body.
@@ -28,7 +36,36 @@ export function validateFrame(buf) {
   if (buf.length === 0) return false
   const tag = buf[0]
   if (tag === TAG_SENSES) return buf.length === SENSES_FRAME_BYTES
+  if (tag === TAG_SENSES_COMPACT) return buf.length === COMPACT_SENSES_BYTES
   return false  // any other tag or padding: reject
+}
+
+/**
+ * Expand a compact 0x06 senses frame (40×30 u8 grid) into the legacy 0x01 frame
+ * (160×120 f32 grid) the body expects: nearest-neighbour 4× upsample + u8→f32
+ * (/255). The 76 audio/aux f32 scalars are copied verbatim. Returns a Buffer of
+ * SENSES_FRAME_BYTES. `buf` must already be XOR-decrypted and validateFrame-passed
+ * as a compact frame. Pure — the gateway calls it before writing to the body
+ * socket; the body never sees the compact form.
+ */
+export function expandCompactSenses(buf) {
+  const out = Buffer.allocUnsafe(SENSES_FRAME_BYTES)
+  out[0] = TAG_SENSES                          // body expects 0x01
+  buf.copy(out, 1, 1, 1 + AUDIO_BYTES)         // 304 scalar bytes verbatim
+  const srcGrid = 1 + AUDIO_BYTES              // 305: u8 grid start in compact
+  const plane = COMPACT_CW * COMPACT_CH        // 1200 u8 per channel
+  let dst = 1 + AUDIO_BYTES                     // 305: f32 grid start in full
+  for (let c = 0; c < 3; c++) {
+    const base = srcGrid + c * plane
+    for (let y = 0; y < FULL_GH; y++) {
+      const row = base + ((y / COMPACT_DS) | 0) * COMPACT_CW
+      for (let x = 0; x < FULL_GW; x++) {
+        out.writeFloatLE(buf[row + ((x / COMPACT_DS) | 0)] / 255, dst)
+        dst += 4
+      }
+    }
+  }
+  return out
 }
 
 // ── Per-IP rate limiter ───────────────────────────────────────────────────────

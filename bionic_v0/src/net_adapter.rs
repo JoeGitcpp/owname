@@ -218,6 +218,14 @@ impl NetSensesAdapter {
                 };
                 *vocal_tx2.lock().unwrap_or_else(|e| e.into_inner()) = Some(write_end);
 
+                // Wedge cap (audit: the parser has no desync recovery — read_exact
+                // would block forever on a stalled/partial frame). A healthy link
+                // delivers a frame every ≤100 ms over this LOCAL socket, so a 30 s
+                // gap means the gateway died mid-write without closing; time out,
+                // break, and wait for a fresh connection instead of hanging. A clean
+                // EOF still breaks immediately via the same Err arm below.
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+
                 // Read sensory frames from the gateway indefinitely.
                 let mut buf = vec![0u8; FRAME_BYTES];
                 loop {
