@@ -25,9 +25,10 @@
 //!
 //! L4  Social fast-path / naming seeds
 //!       credit_response() increments social_response_rate on the proto that
-//!       spoke.  A proto with high social_response_rate is the seed of a name /
-//!       greeting — voiced again when attachment pressure is high (future
-//!       tick_vocal_drive_field weighting; not yet wired).
+//!       spoke.  social_response_rate is TELEMETRY ONLY today — intended as the
+//!       future seed of a name / greeting (voiced again under attachment
+//!       pressure), but no selection/naming/drive logic reads it yet (consumer
+//!       de-scoped 2026-04-20). Not yet wired.
 //! ```
 //!
 //! # Integration points (all in viewport.rs)
@@ -512,9 +513,12 @@ impl PhonemeMemory {
             return;
         }
         proto.social_response_count += 1;
-        // Nudge social_response_rate toward 1.0 by confidence, and gently
-        // decay it toward 0.0 on every call — so the rate reflects the RECENT
-        // frequency of responses, not an all-time peak.
+        // Plain EMA (α=0.05) toward THIS call's confidence — NOT a decay-to-zero.
+        // It runs only on an observed response, so it tracks recent response
+        // confidence: it rises with confident responses and only eases downward
+        // when a call's confidence is below the current rate; it never falls on
+        // its own between calls. (The old comment claiming "decay toward 0.0 on
+        // every call" was wrong.) Telemetry only — not read by selection/naming.
         proto.social_response_rate =
             proto.social_response_rate * 0.95 + confidence * 0.05;
     }

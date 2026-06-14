@@ -22,7 +22,7 @@
 | 学习误差用的是粗的 2 标量代理，造成「虚假收敛」 | **已修。** 当 `self_voiced` 时，learning_gap 用 64-mel 共振峰级形状距离 | `viewport.rs:4538-4550` |
 | `dual_drive` 算了但零下游消费者（A1「悬空动态」） | **已接。** 依恋驱动经 `bond_modulated_region_b` 调制 region-B 发声 | `viewport.rs:4579-4583` |
 | `semantic_readiness` / `symbolizer` / `concept_id` 仍在主循环，违反 2026-04-20 语言公理 | **已清。** 全代码库已无任何出现 | `grep` 全树 0 命中 |
-| 发声器只有 3 个自由度（pitch/resonance/noise） | **部分错。** `VocalOrganState` 已含 F1/F2/F3 + voiced_ratio + ADSR 包络（`begin_voicing_v2`），但**活体路径未启用**，仍走 3 标量的 `begin_voicing`/`adjust_voicing` | `vocal_organ.rs:76-94`；`viewport.rs:3970,4231,4671` |
+| 发声器只有 3 个自由度（pitch/resonance/noise） | **部分错。** `VocalOrganState` 已含 F1/F2/F3 + voiced_ratio + ADSR 包络（`begin_voicing_v2`），但**活体路径未启用**，仍走 3 标量的 `begin_voicing`/`adjust_voicing` | `vocal_organ.rs` `begin_voicing_v2`；`viewport.rs` 的 `begin_voicing`/`adjust_voicing` 调用点（按符号名定位——原行号 3970/4231/4671 已失效，勿再用行号锚） |
 
 > **行动项**：本方案 Phase 4 会把上述勘误回写进 `consciousness-stream-architecture.md` 与 `improvement-prompts.md`，让地图追上领土。
 

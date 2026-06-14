@@ -254,6 +254,13 @@ function sendJson(res, status, data) {
 }
 
 /** Extract the real client IP, honouring Cloudflare and standard proxy headers. */
+// Trust assumption (read before exposing this beyond localhost): this trusts the
+// cf-connecting-ip / x-forwarded-for headers with NO trusted-proxy check. It is
+// safe ONLY because the gateway binds 127.0.0.1 and Cloudflare overwrites
+// cf-connecting-ip at the edge, so a client cannot set it. If this is ever
+// rebound to 0.0.0.0 (or fronted by anything other than the CF tunnel), these
+// headers become client-spoofable and per-IP limits/caps can be evaded — derive
+// the IP from a trusted hop / allowlist the tunnel source before doing so.
 function clientIp(req) {
   return req.headers['cf-connecting-ip']
       || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
@@ -356,6 +363,11 @@ const http = createServer(async (req, res) => {
   }
 
   // ── Per-AI persistent memory (/memory) — structured KV per identity ───────
+  // STATUS: scaffold. The PUT route below has no in-system caller today (the body
+  // has no HTTP client and the SPA does not write here), so the only key actually
+  // populated is `_meta` (a per-identity visit counter set on session cleanup).
+  // "Cross-session AI memory" is therefore not yet real — wiring it needs a
+  // body-side summary harvested into this KV on disconnect (not yet built).
   // GET /memory            → all stored key/values for the caller (harvest/export)
   // GET /memory/keys       → list of keys
   // PUT /memory/:key  {value}  → write one key (value is the JSON body's `value`)
