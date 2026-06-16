@@ -284,6 +284,14 @@ fn main() {
             *vp.vocal_target_recall.write().unwrap() = vr;
         }
     }
+    // #8 sequence layer: load the transition edges sidecar so learned vocal ORDER
+    // accumulates across sessions (separate file → no SNAPSHOT_VERSION bump).
+    let vocal_sequence_path = runtime_dir.join("vocal_sequence.bin");
+    if let Ok(bytes) = std::fs::read(&vocal_sequence_path) {
+        if let Some(vs) = bionic_v0::vocal_sequence::VocalSequence::deserialize(&bytes) {
+            *vp.vocal_sequence.write().unwrap() = vs;
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     // Register SIGTERM so the OS-level kill causes a graceful flush rather than
     // instant termination.  signal_flag::register atomically sets `stop` on
@@ -482,6 +490,7 @@ fn main() {
         vp_vocal.tick_vocal_target_from_vib(t);
         vp_vocal.tick_vocal_drive_field(t);
         vp_vocal.tick_vocal_memory(t);
+        vp_vocal.tick_vocal_sequence_boundary(t); // #8 Stage 1: decay traces + close utterances
         // P3: hear our own voice through the same analyzer the target uses —
         // in EVERY mode. This reafference (self_vocal_bands → vocal_acoustic_*
         // distance) is the efference copy of the body's own voicing; gating it
@@ -553,6 +562,7 @@ fn main() {
         let phoneme_cp = runtime_dir.join("phoneme_memory.bin");
         let vocal_mem_cp = runtime_dir.join("vocal_memory.bin");
         let vocal_recall_cp = runtime_dir.join("vocal_target_recall.bin");
+        let vocal_seq_cp = runtime_dir.join("vocal_sequence.bin");
         let vocal_diag_cp = runtime_dir.join("vocal_diag.csv");
         spawn_ticker(vp.clone(), profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
@@ -642,6 +652,12 @@ fn main() {
                 .unwrap_or_else(|e| e.into_inner())
                 .serialize();
             bionic_v0::atomic_write_or_warn("checkpoint vocal_target_recall", &vocal_recall_cp, &vr_bytes);
+            let vs_bytes = vp_checkpoint
+                .vocal_sequence
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .serialize();
+            bionic_v0::atomic_write_or_warn("checkpoint vocal_sequence", &vocal_seq_cp, &vs_bytes);
         })
     };
 
@@ -762,6 +778,10 @@ fn main() {
     {
         let vr_bytes = vp.vocal_target_recall.read().unwrap().serialize();
         bionic_v0::atomic_write_or_warn("shutdown vocal_target_recall", &vocal_recall_path, &vr_bytes);
+    }
+    {
+        let vs_bytes = vp.vocal_sequence.read().unwrap().serialize();
+        bionic_v0::atomic_write_or_warn("shutdown vocal_sequence", &vocal_sequence_path, &vs_bytes);
     }
 
     std::process::exit(0);

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use bionic_v0::phoneme_memory::PhonemeMemory;
 use bionic_v0::vocal_memory::VocalMemoryState;
 use bionic_v0::vocal_target_recall::VocalTargetRecall;
+use bionic_v0::vocal_sequence::VocalSequence;
 
 fn pool_files(pool_dir: &Path, suffix: &str) -> Vec<PathBuf> {
     let mut v = Vec::new();
@@ -105,6 +106,33 @@ fn merge_phoneme(master_dir: &Path, pool_dir: &Path) -> usize {
     n
 }
 
+// #8: the sequence layer's transition edges. Same path as recall (its nodes):
+// the mainline harvests vocal_sequence.bin to the pool, and here it is MERGED
+// (union edges, keep the stronger count per from→to — VocalSequence::merge) into
+// master_vocal_sequence.bin, so learned vocal ORDER accumulates across restarts
+// and branches instead of living only in /tmp (built-then-lost).
+fn merge_sequence(master_dir: &Path, pool_dir: &Path) -> usize {
+    let master_path = master_dir.join("master_vocal_sequence.bin");
+    let mut master = fs::read(&master_path)
+        .ok()
+        .and_then(|b| VocalSequence::deserialize(&b))
+        .unwrap_or_default();
+    let mut n = 0;
+    for f in pool_files(pool_dir, "__vocal_sequence.bin") {
+        if let Some(branch) = fs::read(&f).ok().and_then(|b| VocalSequence::deserialize(&b)) {
+            master.merge(&branch);
+            n += 1;
+        }
+        let _ = fs::remove_file(&f);
+    }
+    if n > 0 {
+        if let Err(e) = bionic_v0::atomic_write(&master_path, &master.serialize()) {
+            eprintln!("merge_artifacts: write {master_path:?} failed: {e}");
+        }
+    }
+    n
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -121,7 +149,8 @@ fn main() {
     let recall = merge_recall(master_dir, pool_dir);
     let vmem = merge_vocal_memory(master_dir, pool_dir);
     let phon = merge_phoneme(master_dir, pool_dir);
+    let seq = merge_sequence(master_dir, pool_dir);
     println!(
-        "merge_artifacts: recall={recall} vocal_memory={vmem} phoneme={phon} (pooled branch artifacts merged into mainline)"
+        "merge_artifacts: recall={recall} vocal_memory={vmem} phoneme={phon} sequence={seq} (pooled branch artifacts merged into mainline)"
     );
 }

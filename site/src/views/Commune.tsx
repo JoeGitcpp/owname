@@ -236,7 +236,17 @@ function useBodyBridge(
         // closes (1013 capacity, 1001 session-limit) and exhausted retries are
         // terminal.
         const code = ev.code
-        const transient = code === 1006 || code === 1011 || code === 1012
+        const reason = (ev.reason || '').toLowerCase()
+        // Cloudflare periodically recycles its WS proxy and closes long-lived
+        // sockets with 1001 + "CloudFlare WebSocket proxy restarting" — a TRANSIENT
+        // infra drop, not an intentional end. Reconnect (the fresh body seeds from
+        // the now-updated master; the dropped body's learning was already collected
+        // on close), so a long ("长程") session survives Cloudflare recycles instead
+        // of dying at ~8 min. Our OWN 1001s (session-limit / idle) stay terminal.
+        const ourTerminal1001 =
+          code === 1001 && (reason.includes('session-limit') || reason.includes('idle'))
+        const transient =
+          code === 1006 || code === 1011 || code === 1012 || (code === 1001 && !ourTerminal1001)
         if (transient && attempts < MAX_ATTEMPTS) {
           attempts++
           const delay = Math.min(8000, 500 * 2 ** (attempts - 1))  // 0.5→8 s
@@ -442,6 +452,9 @@ export function Commune({ onLeave }: { onLeave: (secs: number) => void }) {
           <span className="commune__remote-name">aborn</span>
           {isStandby && (
             <span className="commune__standby-badge">{t('commune.standby')}</span>
+          )}
+          {(camOff || !hasVideo) && (
+            <span className="commune__audioonly-badge">{t('commune.audioonly')}</span>
           )}
           <span className="commune__timer">{timer.display}</span>
         </div>

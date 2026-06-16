@@ -39,9 +39,10 @@ export const dict = {
   'commune.camoff': { zh: '关闭摄像头', en: 'Camera off' },
   'commune.camon': { zh: '开启摄像头', en: 'Camera on' },
   'commune.novision': {
-    zh: 'aborn 通过摄像头“看”——现在镜头关着，它看不到你，画面是黑的。它仍能听见你。',
-    en: 'aborn “sees” through your camera — it is off, so the view is dark. It can still hear you.',
+    zh: 'aborn 通过摄像头“看”——现在没有画面传给它，它完全看不到你，这次交流它学不到任何视觉。点下面开启摄像头，它才能看见你。',
+    en: 'aborn “sees” through your camera — right now no video is reaching it, so it cannot see you at all and learns nothing visual this session. Turn the camera on so it can see you.',
   },
+  'commune.audioonly': { zh: '纯音频 · 看不到你', en: 'Audio only · can’t see you' },
   'commune.enable-cam': { zh: '开启摄像头', en: 'Turn on camera' },
   'commune.duration': { zh: '通话中', en: 'In call' },
   'commune.unsupported.title': { zh: '此环境不支持感官通道', en: 'Sensory channels unsupported' },

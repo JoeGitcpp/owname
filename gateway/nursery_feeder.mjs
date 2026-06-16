@@ -34,6 +34,7 @@ import {
 }                           from 'node:fs'
 import { dirname, join }    from 'node:path'
 import { deserializeCorpus } from './audio_to_bands.mjs'
+import { decideHarvest, emaUpdate } from './harvest_policy.mjs'
 
 // ── Frame format (must match net_adapter.rs / security.mjs) ───────────────────
 // net_adapter.rs layout (v2):
@@ -423,13 +424,17 @@ const MASTER_ARTIFACTS = [
   // re-solved them every restart. Include them so the mainline accumulates.
   ['vocal_target_recall.bin', MASTER_DIR ? join(MASTER_DIR, 'master_vocal_target_recall.bin') : null],
   ['snapshot.bin',        MASTER_DIR ? join(MASTER_DIR, 'master_snapshot.bin') : null],
+  // #8: the sequence layer's transition edges (learned vocal ORDER). Seeded from
+  // master here and harvested via the pool below, so order accumulates across
+  // restarts/branches into the lineage instead of living only in /tmp.
+  ['vocal_sequence.bin',  MASTER_DIR ? join(MASTER_DIR, 'master_vocal_sequence.bin') : null],
 ]
 
 // Prototype skills go through the POOL so merge_artifacts (the single writer of
 // master_*prototype.bin) MERGES the mainline's + visitors' contributions instead
 // of the mainline clobbering them every harvest (the audit's #1: the old
 // copyFileSync made the whole branch→pool→mainline pipeline a steady-state no-op).
-const POOL_PROTOTYPES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin']
+const POOL_PROTOTYPES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin', 'vocal_sequence.bin']
 // These the mainline writes directly to master (not merged by anyone else → no
 // clobber). learned_bias is special-cased below to ZERO maturity.
 const DIRECT_TO_MASTER = MASTER_ARTIFACTS.filter(([n]) => !POOL_PROTOTYPES.includes(n) && n !== 'learned_bias.bin')
@@ -592,9 +597,11 @@ function* fullPass(getReserve) {
 }
 
 async function feedLoop() {
-  let lastHarvest    = Date.now()
+  let lastHarvest    = Date.now()                         // time of last ACTUAL harvest (forced-timer base)
+  let lastCheck      = Date.now()                         // throttle clock for the harvest gate
   let lastReport     = Date.now()
-  let lastHarvestEff = readVocalEfficacy(biasPath) ?? 0  // efficacy at last harvest
+  let lastHarvestEff = readVocalEfficacy(biasPath) ?? 0  // smoothed efficacy at last harvest
+  let emaEff         = lastHarvestEff                     // robust (smoothed) efficacy baseline
   let bestEff        = lastHarvestEff                     // high-water mark
   let curEff         = lastHarvestEff                     // refreshed each report tick
   let lastImproveMs  = Date.now()                         // last time efficacy rose
@@ -609,28 +616,37 @@ async function feedLoop() {
       if (now - lastReport >= 30_000) {
         lastReport = now
         curEff = readVocalEfficacy(biasPath) ?? 0   // refresh competence signal (avoid per-tick file I/O)
+        emaEff = emaUpdate(emaEff, curEff)          // robust baseline for the harvest gate
         if (curEff > bestEff + 1e-4) {
           bestEff = curEff; lastImproveMs = now; plateauLogged = false
         } else if (!plateauLogged && now - lastImproveMs >= PLATEAU_S * 1000) {
           plateauLogged = true
           log(`[plateau] vocal_efficacy stuck at ${fmt(bestEff)} for ${Math.round((now - lastImproveMs) / 1000)}s — likely architectural ceiling; still living, harvest gated`)
         }
-        log(`t=${Math.round((now - startMs) / 1000)}s vocal_efficacy=${fmt(curEff)} maturity=${fmt(readMaturity(biasPath))} reserve=${fmt(readReserve(RUNTIME_DIR))}`)
+        // maturity is a free-running developmental CLOCK, not competence — label
+        // it dev_clock and lead with the real signal (efficacy + its smoothed EMA).
+        log(`t=${Math.round((now - startMs) / 1000)}s vocal_efficacy=${fmt(curEff)} ema=${fmt(emaEff)} reserve=${fmt(readReserve(RUNTIME_DIR))} dev_clock=${fmt(readMaturity(biasPath))}`)
       }
 
-      if (MASTER_BIAS && existsSync(biasPath) && now - lastHarvest >= HARVEST_S * 1000) {
-        const improved = curEff >= lastHarvestEff + HARVEST_MIN_GAIN
-        const forced   = now - lastHarvest >= HARVEST_MAX_S * 1000
-        lastHarvest = now
-        if (improved || forced) {
-          const gain = curEff - lastHarvestEff
-          lastHarvestEff = curEff
-          try {
-            harvestMasterArtifacts(RUNTIME_DIR)
-            log(`harvested → master (eff=${fmt(curEff)} gain=${fmt(gain)}${(!improved && forced) ? ' forced' : ''})`)
-          } catch {}
-        } else {
-          log(`harvest skipped — no efficacy gain since last merge (cur=${fmt(curEff)} last=${fmt(lastHarvestEff)})`)
+      if (MASTER_BIAS && existsSync(biasPath)) {
+        const d = decideHarvest({
+          now, lastCheck, lastHarvest, emaEff, lastHarvestEff,
+          harvestS: HARVEST_S, harvestMaxS: HARVEST_MAX_S, minGain: HARVEST_MIN_GAIN,
+        })
+        if (d.check) {
+          lastCheck = now                          // reset THROTTLE clock (not the forced timer)
+          if (d.harvest) {
+            const gain = emaEff - lastHarvestEff
+            lastHarvest    = now                   // forced timer advances only on an ACTUAL harvest
+            lastHarvestEff = emaEff
+            try {
+              harvestMasterArtifacts(RUNTIME_DIR)
+              log(`harvested → master (ema=${fmt(emaEff)} gain=${fmt(gain)}${(!d.improved && d.forced) ? ' forced' : ''})`)
+            } catch {}
+          } else {
+            const nextForcedS = Math.max(0, Math.round((HARVEST_MAX_S * 1000 - (now - lastHarvest)) / 1000))
+            log(`harvest skipped — Δefficacy<${fmt(HARVEST_MIN_GAIN)} (ema=${fmt(emaEff)} base=${fmt(lastHarvestEff)}); forced merge in ${nextForcedS}s`)
+          }
         }
       }
       if (!FOREVER && now - startMs >= DURATION_S * 1000) { finish(); return }

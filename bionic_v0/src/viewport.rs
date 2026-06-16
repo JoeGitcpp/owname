@@ -1342,6 +1342,8 @@ pub struct Viewport {
     /// fingerprint → the servo (F1,F2) correction that matched it. Lets a
     /// recurring nursery target warm-start the servo instead of cold-climbing.
     pub vocal_target_recall: RwLock<crate::vocal_target_recall::VocalTargetRecall>,
+    /// #8 sequence layer: transition edges over recall entries + utterance-DTW fit.
+    pub vocal_sequence: RwLock<crate::vocal_sequence::VocalSequence>,
     /// Which recall entry the servo is currently tracking (-1 = none/novel).
     /// A change signals a target (re)presentation → warm-start; →none → reset.
     pub last_recall_idx: AtomicI64,
@@ -1547,6 +1549,7 @@ impl Viewport {
             vocal_target_recall: RwLock::new(
                 crate::vocal_target_recall::VocalTargetRecall::default(),
             ),
+            vocal_sequence: RwLock::new(crate::vocal_sequence::VocalSequence::default()),
             last_recall_idx: AtomicI64::new(-1),
             vocal_diag: RwLock::new(VocalLoopDiag::default()),
             familiar_objects: RwLock::new(
@@ -4376,7 +4379,17 @@ impl Viewport {
                         &target.target_bands,
                     )
                 };
-                let fit = (1.0 - shape_dist).clamp(0.0, 1.0);
+                let per_frame_fit = (1.0 - shape_dist).clamp(0.0, 1.0);
+                // #8 Stage 2: a sequence/utterance is more than one frame. The DTW
+                // alignment fit (SAME strict full-mel64 cell cost — no liftered
+                // shortcut) credits getting the temporal ORDER right, which can
+                // exceed the single-frame timbre floor (~0.48) that caps
+                // per_frame_fit at ~0.52 and pins efficacy ~0.23. max() can only
+                // LIFT efficacy, never lower it; None (buffer too short) → 0 → no
+                // change. The self_bands>1e-6 evidence gate above is untouched, so
+                // there is no evidence-less inflation (the old maturity=1.0 leak).
+                let seq_fit = self.vocal_sequence.read().unwrap().seq_fit().unwrap_or(0.0);
+                let fit = per_frame_fit.max(seq_fit);
                 Some((closure_support.clamp(0.0, 1.0) * fit).clamp(0.0, 1.0))
             } else {
                 None
@@ -4733,7 +4746,37 @@ impl Viewport {
                         }
                     }
                     None if last != -1 => {
-                        servo.reset();
+                        // #8 Stage 3: the target just moved off a known sound and the
+                        // new one isn't recognised yet. If the body is developmentally
+                        // mature AND has learned what usually FOLLOWS `last`, ANTICIPATE
+                        // it — warm-start the servo toward the predicted successor's
+                        // correction instead of a cold reset — so a familiar SEQUENCE is
+                        // produced fluently (a faster/closer match raises self_match →
+                        // closure_support, the factor that caps efficacy at its plateau).
+                        // Maturity-gated so it anneals in and never smothers a young
+                        // body's babble. last_recall_idx stays -1 (still unrecognised) so
+                        // Stage 1 logs no spurious edge; a wrong guess just hill-climbs
+                        // from there — no worse than a cold reset.
+                        let predicted = if self.developmental_maturity()
+                            > crate::vocal_sequence::SEQ_ANTICIPATE_MATURITY_FLOOR
+                        {
+                            self.vocal_sequence.read().unwrap().predict_next(last)
+                        } else {
+                            None
+                        };
+                        let mut warmed = false;
+                        if let Some((to_idx, _)) = predicted {
+                            let recall = self.vocal_target_recall.read().unwrap();
+                            if let Some(e) = recall.entries.get(to_idx as usize) {
+                                let (f1, f2) = (e.f1_off, e.f2_off);
+                                drop(recall);
+                                servo.warm_start(f1, f2);
+                                warmed = true;
+                            }
+                        }
+                        if !warmed {
+                            servo.reset();
+                        }
                         self.last_recall_idx.store(-1, Ordering::Relaxed);
                     }
                     _ => {}
@@ -4787,6 +4830,23 @@ impl Viewport {
                         commit_r,
                         fit,
                     );
+                }
+            }
+            // #8 Stage 1: learn the ORDER of vocal targets — an edge forms between
+            // RECOGNISED recall entries when the committed target changes — and
+            // buffer the self/target utterance for the Stage 2 DTW alignment fit.
+            // Read the mel64 (drop its read lock) THEN take the seq write: no
+            // nested locks; vocal-thread-only writes, so no new cross-thread order.
+            if self_voiced {
+                let cur_recall_idx = self.last_recall_idx.load(Ordering::Relaxed);
+                let (self_mel_now, _) = *self.self_vocal_mel64.read().unwrap();
+                let mut seq = self.vocal_sequence.write().unwrap();
+                seq.observe_transition(now_us, cur_recall_idx);
+                if self_mel_now.iter().sum::<f64>() > 1e-6 {
+                    seq.push_self(&self_mel_now);
+                }
+                if target.target_mel64.iter().sum::<f64>() > 1e-6 {
+                    seq.push_target(&target.target_mel64);
                 }
             }
             // Phase 0: capture the live region-B learning path (invisible before
@@ -5005,6 +5065,22 @@ impl Viewport {
 
     pub fn read_familiar_objects(&self) -> crate::familiar_objects::FamiliarObjectsState {
         self.familiar_objects.read().unwrap().clone()
+    }
+
+    /// #8 Stage 1: per-vocal-tick maintenance of the sequence layer — decay the
+    /// eligibility traces and close an utterance after a silence gap (so its
+    /// buffered self/target frames get a DTW seq_fit stamp before the next one
+    /// starts). Owned by the vocal ticker only (Stage 2 efficacy lift is in
+    /// observe_vocal_reflex_closure; Stage 3 anticipation is in tick_vocal_drive_field).
+    pub fn tick_vocal_sequence_boundary(&self, now_us: u64) {
+        let mut seq = self.vocal_sequence.write().unwrap();
+        seq.decay_eligibility(now_us);
+        let last_voice = self.last_vocal_output_t_us.load(Ordering::Relaxed);
+        if last_voice != 0
+            && now_us.saturating_sub(last_voice) > crate::vocal_sequence::SEQ_UTTERANCE_GAP_US
+        {
+            seq.end_utterance();
+        }
     }
 
     /// C1: drive the vital core. The reserve is shaped by TWO things:

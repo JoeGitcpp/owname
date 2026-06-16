@@ -49,6 +49,42 @@ const CURVE_COUNT_OFFSET   = 16  // u32 (4 bytes)
 const VOCAL_EFF_OFFSET     = 20  // f64 (8 bytes) — after curve_count in v4
 // (exact layout depends on learned_bias serialization; we read conservatively)
 
+// ── Familiar-objects checkpoint binary layout ───────────────────────────────
+// Mirrors bionic_v0/src/familiar_objects.rs::write_familiar_objects_checkpoint:
+//   header : MAGIC u64 + VERSION u64 + count u32                       = 20 bytes
+//   object : fingerprint OBJECT_FINGERPRINT_DIM(8)×f64 + familiarity f64
+//            + recognition_count u32 + last_seen_us u64                = 84 bytes
+//   trailer: last_update_t_us u64                                      =  8 bytes
+// NOTE: the fingerprint is 8 f64 (VIB half [0..4] + PHOT half [4..8]), NOT 4.
+// A prior 52-byte stride (4-f64 fingerprint) misread recognition_count as
+// garbage, silently corrupting Gate 2 below.
+const FAM_HEADER_BYTES      = 20
+const FAM_COUNT_OFFSET      = 16
+const FAM_FINGERPRINT_BYTES = 64   // 8 × f64
+const FAM_OBJ_STRIDE        = FAM_FINGERPRINT_BYTES + 8 + 4 + 8   // = 84
+
+/**
+ * Parse a familiar_objects.bin buffer → { count, topFam, topRecog, objects }.
+ * topRecog is the recognition_count of the MOST-FAMILIAR object (highest familiarity).
+ */
+export function parseFamiliarObjects(buf) {
+  const empty = { count: 0, topFam: 0, topRecog: 0, objects: [] }
+  if (!buf || buf.length < FAM_HEADER_BYTES) return empty
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  const count = dv.getUint32(FAM_COUNT_OFFSET, true)
+  const objects = []
+  let topFam = 0, topRecog = 0
+  let off = FAM_HEADER_BYTES
+  for (let i = 0; i < count && off + FAM_OBJ_STRIDE <= buf.length; i++) {
+    const fam = dv.getFloat64(off + FAM_FINGERPRINT_BYTES, true)
+    const rec = dv.getUint32(off + FAM_FINGERPRINT_BYTES + 8, true)
+    objects.push({ familiarity: fam, recognitionCount: rec })
+    if (fam > topFam) { topFam = fam; topRecog = rec }
+    off += FAM_OBJ_STRIDE
+  }
+  return { count, topFam, topRecog, objects }
+}
+
 /**
  * Grade one session. Returns { pass: bool, score: number, reason: string }.
  *
@@ -90,19 +126,9 @@ export function evaluate_session({
   let topRecog = 0
   let topFam   = 0
   try {
-    const fo = readFileSync(join(runtimeDir, 'familiar_objects.bin'))
-    if (fo.length >= 20) {
-      const dv  = new DataView(fo.buffer, fo.byteOffset, fo.byteLength)
-      const n   = dv.getUint32(16, true)      // n_objects at offset 16
-      let off   = 20
-      for (let i = 0; i < n && off + 52 <= fo.length; i++) {
-        off += 32  // fingerprint 4×f64
-        const fam = dv.getFloat64(off, true); off += 8
-        const rec = dv.getUint32(off, true);  off += 4
-        off += 8   // last_seen_us
-        if (fam > topFam) { topFam = fam; topRecog = rec }
-      }
-    }
+    const parsed = parseFamiliarObjects(readFileSync(join(runtimeDir, 'familiar_objects.bin')))
+    topFam   = parsed.topFam
+    topRecog = parsed.topRecog
   } catch { /* no familiar_objects yet — fail gate */ }
 
   if (topRecog < MIN_RECOG) {
@@ -110,7 +136,16 @@ export function evaluate_session({
   }
 
   // ── Gate 3: vital state (vital_core.bin) ──────────────────────────────────
-  let everAlive    = false
+  // We only have the TEARDOWN checkpoint; its reserve/vstate are the FINAL
+  // instant. A session that engaged for minutes then dipped to Standby (a talky
+  // call drained by the body's voicing_cost + the simulated famine schedule)
+  // would look "standby_only" here and be wrongly discarded — the more engaged
+  // the call, the more likely it powers down. Sustained recognition is the
+  // trustworthy liveness signal: Gate 2 above already proved topRecog ≥
+  // MIN_RECOG recognitions, which only accrue while perceiving. So an engaged
+  // session counts as having been alive even if it ends tired; a truly parked
+  // session is already rejected by Gate 2 (low_recog).
+  let aliveAtEnd   = false
   let finalReserve = 0
   try {
     const vc = readFileSync(join(runtimeDir, 'vital_core.bin'))
@@ -118,12 +153,11 @@ export function evaluate_session({
       const dv   = new DataView(vc.buffer, vc.byteOffset, vc.byteLength)
       finalReserve = dv.getFloat64(16, true)
       const vstate = vc[40]                    // 0=Alive, 1=Standby
-      // If final reserve > 0 the body lived at some point
-      everAlive = finalReserve > 0.05 || vstate === 0
+      aliveAtEnd = finalReserve > 0.05 || vstate === 0
     }
   } catch { }
 
-  if (!everAlive) {
+  if (!aliveAtEnd && topRecog < MIN_RECOG) {
     return { pass: false, score: 0, reason: 'standby_only' }
   }
 
@@ -133,10 +167,15 @@ export function evaluate_session({
   try {
     const lb  = readFileSync(join(runtimeDir, 'learned_bias.bin'))
     const dv  = new DataView(lb.buffer, lb.byteOffset, lb.byteLength)
-    // Read vocal_efficacy (at known offset in v4 format)
-    // Structure: magic(8)+version(8)+n_curves(4)+vocal_efficacy(8)+...
-    if (lb.length >= 28) {
-      vocalEfficacy = dv.getFloat64(20, true)
+    // Read vocal_efficacy from the learned_bias v5 TAIL. The trailing f64s are
+    // [..., vocal_efficacy, developmental_maturity], so efficacy is at length-16
+    // (maturity at length-8) — matching nursery_feeder.readVocalEfficacy. The old
+    // fixed offset 20 was a stale v4 layout and misread efficacy as ~0, which
+    // wrongly rejected genuinely-engaged calls as `low_vocal_eff` (the dashboard
+    // exposed exactly this: a 6-min call with closures_with_evidence=1466 and a
+    // real efficacy of ~0.13–0.24 in vocal_diag, read here as 0.0000).
+    if (lb.length >= 16) {
+      vocalEfficacy = dv.getFloat64(lb.length - 16, true)
     }
     // Scan for any non-trivial f64 delta in the bias data after the header
     for (let off = 28; off + 8 <= lb.length; off += 8) {

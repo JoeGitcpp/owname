@@ -68,6 +68,20 @@
   text-transform: uppercase;
 }
 
+/* Audio-only badge — persistent, attention-warm: aborn is receiving no video,
+   so it cannot see the visitor and learns nothing visual this session. */
+.commune__audioonly-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: #ffd7a8;
+  background: rgba(220, 120, 40, 0.22);
+  border: 1px solid rgba(220, 120, 40, 0.5);
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
 /* Reserve bar — 2 px energy strip under the remote-label pill */
 .commune__reserve-bar {
   position: absolute;

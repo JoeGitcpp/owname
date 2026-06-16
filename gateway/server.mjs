@@ -85,6 +85,7 @@ import {
   collect_to_pool,
   merge_pool,
 } from './training_pool.mjs'
+import { archiveSessionDiag, pruneSessionArchive } from './session_archive.mjs'
 import {
   handleAuthRequest,
   handleAuthVerify,
@@ -158,6 +159,9 @@ const MASTER_RUNTIME   = process.env.ABORN_RUNTIME     || resolve('../runtime')
 // Per-user persistent memory: familiar_objects, vital_core, self_model survive across sessions.
 // Keyed by SHA-256(email)[0:16] — no raw email on disk.
 const USERS_DIR        = process.env.ABORN_USERS_DIR  || resolve('../user-memories')
+// Per-session diagnostics retained AFTER the runtime dir is wiped, so a call can
+// be reviewed afterwards. Lightweight, non-personal (vocal_diag.csv + meta.json).
+const DIAG_ARCHIVE_DIR = process.env.ABORN_DIAG_DIR   || resolve('../session-diag')
 // Merge the pool into master every N minutes (0 = disable)
 const MERGE_INTERVAL_MIN = parseInt(process.env.ABORN_MERGE_MIN || '60', 10)
 // Persistent instances: max simultaneously active instances (hot-updatable via POST /admin/instances/limit)
@@ -180,6 +184,10 @@ const MAINLINE_VOCAL_FILES = [
   'vocal_memory.bin',
   'vocal_target_recall.bin',
   'snapshot.bin',
+  // #8: seed visitor calls with the mainline's learned vocal ORDER (transition
+  // edges) so anticipation starts from accumulated sequence knowledge. Calls
+  // read it; they don't harvest it back (only the nursery does) → no clobber.
+  'vocal_sequence.bin',
 ]
 // Prototype vocal artifacts harvested branch→pool→mainline by structure-aware
 // MERGE (merge_artifacts). snapshot is seed-only (not merged back). learned_bias
@@ -295,10 +303,12 @@ if (MERGE_INTERVAL_MIN > 0) {
   setInterval(() => {
     try {
       const r = merge_pool(POOL_DIR, MASTER_BIAS)
-      if (r.merged > 0) {
-        console.log(`[pool] merged ${r.merged} sessions into master (skipped ${r.skipped})`)
+      // glog → gateway.log (captured); console.log was discarded (StandardOutput=null).
+      if (r.merged > 0 || r.skipped > 0) {
+        glog(`[pool] merge: merged=${r.merged} into master (skipped=${r.skipped})`)
       }
     } catch { /* pool not ready yet */ }
+    try { pruneSessionArchive(DIAG_ARCHIVE_DIR) } catch { /* best-effort */ }
     // Increment 3: fold pooled branch VOCAL artifacts into the mainline by
     // structure-aware merge (single-threaded here → no race with branches that
     // only write into the pool). Spawned tool consumes the pool files it merges.
@@ -648,6 +658,16 @@ wss.on('connection', (ws, req) => {
       try { copyFileSync(src, join(runtimeDir, dst)) } catch { }
     }
   }
+  // #5: persistent (logged-in) instances continue their OWN cortical snapshot
+  // across sessions. It was just seeded above from the shared mainline snapshot
+  // as a fallback; override with the user's own if they have one. Anon stays on
+  // the shared mainline snapshot — no cross-visitor neural bleed, no per-anon bloat.
+  if (identityValue) {
+    const userSnap = join(userDir, 'snapshot.bin')
+    if (existsSync(userSnap)) {
+      try { copyFileSync(userSnap, join(runtimeDir, 'snapshot.bin')) } catch { }
+    }
+  }
 
   // Spawn body in headless mode
   const modeLabel = identity ? `persistent:${identity.key}` : 'ephemeral'
@@ -704,8 +724,7 @@ wss.on('connection', (ws, req) => {
   // immediately, dropping only under heavy backlog.
   let latestSurface  = null
   let surfaceTimer   = null
-  const SURFACE_FLUSH_MS      = 250         // ≤ 4 fps to the browser
-  const SURFACE_BACKLOG_MAX   = 96 * 1024   // flush surface when queue is short
+  const SURFACE_BACKLOG_MAX   = 96 * 1024   // flush surface only when the queue is short
   // Keep the vocal ceiling BELOW the surface gate. Vocal is sent eagerly up to
   // this backlog; if it sits above the surface gate, the shared ws buffer never
   // drains under it and the surface frame is starved forever — a black screen
@@ -713,13 +732,23 @@ wss.on('connection', (ws, req) => {
   // the buffer fall below it each cycle so the surface actually flushes. Vocal
   // still flows; it just yields to the (small) surface frame under congestion.
   const VOCAL_BACKLOG_MAX     = 48 * 1024   // drop vocal past this (< surface gate)
-  // Tunnel goodput measured at ~100 KB/s: a raw 320×180 RGBA frame (230 KB)
-  // alone exceeds it. Downsample 4× (80×45, ~14 KB) before relaying — the
-  // client draws whatever w×h the frame declares and CSS scales it up.
-  const SURFACE_DOWNSCALE     = 4
-  const downsampleSurface = (frame) => {
+  // Adaptive surface quality. Tunnel goodput (~100 KB/s) is far above the safe
+  // baseline cost (80×45 gzipped ≈ 2-4 KB @4fps ≈ ~12 KB/s), so when the send
+  // buffer keeps draining we spend the spare headroom on a SHARPER frame; the
+  // instant it backs up we drop straight back to the baseline (the
+  // black-screen-over-slow-tunnel guard). scale MUST divide 320 AND 180 (gcd=20):
+  // 4→80×45, 2→160×90. Level 0 == the previous fixed behavior, so worst case is
+  // never worse than before.
+  const SURFACE_LEVELS = [
+    { scale: 4, ms: 250 },   // baseline: 80×45 @4fps
+    { scale: 2, ms: 220 },   // enhanced: 160×90 @~4.5fps (4× the detail)
+  ]
+  const SURFACE_STEPUP_AFTER  = 10          // consecutive low-buffer flushes before a step up
+  let surfLevel   = 0
+  let drainStreak = 0
+  // Downsample a raw 0x04 frame by integer factor f (client upscales via CSS).
+  const downsampleSurface = (frame, f) => {
     const w = frame.readUInt16LE(1), h = frame.readUInt16LE(3)
-    const f = SURFACE_DOWNSCALE
     if (f <= 1 || w % f || h % f) return frame
     const dw = w / f, dh = h / f
     const out = Buffer.allocUnsafe(5 + dw * dh * 4)
@@ -776,7 +805,7 @@ wss.on('connection', (ws, req) => {
             const h    = vocalBuf.readUInt16LE(3)
             const need = 5 + w * h * 4
             if (vocalBuf.length < need) break
-            latestSurface = downsampleSurface(vocalBuf.slice(0, need))  // keep freshest, flushed by surfaceTimer
+            latestSurface = vocalBuf.slice(0, need)  // keep freshest RAW frame; downsampled at flush (adaptive)
             vocalBuf = vocalBuf.slice(need)
           } else {
             vocalBuf = vocalBuf.slice(1)  // resync
@@ -795,16 +824,30 @@ wss.on('connection', (ws, req) => {
   // a 4-6× bandwidth cut over the ~100 KB/s tunnel. The client gunzips back to
   // the raw 0x04 frame. Clients that predate 0x05 still get nothing worse than
   // before; the gateway only emits 0x05 once both ends are deployed.
-  surfaceTimer = setInterval(() => {
-    if (!latestSurface || ws.readyState !== 1) return
-    if (ws.bufferedAmount > SURFACE_BACKLOG_MAX) return  // still draining — retry next tick
-    const gz = gzipSync(latestSurface, { level: 6 })
-    const framed = Buffer.allocUnsafe(1 + gz.length)
-    framed[0] = 0x05            // gzip-compressed surface frame
-    gz.copy(framed, 1)
-    ws.send(XorCipher.apply(framed, xorKey))
-    latestSurface = null
-  }, SURFACE_FLUSH_MS)
+  const flushSurface = () => {
+    if (ws.readyState !== 1) { surfaceTimer = null; return }  // socket gone → stop the self-reschedule
+    if (latestSurface && ws.bufferedAmount <= SURFACE_BACKLOG_MAX) {
+      const ds = downsampleSurface(latestSurface, SURFACE_LEVELS[surfLevel].scale)
+      const gz = gzipSync(ds, { level: 6 })
+      const framed = Buffer.allocUnsafe(1 + gz.length)
+      framed[0] = 0x05            // gzip-compressed surface frame
+      gz.copy(framed, 1)
+      ws.send(XorCipher.apply(framed, xorKey))
+      latestSurface = null
+      // Adapt: sustained headroom → step up a level; any congestion → baseline.
+      if (ws.bufferedAmount < SURFACE_BACKLOG_MAX / 3) {
+        if (++drainStreak >= SURFACE_STEPUP_AFTER && surfLevel < SURFACE_LEVELS.length - 1) {
+          surfLevel++; drainStreak = 0
+        }
+      } else {
+        drainStreak = 0
+      }
+    } else if (ws.bufferedAmount > SURFACE_BACKLOG_MAX) {
+      surfLevel = 0; drainStreak = 0   // congested → fall straight back to the safe baseline
+    }
+    surfaceTimer = setTimeout(flushSurface, SURFACE_LEVELS[surfLevel].ms)
+  }
+  surfaceTimer = setTimeout(flushSurface, SURFACE_LEVELS[0].ms)
 
   // Life-state pulse at ~1 Hz
   stateTimer = setInterval(() => {
@@ -884,7 +927,12 @@ wss.on('connection', (ws, req) => {
         // Persistent-instance sessions save back to their named userDir.
         // Ephemeral sessions write to 'anon' dir which is the shared fallback.
         if (existsSync(userDir)) {
-          for (const f of PERSONAL_FILES) {
+          // #5: persistent (logged-in) instances also retain their 12MB cortical
+          // snapshot so neural-layer learning accumulates across sessions. Anon
+          // saves only the small personal files (snapshot would bloat the shared
+          // anon dir and bleed one visitor's cortex into the next).
+          const filesToSave = identityValue ? [...PERSONAL_FILES, 'snapshot.bin'] : PERSONAL_FILES
+          for (const f of filesToSave) {
             const src = join(runtimeDir, f)
             if (existsSync(src)) {
               // Atomic save-back: .tmp + rename so a crash mid-copy never leaves
@@ -925,6 +973,7 @@ wss.on('connection', (ws, req) => {
             // Pass the quality score so merge_pool can weight a rich session's
             // nudge above a marginal one (it was computed then discarded before).
             collect_to_pool(runtimeDir, POOL_DIR, sessionId, result.score)
+            glog(`[pool] collected session=${sessionId} score=${result.score.toFixed(3)} (${result.reason})`)
             // Increment 3: harvest the branch's VOCAL learning into the pool too,
             // to be merged (not overwritten) into the mainline by merge_artifacts.
             // Named {ts}_{sid}__<name>.bin to match that tool's glob. learned_bias
@@ -941,8 +990,20 @@ wss.on('connection', (ws, req) => {
               }
             }
           }
-          // else: session did not meet quality threshold — discard
-        } catch { /* evaluation error: skip collection */ }
+          else {
+            // Session did not meet the quality threshold — discard, but RECORD WHY
+            // (was silent before; this is how we see e.g. standby_only / low_recog).
+            glog(`[pool] rejected session=${sessionId} reason=${result.reason}`)
+          }
+        } catch (e) { glog(`[pool] eval-error session=${sessionId}: ${e?.message || e}`) }
+
+        // Retain lightweight per-session diagnostics BEFORE the runtime dir is
+        // wiped, so a call can be reviewed afterwards ("was it positive?").
+        try {
+          archiveSessionDiag(runtimeDir, DIAG_ARCHIVE_DIR, sessionId, {
+            startedAt: entry.startedAt, endedAt: Date.now(), mode: modeLabel,
+          })
+        } catch { /* best-effort */ }
 
         // Clean up session directory (personal files already saved above)
         setTimeout(() => {
