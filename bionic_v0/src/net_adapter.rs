@@ -431,6 +431,10 @@ impl ModalityAdapter for NetSensesAdapter {
         // the body currently perceives through the browser camera.
         vp.tick_gaussian_field_from_net(&frame.grid, now_us);
 
+        // Phase 3 Stage 2: tier-0 visual frontend for the headless path.
+        // Upsamples 160×120 → 320×240 and feeds patches into perturbation_graph.
+        vp.tick_vision_tier0_from_net(&frame.grid, now_us);
+
         // ── PHOT slot claiming (headless parity with RealPhotAdapter) ────────
         // Claim TWO phot slots at horizontally opposing spatial positions.
         //

@@ -360,6 +360,8 @@ pub fn tick_virtual_neck_into_viewport(
         vp.push_observation(crate::AXIS_VIS_BASE + i, t_us, v);
     }
     vp.tick_gaussian_field(&frame, t_us);
+    // Phase 3 Stage 2: tier-0 visual frontend, parallel to slot path.
+    vp.tick_vision_tier0_from_frame(&frame, t_us);
     write_neck_translation_event(vp, ec.tx, t_us);
     new_brightness
 }

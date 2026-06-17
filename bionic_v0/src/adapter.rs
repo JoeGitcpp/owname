@@ -601,6 +601,12 @@ impl ModalityAdapter for RealPhotAdapter {
         // Runs on every received frame, same tick as region_perception above.
         vp.tick_gaussian_field(&frame, now_us);
 
+        // Phase 3 Stage 2: tier-0 visual frontend. Runs IN PARALLEL with the
+        // legacy region_perception + slot-claim path; writes patches into
+        // perturbation_graph (the eventual replacement for SLOT_COUNT=8). No
+        // existing slot code is touched.
+        vp.tick_vision_tier0_from_frame(&frame, now_us);
+
         // Multi-region extraction. The first frame returns an empty Vec (no
         // diff target yet).
         //

@@ -1347,11 +1347,16 @@ pub struct Viewport {
     /// Phase 3 (2026-06-18): tier-0 perturbation graph — replaces the SLOT_COUNT=8
     /// categorical-object architecture with a sparse, capacity-soft node-edge
     /// graph. Affordances emerge from marginal statistics; nodes are continuously
-    /// updated while active (live-neuron semantics). Stage 0 wiring: persistence
-    /// pipe only — no tick driver, no consumers yet (the slot stack still owns
-    /// perception). See perturbation_graph.rs for the rollout plan.
+    /// updated while active (live-neuron semantics). See perturbation_graph.rs
+    /// for the rollout plan.
     pub perturbation_graph:
         RwLock<crate::perturbation_graph::PerturbationGraph>,
+    /// Phase 3 Stage 2: tier-0 visual frontend — edge + motion + CC →
+    /// patches → perturbation_graph. Runs in parallel with the legacy
+    /// region_perception + slot-claim path, doesn't touch it. Owned here so
+    /// the prev-frame state survives across adapter ticks.
+    pub vision_tier0:
+        RwLock<crate::vision_tier0::VisionTier0>,
     /// Which recall entry the servo is currently tracking (-1 = none/novel).
     /// A change signals a target (re)presentation → warm-start; →none → reset.
     pub last_recall_idx: AtomicI64,
@@ -1586,6 +1591,7 @@ impl Viewport {
             perturbation_graph: RwLock::new(
                 crate::perturbation_graph::PerturbationGraph::default(),
             ),
+            vision_tier0: RwLock::new(crate::vision_tier0::VisionTier0::new()),
             last_recall_idx: AtomicI64::new(-1),
             vocal_diag: RwLock::new(VocalLoopDiag::default()),
             familiar_objects: RwLock::new(
@@ -5495,5 +5501,62 @@ impl Viewport {
             .observe_scene(now_us, scene_fp);
         self.push_observation(crate::GAUSS_RECON_MSE_AXIS,   now_us, mse.clamp(0.0, 1.0));
         self.push_observation(crate::GAUSS_ACTIVE_FRAC_AXIS, now_us, active_frac.clamp(0.0, 1.0));
+    }
+
+    /// Phase 3 Stage 2: drive the tier-0 visual frontend from one CameraFrame.
+    /// Used by the hardware path (RealPhotAdapter) and the virtual-neck
+    /// curriculum path. Runs IN PARALLEL with the legacy region_perception +
+    /// slot-claim pipeline — does not touch slots. Cross-modal and vital
+    /// coupling readings are left as None at this stage; Stage 3 will wire
+    /// them so affordances (sound-coupling, attachment) accumulate on nodes.
+    pub fn tick_vision_tier0_from_frame(
+        &self,
+        frame: &crate::phot_camera::CameraFrame,
+        now_us: u64,
+    ) {
+        let mut vt = self.vision_tier0.write().unwrap();
+        let mut graph = self.perturbation_graph.write().unwrap();
+        vt.process_frame_into_graph(frame, now_us, &mut graph, None, None);
+    }
+
+    /// Phase 3 Stage 2: drive the tier-0 visual frontend from a headless
+    /// 160×120 RGB planar grid (the gateway's SensesFrame.grid). Mirrors
+    /// `tick_gaussian_field_from_net`'s 2× nearest-neighbour upsample so
+    /// vision_tier0 sees a frame at its expected CAM_W×CAM_H resolution.
+    /// Same coupling-readings caveat as the from_frame path.
+    pub fn tick_vision_tier0_from_net(&self, grid: &[f32], now_us: u64) {
+        use crate::phot_camera::{CameraFrame, CAM_H, CAM_PIX, CAM_W};
+        const SRC_W: usize = 160;
+        const SRC_H: usize = 120;
+        const SRC_PIX: usize = SRC_W * SRC_H;
+        if grid.len() < 3 * SRC_PIX {
+            return; // malformed frame — silently skip rather than panic
+        }
+        let mut frame = CameraFrame {
+            t_us: now_us,
+            luma: vec![0.0; CAM_PIX],
+            r: vec![0.0; CAM_PIX],
+            g: vec![0.0; CAM_PIX],
+            b: vec![0.0; CAM_PIX],
+        };
+        // 2× nearest-neighbour upsample matching tick_gaussian_field_from_net.
+        for ty in 0..CAM_H {
+            let sy = (ty / 2).min(SRC_H - 1);
+            for tx in 0..CAM_W {
+                let sx = (tx / 2).min(SRC_W - 1);
+                let src_i = sy * SRC_W + sx;
+                let dst_i = ty * CAM_W + tx;
+                let r = grid[src_i] as f64;
+                let g = grid[SRC_PIX + src_i] as f64;
+                let b = grid[2 * SRC_PIX + src_i] as f64;
+                frame.r[dst_i] = r;
+                frame.g[dst_i] = g;
+                frame.b[dst_i] = b;
+                frame.luma[dst_i] = (r + g + b) / 3.0;
+            }
+        }
+        let mut vt = self.vision_tier0.write().unwrap();
+        let mut graph = self.perturbation_graph.write().unwrap();
+        vt.process_frame_into_graph(&frame, now_us, &mut graph, None, None);
     }
 }
