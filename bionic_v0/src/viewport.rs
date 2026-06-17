@@ -5084,12 +5084,17 @@ impl Viewport {
         // ATTACHMENT = strongest emergent bond (most-familiar object's score).
         // PRESENCE   = whether that most-familiar object is currently active/seen.
         //   High PRESENCE + low PRESENCE next tick → prediction miss = "longing" substrate.
+        //
+        // Cutover step 3 (Phase 3): perturbation_graph contributes too. The two
+        // attachment scores (familiar_objects vs perturbation_graph) are MAXed
+        // before push, so a young body's familiar_objects bond keeps working
+        // until the graph builds up enough evidence, at which point the graph
+        // takes over. PRESENCE is OR'd across both sources for the same reason.
+        // This is the additive half of the cutover; later steps delete the
+        // familiar_objects half, leaving only the graph signal.
         let fo = self.familiar_objects.read().unwrap();
-        if let Some(most) = fo.most_familiar() {
+        let (fam_attachment, fam_present) = if let Some(most) = fo.most_familiar() {
             let attachment = most.familiarity;
-            // Presence: 1.0 if a currently-active slot's fingerprint is close enough
-            // (< MATCH_DIST) to the most-familiar object — it is "here now".
-            // Persistent miss (predicted present, actually absent) = longing substrate.
             let most_fp = most.fingerprint;
             drop(fo); // release read lock before slot reads
             let present = (0..crate::N_OBJECT_SLOTS).any(|sid| {
@@ -5105,9 +5110,36 @@ impl Viewport {
                     })
                     .unwrap_or(false)
             });
-            self.push_observation(crate::INTERO_ATTACHMENT, now_us, attachment);
-            self.push_observation(crate::INTERO_PRESENCE, now_us, if present { 1.0 } else { 0.0 });
-        }
+            (attachment, present)
+        } else {
+            drop(fo);
+            (0.0, false)
+        };
+        // perturbation_graph readings. most_bound() is the closest analog of
+        // most_familiar(): the highest-bind_strength node = the 责任人. Presence
+        // = that same node is currently in the active window (i.e. perceived
+        // this frame or very recently).
+        let (graph_attachment, graph_present) = {
+            let graph = self.perturbation_graph.read().unwrap();
+            match graph.most_bound() {
+                Some(most) => {
+                    let attachment = most.bind_strength;
+                    let present =
+                        graph.is_active(most.id, now_us) && most.bind_strength > 0.3;
+                    (attachment, present)
+                }
+                None => (0.0, false),
+            }
+        };
+        let attachment = fam_attachment.max(graph_attachment).clamp(0.0, 1.0);
+        let present = fam_present || graph_present;
+        // Always push so dual_drive's attachment input is fresh even when both
+        // sources read 0 (a cold start with no learned bond). The previous code
+        // skipped the push when fo.most_familiar() was None, leaving attachment
+        // stale; that's a latent bug worth fixing now since the graph path can
+        // also be None on a cold start.
+        self.push_observation(crate::INTERO_ATTACHMENT, now_us, attachment);
+        self.push_observation(crate::INTERO_PRESENCE, now_us, if present { 1.0 } else { 0.0 });
     }
 
     pub fn read_familiar_objects(&self) -> crate::familiar_objects::FamiliarObjectsState {
@@ -5269,11 +5301,26 @@ impl Viewport {
     pub fn tick_dual_drive(&self, _now_us: u64) {
         let vital = self.read_vital_core();
         let self_preservation = vital.self_preservation_pressure();
-        let attachment = self
+        // Cutover step 3 (Phase 3): dual_drive's attachment input now reads
+        // from BOTH familiar_objects.most_familiar() AND perturbation_graph
+        // .most_bound() — the max wins. Both sources push to INTERO_ATTACHMENT
+        // in tick_familiar_objects, so this mirrors that mixing here so the
+        // arbitrate() input is consistent with the axis observation. Once
+        // familiar_objects is deleted (step 7), the max collapses to just
+        // the graph reading with no behavioural discontinuity.
+        let fam_attachment = self
             .read_familiar_objects()
             .most_familiar()
             .map(|o| o.familiarity)
             .unwrap_or(0.0);
+        let graph_attachment = self
+            .perturbation_graph
+            .read()
+            .unwrap()
+            .most_bound()
+            .map(|n| n.bind_strength)
+            .unwrap_or(0.0);
+        let attachment = fam_attachment.max(graph_attachment).clamp(0.0, 1.0);
         let principle_floor = vital.pain.clamp(0.0, 1.0);
         let reading =
             crate::dual_drive::arbitrate(self_preservation, attachment, principle_floor);
