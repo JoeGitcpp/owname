@@ -143,3 +143,92 @@ fn language_binding_snapshot_carries_binding_traces_not_concepts() {
     assert!(observer_src.contains("bind:"));
     assert!(!observer_src.contains("concept_id"));
 }
+
+#[test]
+fn lookup_binding_returns_strongest_target_for_pattern() {
+    // Two competing traces for the SAME (kind, hash); lookup_binding must
+    // surface the stronger one. This is the "compressed direct understanding"
+    // entry point: on hearing a sound the body has paired before, find the
+    // most-evidenced target without re-running co-occurrence.
+    let mut st = LanguageBindingState::default();
+    let weak_target = BindingTargetRef::ObjectSlot { slot_id: 3 };
+    let strong_target = BindingTargetRef::ObjectSlot { slot_id: 5 };
+    st.push_trace(BindingTrace {
+        pattern_kind: PatternKind::VibModality,
+        pattern_hash: 99,
+        target: weak_target,
+        strength: BindingStrength::new(0.2),
+        status: BindingStatus::Candidate,
+        evidence_refs: vec![1],
+        reinforce_count: 1,
+        weaken_count: 0,
+        last_update_t_us: 100,
+    });
+    st.push_trace(BindingTrace {
+        pattern_kind: PatternKind::VibModality,
+        pattern_hash: 99,
+        target: strong_target,
+        strength: BindingStrength::new(0.8),
+        status: BindingStatus::Reinforced,
+        evidence_refs: vec![2, 3, 4],
+        reinforce_count: 3,
+        weaken_count: 0,
+        last_update_t_us: 200,
+    });
+    let found = st.lookup_binding(PatternKind::VibModality, 99);
+    assert_eq!(found, Some(strong_target));
+    assert_eq!(st.lookup_binding(PatternKind::VibModality, 12345), None);
+}
+
+#[test]
+fn lookup_associated_patterns_reverses_a_rendezvous_slot() {
+    // Slot 7 is the rendezvous: one VIB pattern (the sound) and one PHOT
+    // pattern (the seen action) both bind to it. Reverse-lookup recovers
+    // both — this is how a slot gives back the cross-modal hypothesis
+    // (heard sound × seen action ⇒ both → same slot ⇒ each implies the
+    // other through this lookup).
+    let mut st = LanguageBindingState::default();
+    let target = BindingTargetRef::ObjectSlot { slot_id: 7 };
+    st.push_trace(BindingTrace {
+        pattern_kind: PatternKind::VibModality,
+        pattern_hash: 0xAAA,
+        target,
+        strength: BindingStrength::new(0.5),
+        status: BindingStatus::Reinforced,
+        evidence_refs: vec![1],
+        reinforce_count: 2,
+        weaken_count: 0,
+        last_update_t_us: 100,
+    });
+    st.push_trace(BindingTrace {
+        pattern_kind: PatternKind::PhotModality,
+        pattern_hash: 0xBBB,
+        target,
+        strength: BindingStrength::new(0.5),
+        status: BindingStatus::Reinforced,
+        evidence_refs: vec![2],
+        reinforce_count: 2,
+        weaken_count: 0,
+        last_update_t_us: 100,
+    });
+    // Decoy: different slot — must not show up.
+    st.push_trace(BindingTrace {
+        pattern_kind: PatternKind::VibModality,
+        pattern_hash: 0xCCC,
+        target: BindingTargetRef::ObjectSlot { slot_id: 1 },
+        strength: BindingStrength::new(0.5),
+        status: BindingStatus::Reinforced,
+        evidence_refs: vec![3],
+        reinforce_count: 1,
+        weaken_count: 0,
+        last_update_t_us: 100,
+    });
+    let assoc = st.lookup_associated_patterns(target);
+    assert_eq!(assoc.len(), 2, "rendezvous slot must surface BOTH modalities");
+    assert!(assoc.iter().any(|(k, h, _)| *k == PatternKind::VibModality && *h == 0xAAA));
+    assert!(assoc.iter().any(|(k, h, _)| *k == PatternKind::PhotModality && *h == 0xBBB));
+    // Strengths come through.
+    for (_, _, s) in &assoc {
+        assert!((*s - 0.5).abs() < 1e-9);
+    }
+}

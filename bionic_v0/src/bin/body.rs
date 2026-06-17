@@ -292,6 +292,16 @@ fn main() {
             *vp.vocal_sequence.write().unwrap() = vs;
         }
     }
+    // Q2/3 visual impression layer: sister sidecar to vocal_sequence.bin.
+    // Persists the scene-fingerprint transition table + recent impression
+    // buffer so visual ORDER and the body's "刚刚看过的画面" buffer survive
+    // restart. Self-versioned, so loading does not bump SNAPSHOT_VERSION.
+    let phot_sequence_path = runtime_dir.join("phot_sequence.bin");
+    if let Ok(bytes) = std::fs::read(&phot_sequence_path) {
+        if let Some(ps) = bionic_v0::phot_sequence::PhotSequence::deserialize(&bytes) {
+            *vp.phot_sequence.write().unwrap() = ps;
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     // Register SIGTERM so the OS-level kill causes a graceful flush rather than
     // instant termination.  signal_flag::register atomically sets `stop` on
@@ -463,6 +473,16 @@ fn main() {
         // offline curriculum harness. All maturity-gated precision, liveness, and
         // anti-runaway (one-binding-per-pair) gates live inside the call.
         vp_binding.tick_form_binding_from_cooccurrence(t);
+        // Cross-modal AV-action grounding (companion to the VIB side above):
+        // when one slot carries co-located VIB and PHOT evidence with salient
+        // motion AND the same recent Paired pair earned the co-occurrence,
+        // form a (seen-action → object-slot) binding. Together with the VIB
+        // binding the slot becomes a rendezvous, so next time the body hears
+        // the sound it can recover the action hash via
+        // lookup_associated_patterns(slot) — "compressed direct understanding"
+        // of the AV pair on re-encounter. Per-pair idempotence runs through
+        // last_av_action_pair_consumed, independent of the VIB side.
+        vp_binding.tick_form_av_action_binding(t);
     });
 
     // Endogenous activity ticker, 10 Hz.
@@ -491,6 +511,12 @@ fn main() {
         vp_vocal.tick_vocal_drive_field(t);
         vp_vocal.tick_vocal_memory(t);
         vp_vocal.tick_vocal_sequence_boundary(t); // #8 Stage 1: decay traces + close utterances
+        // Q1c: during long enough vocal silence the persistent edge table
+        // computes its planned next-K-utterance chain so old impressions stay
+        // "actively reproduced" in the prediction system. Pure-read on the
+        // sequence; the chain length is published via atomic counters for
+        // observers / downstream consumers.
+        vp_vocal.tick_vocal_sequence_quiet_replay(t);
         // P3: hear our own voice through the same analyzer the target uses —
         // in EVERY mode. This reafference (self_vocal_bands → vocal_acoustic_*
         // distance) is the efference copy of the body's own voicing; gating it
@@ -563,6 +589,7 @@ fn main() {
         let vocal_mem_cp = runtime_dir.join("vocal_memory.bin");
         let vocal_recall_cp = runtime_dir.join("vocal_target_recall.bin");
         let vocal_seq_cp = runtime_dir.join("vocal_sequence.bin");
+        let phot_seq_cp = runtime_dir.join("phot_sequence.bin");
         let vocal_diag_cp = runtime_dir.join("vocal_diag.csv");
         spawn_ticker(vp.clone(), profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
@@ -658,6 +685,12 @@ fn main() {
                 .unwrap_or_else(|e| e.into_inner())
                 .serialize();
             bionic_v0::atomic_write_or_warn("checkpoint vocal_sequence", &vocal_seq_cp, &vs_bytes);
+            let ps_bytes = vp_checkpoint
+                .phot_sequence
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .serialize();
+            bionic_v0::atomic_write_or_warn("checkpoint phot_sequence", &phot_seq_cp, &ps_bytes);
         })
     };
 
@@ -782,6 +815,10 @@ fn main() {
     {
         let vs_bytes = vp.vocal_sequence.read().unwrap().serialize();
         bionic_v0::atomic_write_or_warn("shutdown vocal_sequence", &vocal_sequence_path, &vs_bytes);
+    }
+    {
+        let ps_bytes = vp.phot_sequence.read().unwrap().serialize();
+        bionic_v0::atomic_write_or_warn("shutdown phot_sequence", &phot_sequence_path, &ps_bytes);
     }
 
     std::process::exit(0);

@@ -190,6 +190,97 @@ fn hash_vib_contour(observed: &[f64]) -> u64 {
     }
 }
 
+/// Stable numeric fingerprint of a SEEN visual action, for cross-modal binding
+/// (AV-action: heard sound × seen action → "this sound came from that action").
+/// Folds the 4 multiscale motion RMS bands (slot.phot.observed; see phot_camera::
+/// region_to_extract) plus the slot's spatial pose (centroid + span) and the
+/// worldline velocity polar (speed magnitude + 8-way direction bucket). The bands
+/// are quantized at PHOT_ACTION_BAND_QUANT, position/span at PHOT_ACTION_POSE_QUANT,
+/// speed at PHOT_ACTION_SPEED_QUANT — coarse enough so the SAME gesture re-hashes,
+/// fine enough to distinguish gestures of different speeds/directions. FNV-1a fold,
+/// never returns 0 (0 is the "no action seen" sentinel in
+/// tick_form_av_action_binding). Mirrors hash_vib_contour for the sound side.
+pub(crate) fn hash_phot_motion_contour(
+    observed: &[f64],
+    pos_x: f64,
+    pos_y: f64,
+    span_x: f64,
+    span_y: f64,
+    velocity_x_per_s: f64,
+    velocity_y_per_s: f64,
+) -> u64 {
+    const PHOT_ACTION_BAND_QUANT: f64 = 16.0;
+    const PHOT_ACTION_POSE_QUANT: f64 = 16.0;
+    const PHOT_ACTION_SPEED_QUANT: f64 = 8.0;
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for band in observed {
+        let q = (band * PHOT_ACTION_BAND_QUANT).round().clamp(-1.0e9, 1.0e9) as i64;
+        h ^= q as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let qx = (pos_x * PHOT_ACTION_POSE_QUANT).round().clamp(-1.0e9, 1.0e9) as i64;
+    let qy = (pos_y * PHOT_ACTION_POSE_QUANT).round().clamp(-1.0e9, 1.0e9) as i64;
+    let qsx = (span_x * PHOT_ACTION_POSE_QUANT).round().clamp(-1.0e9, 1.0e9) as i64;
+    let qsy = (span_y * PHOT_ACTION_POSE_QUANT).round().clamp(-1.0e9, 1.0e9) as i64;
+    for q in [qx, qy, qsx, qsy] {
+        h ^= q as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let speed = (velocity_x_per_s * velocity_x_per_s + velocity_y_per_s * velocity_y_per_s).sqrt();
+    let q_speed = (speed * PHOT_ACTION_SPEED_QUANT).round().clamp(-1.0e9, 1.0e9) as i64;
+    h ^= q_speed as u64;
+    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    // 8-way direction bucket (only meaningful above a tiny floor; below it, 0).
+    let dir_bucket: u64 = if speed > 1.0e-6 {
+        let ang = velocity_y_per_s.atan2(velocity_x_per_s); // [-pi, pi]
+        let frac = (ang + std::f64::consts::PI) / (2.0 * std::f64::consts::PI); // [0,1)
+        ((frac * 8.0).floor() as i64).rem_euclid(8) as u64
+    } else {
+        0
+    };
+    h ^= dir_bucket;
+    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    if h == 0 {
+        1
+    } else {
+        h
+    }
+}
+
+impl LanguageBindingState {
+    /// Cross-modal lookup: given a pattern just heard/seen, find the strongest
+    /// recorded binding for it. The strength field already ranks evidence, so
+    /// "the sound that has co-occurred most often with X" wins. Returns None when
+    /// no trace exists — the body has never paired this pattern with anything.
+    pub fn lookup_binding(
+        &self,
+        pattern_kind: PatternKind,
+        pattern_hash: u64,
+    ) -> Option<BindingTargetRef> {
+        self.traces
+            .iter()
+            .filter(|t| t.pattern_kind == pattern_kind && t.pattern_hash == pattern_hash)
+            .max_by(|a, b| a.strength.value.partial_cmp(&b.strength.value).unwrap())
+            .map(|t| t.target)
+    }
+
+    /// Reverse cross-modal lookup: given an event target (e.g. an ObjectSlot the
+    /// body is currently attending), enumerate every pattern that has been bound
+    /// to it, with its modality kind, hash, and strength. Used to recover "what
+    /// sound have we heard with this seen action" given just the slot — i.e. the
+    /// production-side cross-modal hypothesis: SLOT → (sound_hash, action_hash).
+    pub fn lookup_associated_patterns(
+        &self,
+        target: BindingTargetRef,
+    ) -> Vec<(PatternKind, u64, f64)> {
+        self.traces
+            .iter()
+            .filter(|t| t.target == target)
+            .map(|t| (t.pattern_kind, t.pattern_hash, t.strength.value))
+            .collect()
+    }
+}
+
 impl crate::viewport::Viewport {
     pub fn try_form_binding_event_from_pair(
         &self,
@@ -346,6 +437,134 @@ impl crate::viewport::Viewport {
         self.try_form_binding_event_from_pair(
             PatternKind::VibModality,
             pattern_hash,
+            target,
+            write_seq,
+            window_id,
+        )
+    }
+
+    /// Cross-modal AV-action grounding: when a single ObjectSlot carries BOTH
+    /// active VIB *and* active PHOT evidence simultaneously (the live cross-modal
+    /// fusion machinery — see CROSS_MODAL_WINDOW_US / claim_slot_for_event —
+    /// already places them on one slot when a sound and a sight refer to the
+    /// same event), AND a real, recent Paired pair earned this co-occurrence,
+    /// form a symmetric (seen-action → object-slot) binding. The companion
+    /// (heard-sound → object-slot) binding is the production-side responsibility
+    /// of tick_form_binding_from_cooccurrence; this method writes the PHOT
+    /// counterpart so the slot becomes a rendezvous: both modalities' patterns
+    /// look up to the same object, and lookup_associated_patterns recovers the
+    /// other modality's hash — the "compressed direct understanding" path on
+    /// re-encounter.
+    ///
+    /// Honesty gates (parallel to tick_form_binding_from_cooccurrence):
+    ///   • No slot carrying BOTH VIB and PHOT freshness → no co-located evidence
+    ///     of a single AV event → return.
+    ///   • PHOT energy below PHOT_AV_ACTION_MIN_MOTION → no salient action seen,
+    ///     so a learned binding wouldn't generalise (every quiet frame would
+    ///     ground a vacuous "action" hash) → return.
+    ///   • No recent Paired pair within TEMPORAL_PAIR_MAX_DELAY_US → return.
+    ///   • Per-pair idempotence (last_av_action_pair_consumed): a single earned
+    ///     pair grounds AT MOST ONE AV-action binding event, mirroring the VIB
+    ///     side. No double-counting across the 5 Hz refresh.
+    pub fn tick_form_av_action_binding(&self, now_us: u64) -> bool {
+        const PHOT_AV_ACTION_MIN_MOTION: f64 = 0.05;
+
+        // Walk slots once and find one with BOTH VIB and PHOT active+fresh.
+        let mut chosen: Option<(usize, u64, u64)> = None; // (slot_id, vib_hash, phot_action_hash)
+        for sid in 0..crate::N_OBJECT_SLOTS {
+            let Some(slot) = self.read_slot(sid) else {
+                continue;
+            };
+            if !slot.active {
+                continue;
+            }
+            if now_us.saturating_sub(slot.last_update_t_us) > crate::SLOT_IDLE_US {
+                continue;
+            }
+            let has_vib = (slot.source_modality & crate::MOD_VIB) != 0;
+            let has_phot = (slot.source_modality & crate::MOD_PHOT) != 0;
+            if !(has_vib && has_phot) {
+                continue;
+            }
+            let Some(vib) = slot.vib.as_ref() else { continue };
+            let Some(phot) = slot.phot.as_ref() else { continue };
+            if phot.observed.is_empty() {
+                continue;
+            }
+            let phot_energy: f64 =
+                phot.observed.iter().sum::<f64>() / phot.observed.len() as f64;
+            if phot_energy < PHOT_AV_ACTION_MIN_MOTION {
+                continue;
+            }
+            let vib_hash = hash_vib_contour(&vib.observed);
+            if vib_hash == 0 {
+                continue;
+            }
+            let (pos_x, pos_y, span_x, span_y) = slot
+                .spatial
+                .as_ref()
+                .map(|s| (s.pos_x, s.pos_y, s.span_x, s.span_y))
+                .unwrap_or((0.5, 0.5, 0.0, 0.0));
+            let (vx, vy) = slot
+                .spatial_worldline
+                .as_ref()
+                .map(|w| (w.velocity_x_per_s, w.velocity_y_per_s))
+                .unwrap_or((0.0, 0.0));
+            let phot_hash = hash_phot_motion_contour(
+                &phot.observed,
+                pos_x,
+                pos_y,
+                span_x,
+                span_y,
+                vx,
+                vy,
+            );
+            if phot_hash == 0 {
+                continue;
+            }
+            chosen = Some((sid, vib_hash, phot_hash));
+            break;
+        }
+
+        let Some((slot_id, _vib_hash, phot_hash)) = chosen else {
+            return false;
+        };
+        let target = BindingTargetRef::ObjectSlot {
+            slot_id: slot_id as u8,
+        };
+
+        // Earned, contemporaneous evidence: latest Paired pair within the temporal
+        // window. Identical gate to tick_form_binding_from_cooccurrence so the two
+        // ticks ground on the SAME pair-class evidence (each guarded by its own
+        // idempotence atomic so neither blocks the other).
+        let (write_seq, window_id) = {
+            let ac = self.read_action_consequence();
+            match ac.pairs.iter().rev().find(|p| {
+                p.status == crate::action_consequence::ConsequencePairStatus::Paired
+                    && now_us.saturating_sub(p.pair_t_us) <= crate::TEMPORAL_PAIR_MAX_DELAY_US
+            }) {
+                Some(p) => (p.write_seq, p.window_id),
+                None => return false,
+            }
+        };
+
+        // Per-pair idempotence for the AV-action side (independent atomic from
+        // last_binding_pair_consumed so the VIB side and the PHOT side can each
+        // ground exactly once per earned pair).
+        let handle = write_seq.rotate_left(32) ^ window_id;
+        if self
+            .last_av_action_pair_consumed
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == handle
+        {
+            return false;
+        }
+        self.last_av_action_pair_consumed
+            .store(handle, std::sync::atomic::Ordering::Relaxed);
+
+        self.try_form_binding_event_from_pair(
+            PatternKind::PhotModality,
+            phot_hash,
             target,
             write_seq,
             window_id,

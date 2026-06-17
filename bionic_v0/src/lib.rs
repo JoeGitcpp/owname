@@ -320,6 +320,9 @@ pub mod phot_camera;
 // --- Phase 1 (keystone ①): sparse anisotropic Gaussian visual field ---
 pub mod phot_gaussian;
 
+// --- Visual impression / temporal-context layer (sister to vocal_sequence) ---
+pub mod phot_sequence;
+
 // --- Language binding runtime maintenance ---
 pub const BINDING_REFRESH_HZ: u32 = 5;
 /// A trace with no updates for this long is considered stale for runtime

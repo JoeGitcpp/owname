@@ -40,12 +40,30 @@ pub const SEQ_UTTERANCE_GAP_US: u64 = 300_000;
 /// developmental_maturity floor below which Stage-3 anticipation stays OFF, so a
 /// young body babbles/imitates freely (anneal-in; avoids convergence collapse).
 pub const SEQ_ANTICIPATE_MATURITY_FLOOR: f64 = 0.5;
+/// Vocal silence gap after which the quiet-period replay tick computes a
+/// rollout from `last_voiced_idx` (Q1c "old impressions actively reproduce in
+/// prediction"). 1.5 s — shorter than the average inter-utterance pause for
+/// active babble (so we don't interrupt) and longer than within-utterance
+/// gaps (so we don't fire mid-word).
+pub const SEQ_QUIET_REPLAY_GAP_US: u64 = 1_500_000;
+/// Steps of look-ahead the quiet-period replay walks via `rollout`.
+pub const SEQ_QUIET_REPLAY_STEPS: usize = 4;
 /// EMA rate for an edge's traversal count. Seeded at this value on first sight so
 /// a fresh edge is NOT 0 (avoids the 0×x bootstrap deadlock when it later biases
 /// production multiplicatively).
 const SEQ_COUNT_ALPHA: f64 = 0.2;
 /// Minimum frames per side for a meaningful DTW alignment.
 const SEQ_MIN_UTT: usize = 3;
+/// Age-protection window for evict_weakest (Q1b long-lived impression): an edge
+/// that has survived `SEQ_AGE_PROTECT_US` since its last traversal earns the
+/// full `SEQ_AGE_PROTECT_MAX_BONUS` boost to its eviction-defence score, so a
+/// rare-but-learned old edge (e.g. a sparsely-rehearsed word) is not silently
+/// squeezed out by a flurry of high-frequency new edges. 6 h ≈ a sleep/reset
+/// boundary — long enough to span sessions, short enough that genuinely cold
+/// edges still age out. The bonus saturates so very ancient edges remain
+/// evictable rather than un-killable.
+pub const SEQ_AGE_PROTECT_US: f64 = 6.0 * 3600.0 * 1_000_000.0;
+const SEQ_AGE_PROTECT_MAX_BONUS: f64 = 0.30;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SeqEdge {
@@ -115,7 +133,7 @@ impl VocalSequence {
                     e.last_t_us = now_us;
                 } else {
                     if self.edges.len() >= SEQ_EDGE_CAP {
-                        self.evict_weakest();
+                        self.evict_weakest(now_us);
                     }
                     self.edges.push(SeqEdge {
                         from,
@@ -132,16 +150,33 @@ impl VocalSequence {
         self.last_voiced_t_us = now_us;
     }
 
-    fn evict_weakest(&mut self) {
+    fn evict_weakest(&mut self, now_us: u64) {
         if let Some(min_i) = self
             .edges
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| a.count_ema.partial_cmp(&b.count_ema).unwrap())
+            .min_by(|(_, a), (_, b)| {
+                Self::eviction_defence(a, now_us)
+                    .partial_cmp(&Self::eviction_defence(b, now_us))
+                    .unwrap()
+            })
             .map(|(i, _)| i)
         {
             self.edges.swap_remove(min_i);
         }
+    }
+
+    /// Composite eviction-defence score: count_ema plus an age bonus that
+    /// saturates at `SEQ_AGE_PROTECT_MAX_BONUS` once an edge crosses
+    /// `SEQ_AGE_PROTECT_US`. This is what Q1b changes — pure count_ema would
+    /// silently squeeze out rare-but-learned old edges (think a sparsely
+    /// rehearsed word) the moment 256 high-frequency new edges arrive. The
+    /// bonus is capped so very ancient edges still age out gracefully rather
+    /// than becoming permanently un-evictable.
+    fn eviction_defence(e: &SeqEdge, now_us: u64) -> f64 {
+        let age = now_us.saturating_sub(e.last_t_us) as f64;
+        let bonus = (age / SEQ_AGE_PROTECT_US).min(1.0) * SEQ_AGE_PROTECT_MAX_BONUS;
+        e.count_ema + bonus
     }
 
     pub fn push_self(&mut self, frame: &[f64; BANDS]) {
@@ -171,6 +206,50 @@ impl VocalSequence {
             .filter(|e| e.from == from)
             .max_by(|a, b| a.count_ema.partial_cmp(&b.count_ema).unwrap())
             .map(|e| (e.to, e.dt_ema_us))
+    }
+
+    /// Multi-step rollout: walk the argmax(count_ema) chain forward up to
+    /// `k_steps` steps from `from_idx`, returning the sequence of
+    /// (successor_idx, learned inter-onset µs) pairs. This is the Q1c
+    /// long-horizon prediction surface — predict_next is single-step and good
+    /// for servo warm-start; rollout exposes the full chain so attention /
+    /// planning layers (or quiet-period replay below) can see what the body
+    /// "expects to say next" beyond one phoneme. Cycle-safe: a vertex is
+    /// followed only once, so a stable A↔B oscillation does not run forever.
+    pub fn rollout(&self, from_idx: i64, k_steps: usize) -> Vec<(u16, f64)> {
+        if from_idx < 0 || k_steps == 0 {
+            return Vec::new();
+        }
+        let mut out: Vec<(u16, f64)> = Vec::with_capacity(k_steps);
+        let mut visited: Vec<u16> = Vec::with_capacity(k_steps + 1);
+        let mut cursor = from_idx as u16;
+        visited.push(cursor);
+        for _ in 0..k_steps {
+            let next = self
+                .edges
+                .iter()
+                .filter(|e| e.from == cursor)
+                .max_by(|a, b| a.count_ema.partial_cmp(&b.count_ema).unwrap());
+            let Some(e) = next else { break };
+            if visited.contains(&e.to) {
+                break;
+            }
+            out.push((e.to, e.dt_ema_us));
+            visited.push(e.to);
+            cursor = e.to;
+        }
+        out
+    }
+
+    /// Quiet-period replay chain: the body's planned next-K utterance based on
+    /// the persistent edge table, queried from `last_voiced_idx`. Returns empty
+    /// when no cursor is known (cold start) or no edge follows the cursor.
+    /// Pure read — does not mutate the sequence (so age-protection's
+    /// `last_t_us` clock is not falsely refreshed by internal rehearsal). The
+    /// Viewport tick is what decides when this should fire (after a vocal
+    /// silence gap) and what to do with the chain.
+    pub fn quiet_replay_chain(&self, k_steps: usize) -> Vec<(u16, f64)> {
+        self.rollout(self.last_voiced_idx, k_steps)
     }
 
     /// DTW alignment fit between the buffered self utterance and target utterance,
@@ -263,17 +342,42 @@ impl VocalSequence {
     // ── Persistence ──────────────────────────────────────────────────────────
     // Sidecar vocal_sequence.bin (NOT the global snapshot): bumping SNAPSHOT_VERSION
     // would reject every existing snapshot.bin and reset the whole lineage's
-    // maturity. Mirrors vocal_target_recall.bin's self-versioned sidecar. Layout:
-    //   [4] magic b"VSEQ"  [1] version  [8] n_edges u64-le
-    //   per edge: [2] from u16, [2] to u16, [8] count_ema, [8] dt_ema_us, [8] elig,
-    //             [8] last_t_us  (= 36 bytes). Transient buffers are NOT serialized.
+    // maturity. Mirrors vocal_target_recall.bin's self-versioned sidecar.
+    //
+    // Layout v1 (legacy — edges only, still accepted):
+    //   [4] magic b"VSEQ"  [1] version=0x01  [8] n_edges u64-le
+    //   per edge: 36 bytes (see EDGE_BYTES).
+    //   Transient utterance buffers and last_voiced cursor are NOT persisted.
+    //
+    // Layout v2 (current — long-lived impression: persists the short-term DTW
+    // buffers and the recent-voicing cursor so the body resumes its acoustic
+    // impression instead of restarting it cold each session — see Q1a in the
+    // 2026-06-18 impression-memory design discussion). After the v1 edge block:
+    //   [8] last_voiced_idx_p1 u64-le (= last_voiced_idx + 1; 0 = sentinel "none")
+    //   [8] last_voiced_t_us u64-le
+    //   [8] best_seq_fit f64-le
+    //   [8] n_self_utt u64-le  (≤ SEQ_UTT_CAP)
+    //   per self frame: BANDS × 8 bytes (f64 mel band)
+    //   [8] n_target_utt u64-le  (≤ SEQ_UTT_CAP)
+    //   per target frame: BANDS × 8 bytes
     const MAGIC: [u8; 4] = *b"VSEQ";
-    const VERSION: u8 = 0x01;
+    const VERSION_V1: u8 = 0x01;
+    const VERSION: u8 = 0x02;
     const EDGE_BYTES: usize = 2 + 2 + 8 + 8 + 8 + 8;
+    const FRAME_BYTES: usize = BANDS * 8;
 
     pub fn serialize(&self) -> Vec<u8> {
         let n = self.edges.len();
-        let mut out = Vec::with_capacity(4 + 1 + 8 + n * Self::EDGE_BYTES);
+        let ns = self.self_utt.len().min(SEQ_UTT_CAP);
+        let nt = self.target_utt.len().min(SEQ_UTT_CAP);
+        let mut out = Vec::with_capacity(
+            4 + 1
+                + 8
+                + n * Self::EDGE_BYTES
+                + 8 + 8 + 8
+                + 8 + ns * Self::FRAME_BYTES
+                + 8 + nt * Self::FRAME_BYTES,
+        );
         out.extend_from_slice(&Self::MAGIC);
         out.push(Self::VERSION);
         out.extend_from_slice(&(n as u64).to_le_bytes());
@@ -285,11 +389,38 @@ impl VocalSequence {
             out.extend_from_slice(&e.elig.to_le_bytes());
             out.extend_from_slice(&e.last_t_us.to_le_bytes());
         }
+        // v2 transient block. last_voiced_idx is i64 in memory but we map -1 →
+        // 0 sentinel via "plus one" so the on-disk form stays unsigned (avoids
+        // a signed/unsigned cast hazard if the file is hand-inspected).
+        let last_voiced_idx_p1: u64 = if self.last_voiced_idx < 0 {
+            0
+        } else {
+            (self.last_voiced_idx as u64) + 1
+        };
+        out.extend_from_slice(&last_voiced_idx_p1.to_le_bytes());
+        out.extend_from_slice(&self.last_voiced_t_us.to_le_bytes());
+        out.extend_from_slice(&self.best_seq_fit.to_le_bytes());
+        out.extend_from_slice(&(ns as u64).to_le_bytes());
+        for frame in self.self_utt.iter().take(ns) {
+            for v in frame.iter() {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&(nt as u64).to_le_bytes());
+        for frame in self.target_utt.iter().take(nt) {
+            for v in frame.iter() {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
         out
     }
 
     pub fn deserialize(data: &[u8]) -> Option<Self> {
-        if data.len() < 13 || data[0..4] != Self::MAGIC || data[4] != Self::VERSION {
+        if data.len() < 13 || data[0..4] != Self::MAGIC {
+            return None;
+        }
+        let version = data[4];
+        if version != Self::VERSION_V1 && version != Self::VERSION {
             return None;
         }
         let n = (u64::from_le_bytes(data[5..13].try_into().ok()?) as usize).min(SEQ_EDGE_CAP);
@@ -320,9 +451,74 @@ impl VocalSequence {
                 last_t_us,
             });
         }
+        // v1: stop here; transient state initialises to Default sentinels.
+        if version == Self::VERSION_V1 {
+            return Some(VocalSequence {
+                edges,
+                ..Default::default()
+            });
+        }
+        // v2: strict parse of transient block. Any underrun rejects the whole
+        // file (matches the v1 behaviour of `deserialize_rejects_corrupt`: we
+        // do not know whether a short tail is a bona fide truncation or a
+        // corruption that also damaged the edges; safest to reload from
+        // Default rather than commit partial state).
+        let need_header = 8 + 8 + 8 + 8;
+        if data.len() < off + need_header {
+            return None;
+        }
+        let last_voiced_idx_p1 = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+        off += 8;
+        let last_voiced_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+        off += 8;
+        let best_seq_fit = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+        off += 8;
+        let ns_raw = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
+        off += 8;
+        if ns_raw > SEQ_UTT_CAP {
+            return None;
+        }
+        if data.len() < off + ns_raw * Self::FRAME_BYTES + 8 {
+            return None;
+        }
+        let mut self_utt: VecDeque<[f64; BANDS]> = VecDeque::with_capacity(ns_raw);
+        for _ in 0..ns_raw {
+            let mut frame = [0.0f64; BANDS];
+            for v in frame.iter_mut() {
+                *v = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+            }
+            self_utt.push_back(frame);
+        }
+        let nt_raw = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
+        off += 8;
+        if nt_raw > SEQ_UTT_CAP {
+            return None;
+        }
+        if data.len() < off + nt_raw * Self::FRAME_BYTES {
+            return None;
+        }
+        let mut target_utt: VecDeque<[f64; BANDS]> = VecDeque::with_capacity(nt_raw);
+        for _ in 0..nt_raw {
+            let mut frame = [0.0f64; BANDS];
+            for v in frame.iter_mut() {
+                *v = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+            }
+            target_utt.push_back(frame);
+        }
+        let last_voiced_idx: i64 = if last_voiced_idx_p1 == 0 {
+            -1
+        } else {
+            (last_voiced_idx_p1 - 1) as i64
+        };
         Some(VocalSequence {
             edges,
-            ..Default::default()
+            self_utt,
+            target_utt,
+            last_voiced_idx,
+            last_voiced_t_us,
+            best_seq_fit,
         })
     }
 }
@@ -370,6 +566,57 @@ mod tests {
         assert_eq!(to, 1);
         assert!(dt >= 400_000.0, "onset clock reset on stable ticks; dt={dt}");
         assert_eq!(seq.edges.len(), 1, "stable ticks must not spawn spurious edges");
+    }
+
+    #[test]
+    fn rollout_walks_argmax_chain_and_stops_on_cycle() {
+        // Build a chain 0→1→2→3 with monotonically strong counts plus a weak
+        // 1→9 distractor that must lose to 1→2 at every junction.
+        let mut seq = VocalSequence::default();
+        seq.observe_transition(0, 0);
+        seq.observe_transition(100_000, 1);
+        seq.observe_transition(200_000, 2);
+        seq.observe_transition(300_000, 3);
+        // Re-traverse to bias 0→1→2→3 heavier than any distractor we add.
+        for k in 1..5 {
+            seq.observe_transition(k * 500_000, 0);
+            seq.observe_transition(k * 500_000 + 100_000, 1);
+            seq.observe_transition(k * 500_000 + 200_000, 2);
+            seq.observe_transition(k * 500_000 + 300_000, 3);
+        }
+        // Weak distractor 1→9 (observed once).
+        seq.observe_transition(10_000_000, 1);
+        seq.observe_transition(10_100_000, 9);
+        let chain = seq.rollout(0, 4);
+        assert!(chain.len() >= 3, "should produce at least 0→1→2→3, got {chain:?}");
+        let tos: Vec<u16> = chain.iter().map(|(t, _)| *t).collect();
+        assert_eq!(&tos[..3], &[1u16, 2, 3], "argmax chain must follow heavy path");
+
+        // Cycle-safety: A→B→A would otherwise loop. Build it explicitly.
+        let mut osc = VocalSequence::default();
+        osc.observe_transition(0, 0);
+        osc.observe_transition(100_000, 1);
+        osc.observe_transition(200_000, 0); // 1→0 edge
+        osc.observe_transition(300_000, 1); // 0→1 edge again
+        let chain = osc.rollout(0, 20);
+        assert!(chain.len() < 20, "must not loop forever on a 2-cycle");
+    }
+
+    #[test]
+    fn quiet_replay_chain_uses_last_voiced_cursor() {
+        let mut seq = VocalSequence::default();
+        seq.observe_transition(0, 0);
+        seq.observe_transition(100_000, 1);
+        seq.observe_transition(200_000, 2);
+        // Cursor lives on whatever was observed last (= 2). No outgoing edge
+        // from 2 → empty chain. Set the cursor manually to a node WITH an
+        // outgoing edge and re-check.
+        let chain = seq.quiet_replay_chain(3);
+        assert!(chain.is_empty(), "node 2 has no outgoing edge → empty replay");
+        seq.last_voiced_idx = 0; // pretend we just landed on 0 in silence
+        let chain = seq.quiet_replay_chain(3);
+        assert!(!chain.is_empty(), "replay from a node with outgoing edges must yield a chain");
+        assert_eq!(chain[0].0, 1, "argmax successor of 0 is 1");
     }
 
     #[test]
@@ -422,11 +669,18 @@ mod tests {
     }
 
     #[test]
-    fn serialize_roundtrip_preserves_edges() {
+    fn serialize_roundtrip_preserves_edges_and_v2_transient_state() {
+        // v2 sidecar persists the recent-voicing cursor AND the rolling DTW
+        // buffers (Q1a long-lived impression) so a restarted body resumes its
+        // acoustic short-term memory instead of starting cold every session.
         let mut seq = VocalSequence::default();
         seq.observe_transition(1_000, 0);
         seq.observe_transition(200_000, 1);
         seq.observe_transition(400_000, 2);
+        seq.push_self(&mel_with_peak(10));
+        seq.push_self(&mel_with_peak(20));
+        seq.push_target(&mel_with_peak(15));
+        seq.best_seq_fit = 0.42;
         let back = VocalSequence::deserialize(&seq.serialize()).expect("roundtrip");
         assert_eq!(back.edges.len(), seq.edges.len());
         for (a, b) in seq.edges.iter().zip(back.edges.iter()) {
@@ -436,9 +690,40 @@ mod tests {
             assert!((a.dt_ema_us - b.dt_ema_us).abs() < 1e-12);
             assert_eq!(a.last_t_us, b.last_t_us);
         }
-        // Transient state resets on reload.
-        assert_eq!(back.last_voiced_idx, -1);
-        assert!(back.self_utt.is_empty());
+        assert_eq!(back.last_voiced_idx, 2);
+        assert_eq!(back.last_voiced_t_us, 400_000);
+        assert!((back.best_seq_fit - 0.42).abs() < 1e-12);
+        assert_eq!(back.self_utt.len(), 2);
+        assert_eq!(back.target_utt.len(), 1);
+        // Mel frames survive intact bit-for-bit (BANDS f64s × 3 frames here).
+        for (a, b) in seq.self_utt.iter().zip(back.self_utt.iter()) {
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert!((x - y).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn deserialize_accepts_legacy_v1_with_empty_transient_state() {
+        // Bodies persisted under v1 (edges-only) must still load — bumping
+        // the sidecar version cannot reset existing lineages. The transient
+        // buffers come back empty (which IS the v1 semantic: it did not record
+        // them); the edges are preserved.
+        let mut seq = VocalSequence::default();
+        seq.observe_transition(0, 0);
+        seq.observe_transition(100_000, 1);
+        // Hand-craft a v1 blob with the same edges by capturing the v2 output
+        // up to the edge tail and pinning the version byte to 0x01.
+        let v2 = seq.serialize();
+        let n_edges = seq.edges.len();
+        let edge_tail = 13 + n_edges * VocalSequence::EDGE_BYTES;
+        let mut v1 = v2[..edge_tail].to_vec();
+        v1[4] = VocalSequence::VERSION_V1;
+        let back = VocalSequence::deserialize(&v1).expect("v1 still loads");
+        assert_eq!(back.edges.len(), seq.edges.len());
+        assert_eq!(back.last_voiced_idx, -1, "v1 has no cursor");
+        assert!(back.self_utt.is_empty(), "v1 has no transient buffer");
+        assert!(back.target_utt.is_empty(), "v1 has no transient buffer");
     }
 
     #[test]
@@ -453,6 +738,76 @@ mod tests {
         // Empty (header-only) round-trips to empty.
         let empty = VocalSequence::deserialize(&VocalSequence::default().serialize());
         assert!(empty.map(|s| s.edges.is_empty()).unwrap_or(false));
+    }
+
+    #[test]
+    fn rare_old_edge_survives_eviction_under_age_protection() {
+        // The shape of the Q1b protection bug pre-fix: 256 cap fills with
+        // high-frequency new edges, a rare-but-learned old edge gets squeezed
+        // out by pure count_ema sorting. With age-protection it survives,
+        // because the bonus offsets its lower count_ema.
+        let mut seq = VocalSequence::default();
+        let now_us = SEQ_AGE_PROTECT_US as u64 + 1_000_000; // fully past the bonus window
+        for i in 0..SEQ_EDGE_CAP {
+            seq.edges.push(SeqEdge {
+                from: i as u16,
+                to: (i + 1) as u16,
+                count_ema: 0.50,
+                dt_ema_us: 100_000.0,
+                elig: 1.0,
+                last_t_us: now_us, // fresh — earns NO age bonus
+            });
+        }
+        // Inject a rare old edge at t=0; count_ema=0.25 (one exposure) but age
+        // is fully past SEQ_AGE_PROTECT_US so it earns the full +0.30 bonus.
+        // Effective defence: 0.25 + 0.30 = 0.55, beats the fresh 0.50 cohort.
+        seq.edges.push(SeqEdge {
+            from: 10_000,
+            to: 10_001,
+            count_ema: 0.25,
+            dt_ema_us: 100_000.0,
+            elig: 0.0,
+            last_t_us: 0,
+        });
+        seq.evict_weakest(now_us);
+        assert!(
+            seq.edges.iter().any(|e| e.from == 10_000 && e.to == 10_001),
+            "rare old edge must survive — age bonus offsets the count_ema gap"
+        );
+        // And the edge we DID evict came from the fresh cohort, not the old one.
+        assert_eq!(seq.edges.len(), SEQ_EDGE_CAP);
+    }
+
+    #[test]
+    fn very_weak_old_edge_still_evictable() {
+        // The age bonus saturates at SEQ_AGE_PROTECT_MAX_BONUS (0.30) — a truly
+        // cold edge with count_ema near zero cannot become un-killable. This
+        // protects against the opposite failure mode: lifelong ghost edges.
+        let mut seq = VocalSequence::default();
+        let now_us = SEQ_AGE_PROTECT_US as u64 * 1_000; // very far past
+        for i in 0..SEQ_EDGE_CAP {
+            seq.edges.push(SeqEdge {
+                from: i as u16,
+                to: (i + 1) as u16,
+                count_ema: 0.50,
+                dt_ema_us: 100_000.0,
+                elig: 1.0,
+                last_t_us: now_us,
+            });
+        }
+        seq.edges.push(SeqEdge {
+            from: 10_000,
+            to: 10_001,
+            count_ema: 0.05, // near zero
+            dt_ema_us: 100_000.0,
+            elig: 0.0,
+            last_t_us: 0,
+        });
+        seq.evict_weakest(now_us);
+        assert!(
+            !seq.edges.iter().any(|e| e.from == 10_000 && e.to == 10_001),
+            "ghost edge with 0.05 + 0.30 = 0.35 < 0.50 must still be evictable"
+        );
     }
 
     #[test]

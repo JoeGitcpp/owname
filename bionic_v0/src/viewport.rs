@@ -1418,6 +1418,13 @@ pub struct Viewport {
     /// scalars mirrored onto GAUSS_RECON_MSE_AXIS / GAUSS_ACTIVE_FRAC_AXIS so
     /// they are predicted, produce err, and enter the relation/tower fabric.
     pub gaussian_field: RwLock<crate::phot_gaussian::GaussianField>,
+    /// Visual impression layer (Q2/3 of the 2026-06-18 design pass) — the
+    /// symmetric counterpart to `vocal_sequence`. Holds the rolling scene-
+    /// fingerprint buffer ("刚刚看到的画面留有印象") and the long-term
+    /// transition edges between scene-shape nodes. Refreshed after every
+    /// successful `tick_gaussian_field` by computing the active-set
+    /// fingerprint and feeding it to `PhotSequence::observe_scene`.
+    pub phot_sequence: RwLock<crate::phot_sequence::PhotSequence>,
 
     // ── Developmental precision schedule (2026-06-06) ────────────────────────
     /// Developmental clock m∈[0,1]. 0 = naive newborn (loosest precision),
@@ -1445,6 +1452,24 @@ pub struct Viewport {
     /// even though the 5 Hz tick re-finds it while the stimulus persists. Inits to
     /// u64::MAX (no pair consumed yet). Runtime-only (not persisted).
     pub last_binding_pair_consumed: AtomicU64,
+    /// Companion idempotence cursor for cross-modal AV-action grounding
+    /// (tick_form_av_action_binding). Independent from last_binding_pair_consumed
+    /// so the VIB side (sound→slot) and the PHOT side (seen-action→slot) can each
+    /// ground exactly ONE binding per earned Paired pair without blocking each
+    /// other. Same handle encoding. Inits to u64::MAX. Runtime-only.
+    pub last_av_action_pair_consumed: AtomicU64,
+    /// Q1c observation surface for vocal_sequence quiet-period replay (the
+    /// "old impressions actively reproduce in prediction" path): increments
+    /// each time `tick_vocal_sequence_quiet_replay` actually computes a chain
+    /// (silence gate satisfied, cursor known, edge available). Runtime-only.
+    pub last_quiet_replay_count: AtomicU64,
+    /// Wall-time of the most recent quiet-replay fire (µs since clock zero),
+    /// 0 = never fired this session. Runtime-only.
+    pub last_quiet_replay_t_us: AtomicU64,
+    /// Length of the most recently computed quiet-replay chain (0 if the
+    /// cursor had no outgoing edge). Lets observers verify that the rollout
+    /// is producing meaningful chains rather than empty hooks. Runtime-only.
+    pub last_quiet_replay_chain_len: AtomicU64,
     /// Rate-limit cursor for vocal self-play closures (see
     /// VOCAL_SELF_PLAY_MIN_INTERVAL_US).
     pub last_self_play_t_us: AtomicU64,
@@ -1570,10 +1595,15 @@ impl Viewport {
             audio_raw: Arc::new(AudioRawBuffer::new()),
             efference_copy: RwLock::new(EfferenceCopyState::default()),
             gaussian_field: RwLock::new(crate::phot_gaussian::GaussianField::new()),
+            phot_sequence: RwLock::new(crate::phot_sequence::PhotSequence::default()),
             developmental_maturity: RwLock::new(0.0),
             last_maturity_advance_us: AtomicU64::new(0),
             last_efficacy_advance_us: AtomicU64::new(0),
             last_binding_pair_consumed: AtomicU64::new(u64::MAX),
+            last_av_action_pair_consumed: AtomicU64::new(u64::MAX),
+            last_quiet_replay_count: AtomicU64::new(0),
+            last_quiet_replay_t_us: AtomicU64::new(0),
+            last_quiet_replay_chain_len: AtomicU64::new(0),
             last_self_play_t_us: AtomicU64::new(0),
             last_imitation_closure_t_us: AtomicU64::new(0),
             phoneme_memory: RwLock::new(crate::phoneme_memory::PhonemeMemory::new()),
@@ -5083,6 +5113,44 @@ impl Viewport {
         }
     }
 
+    /// Q1c quiet-period replay: during a long enough vocal silence the body
+    /// rehearses the most-likely next utterance from its persistent edge table
+    /// — the operational form of "old impressions actively reproduce in
+    /// prediction". Pure read on `vocal_sequence`: it computes a multi-step
+    /// rollout from `last_voiced_idx` but does NOT mutate the edge table (no
+    /// false refresh of `last_t_us`, so the age-protection clock from Q1b
+    /// stays honest). The chain is published via three atomic observation
+    /// counters so downstream consumers (servo planning, attention, observer
+    /// dashboards) can subscribe; the actual chain-to-action wiring is left
+    /// as an explicit next integration step. Gated on
+    /// `SEQ_QUIET_REPLAY_GAP_US` of silence so it never interrupts active
+    /// babble, and on a known `last_voiced_idx` so a cold body doesn't
+    /// rehearse from nothing.
+    pub fn tick_vocal_sequence_quiet_replay(&self, now_us: u64) -> bool {
+        let last_voice = self.last_vocal_output_t_us.load(Ordering::Relaxed);
+        if last_voice == 0
+            || now_us.saturating_sub(last_voice)
+                < crate::vocal_sequence::SEQ_QUIET_REPLAY_GAP_US
+        {
+            return false;
+        }
+        let seq = self.vocal_sequence.read().unwrap();
+        if seq.last_voiced_idx < 0 {
+            return false;
+        }
+        let chain = seq.quiet_replay_chain(crate::vocal_sequence::SEQ_QUIET_REPLAY_STEPS);
+        drop(seq);
+        if chain.is_empty() {
+            return false;
+        }
+        self.last_quiet_replay_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.last_quiet_replay_t_us.store(now_us, Ordering::Relaxed);
+        self.last_quiet_replay_chain_len
+            .store(chain.len() as u64, Ordering::Relaxed);
+        true
+    }
+
     /// C1: drive the vital core. The reserve is shaped by TWO things:
     ///  - the SIMULATED metabolic world (`vital_env`): a circadian supply that
     ///    makes reserve breathe, plus periodic famines that push it toward the
@@ -5339,10 +5407,21 @@ impl Viewport {
             field.update_depth(tt);
             mse
         };
-        let active_frac = {
+        let (active_frac, scene_fp) = {
             let field = self.gaussian_field.read().unwrap();
-            field.active_count() as f64 / crate::phot_gaussian::GAUSS_CAP as f64
+            (
+                field.active_count() as f64 / crate::phot_gaussian::GAUSS_CAP as f64,
+                crate::phot_sequence::scene_fingerprint(&field),
+            )
         };
+        // Visual impression layer (Q2/3): refresh the scene-fingerprint buffer
+        // and let the persistent edge table learn any transition that just
+        // happened. Sentinel-safe (a fingerprint of 0 = empty scene, ignored
+        // by observe_scene), so a dark frame doesn't poison the impression.
+        self.phot_sequence
+            .write()
+            .unwrap()
+            .observe_scene(now_us, scene_fp);
         self.push_observation(crate::GAUSS_RECON_MSE_AXIS,   now_us, mse.clamp(0.0, 1.0));
         self.push_observation(crate::GAUSS_ACTIVE_FRAC_AXIS, now_us, active_frac.clamp(0.0, 1.0));
     }
@@ -5350,6 +5429,14 @@ impl Viewport {
     /// Read a snapshot clone of the Gaussian field state (for observers / tests).
     pub fn read_gaussian_field(&self) -> crate::phot_gaussian::GaussianField {
         self.gaussian_field.read().unwrap().clone()
+    }
+
+    /// Per-vocal-tick-style maintenance for the visual impression layer:
+    /// decay the per-edge eligibility trace by wall time, mirroring
+    /// `tick_vocal_sequence_boundary` on the acoustic side. Cheap; safe to
+    /// call from the same 30 Hz visual ticker as `tick_gaussian_field`.
+    pub fn tick_phot_sequence_boundary(&self, now_us: u64) {
+        self.phot_sequence.write().unwrap().decay_eligibility(now_us);
     }
 
     /// Feed a browser-side 32×24 luma grid (headless / NetSensesAdapter) into
@@ -5383,10 +5470,18 @@ impl Viewport {
             field.update_depth(tt);
             mse
         };
-        let active_frac = {
+        let (active_frac, scene_fp) = {
             let field = self.gaussian_field.read().unwrap();
-            field.active_count() as f64 / GAUSS_CAP as f64
+            (
+                field.active_count() as f64 / GAUSS_CAP as f64,
+                crate::phot_sequence::scene_fingerprint(&field),
+            )
         };
+        // Visual impression layer (Q2/3) — same hook as the real-camera path.
+        self.phot_sequence
+            .write()
+            .unwrap()
+            .observe_scene(now_us, scene_fp);
         self.push_observation(crate::GAUSS_RECON_MSE_AXIS,   now_us, mse.clamp(0.0, 1.0));
         self.push_observation(crate::GAUSS_ACTIVE_FRAC_AXIS, now_us, active_frac.clamp(0.0, 1.0));
     }

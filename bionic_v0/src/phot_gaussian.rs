@@ -119,6 +119,11 @@ pub struct Gaussian {
     /// μx at the previous depth tick — lets each primitive measure its OWN
     /// image-space displacement Δμx (the parallax observation).
     pub prev_mu_x: f64,
+    /// Monotonic identity stamp minted at birth from `GaussianField::next_stable_id`.
+    /// Lets the impression layer (`phot_sequence`) tell apart "the same primitive
+    /// the body has been tracking across frames" from "a new birth that happens
+    /// to land in a recycled slot". Zero is the sentinel for "never born".
+    pub stable_id: u64,
 }
 
 impl Default for Gaussian {
@@ -134,6 +139,7 @@ impl Default for Gaussian {
             inv_depth: 1.0,
             depth_observable: false,
             prev_mu_x: 0.5,
+            stable_id: 0,
         }
     }
 }
@@ -147,6 +153,13 @@ pub struct GaussianField {
     /// field learns a stable scene. This is the signal ⑤'s encoder probe reads.
     pub recon_mse: f64,
     pub n_updates: u64,
+    /// Monotonic identity counter — minted at every birth into a Gaussian's
+    /// `stable_id`. Lives outside the primitives so a death+rebirth into the
+    /// same slot does not collide on identity; an across-frame observer (the
+    /// `phot_sequence` impression layer) needs this to know whether the active
+    /// set just changed composition or merely shuffled. Starts at 1 so 0 stays
+    /// reserved as the "never born" sentinel on Default Gaussians.
+    pub next_stable_id: u64,
 }
 
 impl Default for GaussianField {
@@ -155,6 +168,7 @@ impl Default for GaussianField {
             gaussians: vec![Gaussian::default(); GAUSS_CAP],
             recon_mse: 0.0,
             n_updates: 0,
+            next_stable_id: 1,
         }
     }
 }
@@ -402,6 +416,8 @@ impl GaussianField {
             let Some(slot) = self.gaussians.iter().position(|g| !g.active) else {
                 break; // pool full → sparsity bound holds, stop all births
             };
+            let stable_id = self.next_stable_id;
+            self.next_stable_id = self.next_stable_id.wrapping_add(1).max(1);
             self.gaussians[slot] = Gaussian {
                 mu_x: bx,
                 mu_y: by,
@@ -417,6 +433,7 @@ impl GaussianField {
                 inv_depth: 1.0,
                 depth_observable: false,
                 prev_mu_x: bx,
+                stable_id,
             };
         }
     }
