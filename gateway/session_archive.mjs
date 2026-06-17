@@ -11,7 +11,14 @@ import { join } from 'node:path'
 
 // Diagnostics worth keeping. Deliberately excludes snapshot.bin / learned_bias.bin
 // / familiar_objects.bin etc. — those are large and/or personal.
-const DIAG_FILES = ['vocal_diag.csv']
+//
+// perturbation_graph.bin is small (~1–20 KB even after a long session) AND its
+// node signatures are tier-0 statistics (HSV / gradient histogram / motion)
+// rather than recoverable images — so it's safe to retain for after-the-fact
+// inspection of "did anything visual form?" on a per-call basis. Anonymous
+// sessions don't go through PERSONAL_FILES, so this is the only chance to
+// inspect their visual cognition.
+const DIAG_FILES = ['vocal_diag.csv', 'perturbation_graph.bin']
 
 /**
  * Copy retained diagnostics from runtimeDir → archiveDir/<sessionId>/, plus a

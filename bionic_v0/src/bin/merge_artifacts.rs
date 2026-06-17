@@ -22,6 +22,7 @@ use bionic_v0::phoneme_memory::PhonemeMemory;
 use bionic_v0::vocal_memory::VocalMemoryState;
 use bionic_v0::vocal_target_recall::VocalTargetRecall;
 use bionic_v0::vocal_sequence::VocalSequence;
+use bionic_v0::perturbation_graph::PerturbationGraph;
 
 fn pool_files(pool_dir: &Path, suffix: &str) -> Vec<PathBuf> {
     let mut v = Vec::new();
@@ -133,6 +134,39 @@ fn merge_sequence(master_dir: &Path, pool_dir: &Path) -> usize {
     n
 }
 
+// Phase 3: the tier-0 perturbation graph. Same pool→merge path as the vocal
+// sequence layer: the mainline harvests `perturbation_graph.bin` to the pool,
+// and here it is MERGED (union nodes by signature distance, blend matched
+// stats, remap edges across lineages — PerturbationGraph::merge) into
+// `master_perturbation_graph.bin`. Visitor branches' patches accumulate into
+// the master graph instead of being clobbered each harvest.
+//
+// merge_dist 0.25 is slightly tighter than vision_tier0's TIER0_SIG_MATCH_DIST
+// (0.30): cross-lineage merge should err on the side of treating two close
+// signatures as the SAME node (since they came from the same world), but tight
+// enough to keep visually-distinct patches separate.
+fn merge_perturbation_graph(master_dir: &Path, pool_dir: &Path) -> usize {
+    let master_path = master_dir.join("master_perturbation_graph.bin");
+    let mut master = fs::read(&master_path)
+        .ok()
+        .and_then(|b| PerturbationGraph::deserialize(&b))
+        .unwrap_or_default();
+    let mut n = 0;
+    for f in pool_files(pool_dir, "__perturbation_graph.bin") {
+        if let Some(branch) = fs::read(&f).ok().and_then(|b| PerturbationGraph::deserialize(&b)) {
+            master.merge(&branch, 0.25);
+            n += 1;
+        }
+        let _ = fs::remove_file(&f);
+    }
+    if n > 0 {
+        if let Err(e) = bionic_v0::atomic_write(&master_path, &master.serialize()) {
+            eprintln!("merge_artifacts: write {master_path:?} failed: {e}");
+        }
+    }
+    n
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -150,7 +184,8 @@ fn main() {
     let vmem = merge_vocal_memory(master_dir, pool_dir);
     let phon = merge_phoneme(master_dir, pool_dir);
     let seq = merge_sequence(master_dir, pool_dir);
+    let pg = merge_perturbation_graph(master_dir, pool_dir);
     println!(
-        "merge_artifacts: recall={recall} vocal_memory={vmem} phoneme={phon} sequence={seq} (pooled branch artifacts merged into mainline)"
+        "merge_artifacts: recall={recall} vocal_memory={vmem} phoneme={phon} sequence={seq} perturbation_graph={pg} (pooled branch artifacts merged into mainline)"
     );
 }

@@ -428,13 +428,20 @@ const MASTER_ARTIFACTS = [
   // master here and harvested via the pool below, so order accumulates across
   // restarts/branches into the lineage instead of living only in /tmp.
   ['vocal_sequence.bin',  MASTER_DIR ? join(MASTER_DIR, 'master_vocal_sequence.bin') : null],
+  // Phase 3 perturbation_graph: tier-0 visual node-edge graph (the eventual
+  // replacement for SLOT_COUNT=8). Treated as SHARED skill — world-knowledge
+  // patches accumulate across nursery + every visitor call into the lineage
+  // via the POOL_PROTOTYPES → merge_artifacts merge path. Visitor branches
+  // CONTRIBUTE; merge_artifacts.rs::merge_perturbation_graph is the single
+  // writer of master_perturbation_graph.bin.
+  ['perturbation_graph.bin', MASTER_DIR ? join(MASTER_DIR, 'master_perturbation_graph.bin') : null],
 ]
 
 // Prototype skills go through the POOL so merge_artifacts (the single writer of
 // master_*prototype.bin) MERGES the mainline's + visitors' contributions instead
 // of the mainline clobbering them every harvest (the audit's #1: the old
 // copyFileSync made the whole branch→pool→mainline pipeline a steady-state no-op).
-const POOL_PROTOTYPES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin', 'vocal_sequence.bin']
+const POOL_PROTOTYPES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin', 'vocal_sequence.bin', 'perturbation_graph.bin']
 // These the mainline writes directly to master (not merged by anyone else → no
 // clobber). learned_bias is special-cased below to ZERO maturity.
 const DIRECT_TO_MASTER = MASTER_ARTIFACTS.filter(([n]) => !POOL_PROTOTYPES.includes(n) && n !== 'learned_bias.bin')

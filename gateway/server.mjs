@@ -188,11 +188,17 @@ const MAINLINE_VOCAL_FILES = [
   // edges) so anticipation starts from accumulated sequence knowledge. Calls
   // read it; they don't harvest it back (only the nursery does) → no clobber.
   'vocal_sequence.bin',
+  // Phase 3: seed visitor calls with the mainline's tier-0 perturbation
+  // graph (visual node + edge state) so the body doesn't re-discover the
+  // shared world on every call. Visitor branches DO contribute back —
+  // perturbation_graph.bin is in MAINLINE_HARVEST_FILES below so each call's
+  // new patches reach master via pool → merge_artifacts merge.
+  'perturbation_graph.bin',
 ]
 // Prototype vocal artifacts harvested branch→pool→mainline by structure-aware
 // MERGE (merge_artifacts). snapshot is seed-only (not merged back). learned_bias
 // is harvested separately via collect_to_pool + EMA merge_pool.
-const MAINLINE_HARVEST_FILES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin']
+const MAINLINE_HARVEST_FILES = ['vocal_target_recall.bin', 'vocal_memory.bin', 'phoneme_memory.bin', 'perturbation_graph.bin']
 // Rust tool that merges pooled branch artifacts into master_<name>.bin. Default
 // to the body binary's own directory — deploy copies both bins side-by-side
 // (server: /home/joe/aborn/{body,merge_artifacts}; local: target/release/*) —
