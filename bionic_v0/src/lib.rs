@@ -64,6 +64,7 @@ pub mod vocal_synthesis;
 pub mod vocal_target;
 pub mod vocal_target_recall;
 pub mod vocal_sequence;
+pub mod perturbation_graph;
 pub mod phoneme_memory;
 pub mod vpc;
 pub mod vpc_cross_layer;

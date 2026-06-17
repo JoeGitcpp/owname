@@ -302,6 +302,18 @@ fn main() {
             *vp.phot_sequence.write().unwrap() = ps;
         }
     }
+    // Phase 3 perturbation_graph: load the sparse tier-0 perturbation graph
+    // sidecar so the live-neuron node/edge state accumulates across sessions.
+    // Self-versioned (PGRA magic), so loading never bumps SNAPSHOT_VERSION.
+    // Stage 0 wiring: persistence only — no tick driver, no consumers yet.
+    let perturbation_graph_path = runtime_dir.join("perturbation_graph.bin");
+    if let Ok(bytes) = std::fs::read(&perturbation_graph_path) {
+        if let Some(pg) =
+            bionic_v0::perturbation_graph::PerturbationGraph::deserialize(&bytes)
+        {
+            *vp.perturbation_graph.write().unwrap() = pg;
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     // Register SIGTERM so the OS-level kill causes a graceful flush rather than
     // instant termination.  signal_flag::register atomically sets `stop` on
@@ -590,6 +602,7 @@ fn main() {
         let vocal_recall_cp = runtime_dir.join("vocal_target_recall.bin");
         let vocal_seq_cp = runtime_dir.join("vocal_sequence.bin");
         let phot_seq_cp = runtime_dir.join("phot_sequence.bin");
+        let perturbation_graph_cp = runtime_dir.join("perturbation_graph.bin");
         let vocal_diag_cp = runtime_dir.join("vocal_diag.csv");
         spawn_ticker(vp.clone(), profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
@@ -691,6 +704,19 @@ fn main() {
                 .unwrap_or_else(|e| e.into_inner())
                 .serialize();
             bionic_v0::atomic_write_or_warn("checkpoint phot_sequence", &phot_seq_cp, &ps_bytes);
+            // Phase 3 perturbation_graph Stage 0: persist the (currently empty
+            // until Stage 1 wires the visual frontend) sparse tier-0 graph so
+            // the lifetime node/edge accumulation survives restart.
+            let pg_bytes = vp_checkpoint
+                .perturbation_graph
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .serialize();
+            bionic_v0::atomic_write_or_warn(
+                "checkpoint perturbation_graph",
+                &perturbation_graph_cp,
+                &pg_bytes,
+            );
         })
     };
 
@@ -819,6 +845,18 @@ fn main() {
     {
         let ps_bytes = vp.phot_sequence.read().unwrap().serialize();
         bionic_v0::atomic_write_or_warn("shutdown phot_sequence", &phot_sequence_path, &ps_bytes);
+    }
+    // Phase 3 perturbation_graph Stage 0 shutdown checkpoint. Stage 0 just
+    // proves the pipe is alive (the graph is still empty until Stage 1 plugs
+    // in the new visual frontend); this write means the next boot will
+    // round-trip through deserialize(), surfacing any layout bugs early.
+    {
+        let pg_bytes = vp.perturbation_graph.read().unwrap().serialize();
+        bionic_v0::atomic_write_or_warn(
+            "shutdown perturbation_graph",
+            &perturbation_graph_path,
+            &pg_bytes,
+        );
     }
 
     std::process::exit(0);

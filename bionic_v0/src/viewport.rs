@@ -1344,6 +1344,14 @@ pub struct Viewport {
     pub vocal_target_recall: RwLock<crate::vocal_target_recall::VocalTargetRecall>,
     /// #8 sequence layer: transition edges over recall entries + utterance-DTW fit.
     pub vocal_sequence: RwLock<crate::vocal_sequence::VocalSequence>,
+    /// Phase 3 (2026-06-18): tier-0 perturbation graph — replaces the SLOT_COUNT=8
+    /// categorical-object architecture with a sparse, capacity-soft node-edge
+    /// graph. Affordances emerge from marginal statistics; nodes are continuously
+    /// updated while active (live-neuron semantics). Stage 0 wiring: persistence
+    /// pipe only — no tick driver, no consumers yet (the slot stack still owns
+    /// perception). See perturbation_graph.rs for the rollout plan.
+    pub perturbation_graph:
+        RwLock<crate::perturbation_graph::PerturbationGraph>,
     /// Which recall entry the servo is currently tracking (-1 = none/novel).
     /// A change signals a target (re)presentation → warm-start; →none → reset.
     pub last_recall_idx: AtomicI64,
@@ -1575,6 +1583,9 @@ impl Viewport {
                 crate::vocal_target_recall::VocalTargetRecall::default(),
             ),
             vocal_sequence: RwLock::new(crate::vocal_sequence::VocalSequence::default()),
+            perturbation_graph: RwLock::new(
+                crate::perturbation_graph::PerturbationGraph::default(),
+            ),
             last_recall_idx: AtomicI64::new(-1),
             vocal_diag: RwLock::new(VocalLoopDiag::default()),
             familiar_objects: RwLock::new(
