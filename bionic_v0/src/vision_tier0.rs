@@ -240,7 +240,14 @@ impl VisionTier0 {
                         // typical size) accumulate on the right node.
                         let m = p.motion_mag_mean;
                         n.motion_var = 0.9 * n.motion_var + 0.1 * (m * m);
-                        n.size_ema = 0.9 * n.size_ema + 0.1 * (p.pixel_count as f64);
+                        // Cap size_ema at CAM_PIX (the entire frame) so a
+                        // central anchor patch can't grow without bound and
+                        // become a "vacuum node" that swallows every frame's
+                        // center region — the first post-Phase-A diagnostic
+                        // found id=5 with size_ema=16735, well above any
+                        // single real patch.
+                        let new_size = 0.9 * n.size_ema + 0.1 * (p.pixel_count as f64);
+                        n.size_ema = new_size.min(CAM_PIX as f64);
                         // persistence rises every time this node is refreshed
                         // and decays elsewhere (caller's decay tick — Stage 2).
                         n.persistence_ema =
@@ -253,7 +260,7 @@ impl VisionTier0 {
                     let new_id = graph.add_node(now_us, p.sig);
                     if let Some(n) = graph.node_mut(new_id) {
                         n.motion_var = p.motion_mag_mean * p.motion_mag_mean;
-                        n.size_ema = p.pixel_count as f64;
+                        n.size_ema = (p.pixel_count as f64).min(CAM_PIX as f64);
                         n.persistence_ema = 0.1;
                     }
                     new_id
@@ -271,6 +278,39 @@ impl VisionTier0 {
             for j in (i + 1)..active.len() {
                 graph.observe_edge(now_us, active[i], active[j], EdgeKind::Cooccur);
                 graph.observe_edge(now_us, active[j], active[i], EdgeKind::Cooccur);
+            }
+        }
+        // ALSO promote the SAME co-occurrence into the first-class Relation
+        // layer for the TOP K most-bound active patches this frame. The first
+        // post-Phase-A diagnostic showed zero visual relations (and therefore
+        // zero context drift into the Cooccur primitive RelationKind) because
+        // vision_tier0 was only emitting low-level edges. Capping to the top
+        // K=8 active patches keeps the per-frame cost bounded at K(K-1)=56
+        // observe_relation calls while still giving the high-bind patches a
+        // path into the relation substrate that downstream FastPath /
+        // RelationKind / mark queries actually walk.
+        const TIER0_TOP_K_RELATIONS: usize = 8;
+        let mut top_active: Vec<(NodeId, f64)> = active
+            .iter()
+            .filter_map(|&nid| {
+                graph
+                    .node(nid)
+                    .map(|n| (nid, n.bind_strength * (1.0 + n.persistence_ema)))
+            })
+            .collect();
+        top_active.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        top_active.truncate(TIER0_TOP_K_RELATIONS);
+        for i in 0..top_active.len() {
+            for j in 0..top_active.len() {
+                if i == j {
+                    continue;
+                }
+                graph.observe_relation(
+                    now_us,
+                    crate::perturbation_graph::Endpoint::Node(top_active[i].0),
+                    crate::perturbation_graph::Endpoint::Node(top_active[j].0),
+                    EdgeKind::Cooccur,
+                );
             }
         }
         // Phase A2: form / refresh region-local NodeGroups from the active set.

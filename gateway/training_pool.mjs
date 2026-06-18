@@ -23,7 +23,12 @@ import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, readd
 import { join } from 'node:path'
 
 // ── Evaluation thresholds ─────────────────────────────────────────────────────
-const MIN_SESSION_SECS  = 5 * 60          // 5 minutes minimum
+// 4-minute floor — a fresh visitor's first call is typically 3-5 min and the
+// post-Phase-A substrate (groups + vocal profiles + relations) populates
+// meaningfully by ~3 min. The earlier 5-min floor was rejecting calls where
+// developmental_maturity climbed past 0.85 with 1800+ closures — clearly
+// the body learned, but the gate threw the data away.
+const MIN_SESSION_SECS  = 4 * 60
 const MIN_RECOG         = 20              // object recognition events
 const DELTA_THRESHOLD   = 0.005          // minimum meaningful bias change
 const VOCAL_EFF_MIN     = 0.01           // vocal_efficacy must have grown past default

@@ -1078,7 +1078,12 @@ impl PerturbationGraph {
 
     /// Idempotent maintenance: decay member weights that have not been
     /// refreshed for GROUP_MEMBER_DECAY_US, prune the ones that fall below
-    /// the floor, and recompute each group's bind_strength. Safe to call
+    /// the floor, recompute each group's bind_strength, AND drop groups that
+    /// have been left with zero members. The drop step is what stops
+    /// TemporalWindow / Spatial groups from accumulating as empty husks once
+    /// their cohort moves on — the diagnostic on the first post-Phase-A real
+    /// call showed 87% of groups carried 0 members because their members
+    /// decayed out without the group itself ever being evicted. Safe to call
     /// every tick.
     pub fn decay_group_members(&mut self, now_us: u64) {
         let nodes_snapshot = &self.nodes; // immutable borrow for compute
@@ -1092,6 +1097,13 @@ impl PerturbationGraph {
             g.members.retain(|m| m.weight > GROUP_MEMBER_PRUNE_TH);
             g.bind_strength = Self::compute_group_bind_strength(&g.members, nodes_snapshot);
         }
+        // Drop empty husks. Age-protect briefly so a just-formed group has a
+        // chance to bind a second cohort even if the first one was sparse.
+        const GROUP_EMPTY_GRACE_US: u64 = 5_000_000;
+        self.groups.retain(|g| {
+            !g.members.is_empty()
+                || now_us.saturating_sub(g.formed_t_us) < GROUP_EMPTY_GRACE_US
+        });
     }
 
     /// Weighted mean of member bind_strengths, weighted by membership weight.
@@ -3193,14 +3205,15 @@ mod tests {
         // One decay step → all weights × 0.95 → still above floor.
         g.decay_group_members(now);
         assert_eq!(g.group(gid).unwrap().members.len(), 3);
-        // Many decay steps → eventually members get pruned.
+        // Many decay steps → eventually members get pruned, AND the group
+        // itself is dropped (empty groups are husks; the bug fix removes them
+        // so they don't accumulate as 87% empty containers under live load).
         for k in 0..120 {
             g.decay_group_members(now + (k + 1) * GROUP_MEMBER_DECAY_US);
         }
-        assert_eq!(
-            g.group(gid).unwrap().members.len(),
-            0,
-            "all members should have been pruned after sustained idleness"
+        assert!(
+            g.group(gid).is_none(),
+            "an emptied group should be dropped, not left as a husk"
         );
     }
 
