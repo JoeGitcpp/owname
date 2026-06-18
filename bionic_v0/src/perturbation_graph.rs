@@ -1992,6 +1992,27 @@ impl PerturbationGraph {
                 }
             }
         }
+        // Phase A9 merge: fold the OTHER lineage's vocal_profiles in too.
+        // A profile's node_id was remapped during the node-merge pass; look
+        // up the local id, and import the profile if (a) we don't already
+        // have one OR (b) the imported one has a better fit (mirrors
+        // register_vocal_profile's best-so-far rule).
+        for (&other_nid, other_vp) in &other.vocal_profiles {
+            let Some(&local_nid) = id_map.get(&other_nid) else {
+                continue;
+            };
+            match self.vocal_profiles.get(&local_nid) {
+                Some(local_vp) if local_vp.fit >= other_vp.fit => continue,
+                _ => {
+                    self.vocal_profiles.insert(local_nid, other_vp.clone());
+                }
+            }
+        }
+        // Groups + relations + kinds + fast_paths are intentionally NOT merged
+        // — they regenerate from observation in the next session. The merge
+        // pipeline is deliberately conservative: node + vocal profile content
+        // is the durable shared skill, the rest is structure that the body
+        // reconstructs from its own sensory stream.
     }
 
     // ── Persistence ──────────────────────────────────────────────────────────
@@ -2015,7 +2036,13 @@ impl PerturbationGraph {
     // pinned via the constants below.
 
     const MAGIC: [u8; 4] = *b"PGRA";
-    const VERSION: u8 = 0x01;
+    /// Phase A9 sidecar version. v1 = original (nodes + edges only). v2 adds
+    /// groups + relations + kinds + fast_paths + vocal_profiles (everything
+    /// that the A1-A8 changes introduced). Marks are intentionally NOT
+    /// persisted — they decay within MARK_DECAY_US (30 s) and reconstruct
+    /// from the attention / intention subsystems each session.
+    const VERSION_V1: u8 = 0x01;
+    const VERSION: u8 = 0x02;
 
     /// Bytes per node on disk. f64 = 8 bytes; u32 = 4; u64 = 8.
     const NODE_BYTES: usize = 4 // id u32
@@ -2031,18 +2058,105 @@ impl PerturbationGraph {
     /// elig f64 + last_t_us u64 = 33.
     const EDGE_BYTES: usize = 4 + 4 + 1 + 8 + 8 + 8;
 
+    /// Endpoint on-disk size: tag u8 + id u32.
+    const ENDPOINT_BYTES: usize = 1 + 4;
+
+    /// Bytes per group HEADER (excluding variable members block).
+    const GROUP_HEADER_BYTES: usize = 4 // id u32
+        + 1 + 8 // region tag + payload
+        + 8 * PG_NODE_SIG_DIM // centroid_sig
+        + 8 // bind_strength
+        + 8 // formed_t_us
+        + 8 // last_active_t_us
+        + 8; // n_members u64
+
+    /// Bytes per group member entry.
+    const MEMBER_BYTES: usize = 4 + 8 + 8;
+
+    /// Bytes per relation: id u32 + Endpoint(5) ×2 + kind_id u32 + strength f64
+    /// + expressivity f64 + elig f64 + last_t_us u64 + last_axes_engaged u8
+    /// + first_above_promote_t_us u64.
+    const REL_BYTES: usize =
+        4 + Self::ENDPOINT_BYTES + Self::ENDPOINT_BYTES + 4 + 8 + 8 + 8 + 8 + 1 + 8;
+
+    /// Bytes per RelationKind on disk.
+    const KIND_BYTES: usize = 4 // cluster_id
+        + 8 * PG_NODE_SIG_DIM * 2 // prototype [f64; 48]
+        + 8 // strength
+        + 8 // spawned_t_us
+        + 8; // last_seen_t_us
+
+    /// Bytes per FastPath on disk.
+    const FAST_PATH_BYTES: usize = 4 + 8 + 8 + 8;
+
+    /// Bytes per VocalProfile on disk.
+    const VOCAL_PROFILE_BYTES: usize = 4 // node_id
+        + 8 * PG_VOCAL_MEL_DIM
+        + 8 // f1_off
+        + 8 // f2_off
+        + 8 // fit
+        + 8; // last_update_t_us
+
+    /// Encode an Endpoint as ENDPOINT_BYTES (tag u8 + id u32).
+    fn encode_endpoint(out: &mut Vec<u8>, ep: Endpoint) {
+        match ep {
+            Endpoint::Node(id) => {
+                out.push(0);
+                out.extend_from_slice(&id.to_le_bytes());
+            }
+            Endpoint::Group(id) => {
+                out.push(1);
+                out.extend_from_slice(&id.to_le_bytes());
+            }
+            Endpoint::Relation(id) => {
+                out.push(2);
+                out.extend_from_slice(&id.to_le_bytes());
+            }
+        }
+    }
+
+    /// Decode an Endpoint (tag u8 + id u32). Returns None on bad tag.
+    fn decode_endpoint(data: &[u8], off: &mut usize) -> Option<Endpoint> {
+        if data.len() < *off + Self::ENDPOINT_BYTES {
+            return None;
+        }
+        let tag = data[*off];
+        *off += 1;
+        let id = u32::from_le_bytes(data[*off..*off + 4].try_into().ok()?);
+        *off += 4;
+        match tag {
+            0 => Some(Endpoint::Node(id)),
+            1 => Some(Endpoint::Group(id)),
+            2 => Some(Endpoint::Relation(id)),
+            _ => None,
+        }
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(
-            4 + 1
-                + 4
-                + 8
-                + self.nodes.len() * Self::NODE_BYTES
-                + 8
-                + self.edges.len() * Self::EDGE_BYTES,
-        );
+        // Pre-size: v2 header + all blocks. Underestimate is fine (Vec grows).
+        let mut total_groups_bytes = 0usize;
+        for g in &self.groups {
+            total_groups_bytes += Self::GROUP_HEADER_BYTES + g.members.len() * Self::MEMBER_BYTES;
+        }
+        let cap = 4 + 1 + 4 * 4 // header + 4 next_* ids
+            + 8 + self.nodes.len() * Self::NODE_BYTES
+            + 8 + self.edges.len() * Self::EDGE_BYTES
+            + 8 + total_groups_bytes
+            + 8 + self.relations.len() * Self::REL_BYTES
+            + 8 + self.kinds.len() * Self::KIND_BYTES
+            + 8 + self.fast_paths.by_endpoints.len() * Self::FAST_PATH_BYTES
+            + 8 + self.vocal_profiles.len() * Self::VOCAL_PROFILE_BYTES;
+        let mut out = Vec::with_capacity(cap);
+
+        // ── Header: magic + version + 4 next_* allocators ─────────────────
         out.extend_from_slice(&Self::MAGIC);
         out.push(Self::VERSION);
         out.extend_from_slice(&self.next_id.to_le_bytes());
+        out.extend_from_slice(&self.next_group_id.to_le_bytes());
+        out.extend_from_slice(&self.next_rel_id.to_le_bytes());
+        out.extend_from_slice(&self.next_kind_id.to_le_bytes());
+
+        // ── Nodes ──────────────────────────────────────────────────────────
         out.extend_from_slice(&(self.nodes.len() as u64).to_le_bytes());
         for n in &self.nodes {
             out.extend_from_slice(&n.id.to_le_bytes());
@@ -2063,6 +2177,8 @@ impl PerturbationGraph {
             out.extend_from_slice(&n.age_us.to_le_bytes());
             out.extend_from_slice(&n.last_active_t_us.to_le_bytes());
         }
+
+        // ── Edges ──────────────────────────────────────────────────────────
         out.extend_from_slice(&(self.edges.len() as u64).to_le_bytes());
         for e in &self.edges {
             out.extend_from_slice(&e.from.to_le_bytes());
@@ -2072,20 +2188,120 @@ impl PerturbationGraph {
             out.extend_from_slice(&e.elig.to_le_bytes());
             out.extend_from_slice(&e.last_t_us.to_le_bytes());
         }
+
+        // ── Groups (variable per-group due to member count) ───────────────
+        out.extend_from_slice(&(self.groups.len() as u64).to_le_bytes());
+        for g in &self.groups {
+            out.extend_from_slice(&g.id.to_le_bytes());
+            // Region tag + 8-byte payload.
+            match g.region {
+                RegionKey::Spatial(x, y) => {
+                    out.push(0);
+                    let payload: [u8; 8] = [x, y, 0, 0, 0, 0, 0, 0];
+                    out.extend_from_slice(&payload);
+                }
+                RegionKey::TemporalWindow(t) => {
+                    out.push(1);
+                    out.extend_from_slice(&t.to_le_bytes());
+                }
+                RegionKey::NestSubtree(nid) => {
+                    out.push(2);
+                    out.extend_from_slice(&(nid as u64).to_le_bytes());
+                }
+                RegionKey::CoOccurCluster(cid) => {
+                    out.push(3);
+                    out.extend_from_slice(&(cid as u64).to_le_bytes());
+                }
+            }
+            for v in &g.centroid_sig {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&g.bind_strength.to_le_bytes());
+            out.extend_from_slice(&g.formed_t_us.to_le_bytes());
+            out.extend_from_slice(&g.last_active_t_us.to_le_bytes());
+            out.extend_from_slice(&(g.members.len() as u64).to_le_bytes());
+            for m in &g.members {
+                out.extend_from_slice(&m.node_id.to_le_bytes());
+                out.extend_from_slice(&m.weight.to_le_bytes());
+                out.extend_from_slice(&m.last_refreshed_t_us.to_le_bytes());
+            }
+        }
+
+        // ── Relations ──────────────────────────────────────────────────────
+        out.extend_from_slice(&(self.relations.len() as u64).to_le_bytes());
+        for r in &self.relations {
+            out.extend_from_slice(&r.id.to_le_bytes());
+            Self::encode_endpoint(&mut out, r.from);
+            Self::encode_endpoint(&mut out, r.to);
+            out.extend_from_slice(&r.kind_id.to_le_bytes());
+            out.extend_from_slice(&r.strength.to_le_bytes());
+            out.extend_from_slice(&r.expressivity.to_le_bytes());
+            out.extend_from_slice(&r.elig.to_le_bytes());
+            out.extend_from_slice(&r.last_t_us.to_le_bytes());
+            out.push(r.last_axes_engaged);
+            out.extend_from_slice(&r.first_above_promote_t_us.to_le_bytes());
+        }
+
+        // ── Kinds ──────────────────────────────────────────────────────────
+        out.extend_from_slice(&(self.kinds.len() as u64).to_le_bytes());
+        for k in &self.kinds {
+            out.extend_from_slice(&k.cluster_id.to_le_bytes());
+            for v in &k.prototype {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&k.strength.to_le_bytes());
+            out.extend_from_slice(&k.spawned_t_us.to_le_bytes());
+            out.extend_from_slice(&k.last_seen_t_us.to_le_bytes());
+        }
+
+        // ── FastPaths ──────────────────────────────────────────────────────
+        out.extend_from_slice(&(self.fast_paths.by_endpoints.len() as u64).to_le_bytes());
+        for (_, fp) in &self.fast_paths.by_endpoints {
+            out.extend_from_slice(&fp.rel_id.to_le_bytes());
+            out.extend_from_slice(&fp.promoted_t_us.to_le_bytes());
+            out.extend_from_slice(&fp.usage_count.to_le_bytes());
+            out.extend_from_slice(&fp.last_fired_t_us.to_le_bytes());
+        }
+
+        // ── VocalProfiles ──────────────────────────────────────────────────
+        out.extend_from_slice(&(self.vocal_profiles.len() as u64).to_le_bytes());
+        for (nid, vp) in &self.vocal_profiles {
+            out.extend_from_slice(&nid.to_le_bytes());
+            for v in &vp.mel64 {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&vp.f1_off.to_le_bytes());
+            out.extend_from_slice(&vp.f2_off.to_le_bytes());
+            out.extend_from_slice(&vp.fit.to_le_bytes());
+            out.extend_from_slice(&vp.last_update_t_us.to_le_bytes());
+        }
         out
     }
 
     pub fn deserialize(data: &[u8]) -> Option<Self> {
-        // Header: magic(4) + version(1) + next_id(4) + n_nodes(8) = 17
-        if data.len() < 17 || data[0..4] != Self::MAGIC {
+        // Minimum header check: at least magic + version (5 bytes).
+        if data.len() < 5 || data[0..4] != Self::MAGIC {
             return None;
         }
-        if data[4] != Self::VERSION {
+        let version = data[4];
+        if version != Self::VERSION && version != Self::VERSION_V1 {
             return None;
         }
         let mut off = 5usize;
         let next_id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
         off += 4;
+        // v2 has 3 additional next_* allocators in the header; v1 doesn't.
+        let (next_group_id, next_rel_id, next_kind_id) = if version == Self::VERSION {
+            let ngid = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+            off += 4;
+            let nrid = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+            off += 4;
+            let nkid = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+            off += 4;
+            (ngid, nrid, nkid)
+        } else {
+            (1, 1, PRIMITIVE_KIND_COUNT as u32)
+        };
         let n_nodes = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
         off += 8;
         if n_nodes > PG_NODE_CAP {
@@ -2177,33 +2393,246 @@ impl PerturbationGraph {
                 last_t_us,
             });
         }
-        // Phase A1/A3/A4: groups + relations + emergent kinds are NOT persisted
-        // in v1 — they regenerate each session. next_group_id / next_rel_id /
-        // next_kind_id reset across boots; only NodeIds are stable. Seed the
-        // 4 primitive RelationKinds so v1 reloads land with a usable substrate.
-        let mut kinds = Vec::with_capacity(PRIMITIVE_KIND_COUNT);
-        for primitive in 0..PRIMITIVE_KIND_COUNT as u32 {
-            kinds.push(RelationKind {
-                cluster_id: primitive,
-                prototype: [0.0; PG_NODE_SIG_DIM * 2],
-                strength: 0.0,
-                spawned_t_us: 0,
-                last_seen_t_us: 0,
-            });
+        // v1: groups + relations + kinds + fast_paths + vocal_profiles all
+        // regenerate. v2: read each block. Seed primitive kinds either way so
+        // even a partial / v1 load lands with a usable substrate.
+        let mut groups: Vec<NodeGroup> = Vec::new();
+        let mut relations: Vec<Relation> = Vec::new();
+        let mut kinds: Vec<RelationKind> = Vec::new();
+        let mut fast_path_entries: Vec<FastPath> = Vec::new();
+        let mut vocal_profiles: std::collections::HashMap<NodeId, VocalProfile> =
+            std::collections::HashMap::new();
+
+        if version == Self::VERSION {
+            // Groups block
+            if data.len() < off + 8 { return None; }
+            let n_groups = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
+            off += 8;
+            if n_groups > PG_GROUP_CAP { return None; }
+            for _ in 0..n_groups {
+                if data.len() < off + Self::GROUP_HEADER_BYTES { return None; }
+                let gid = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+                off += 4;
+                let region_tag = data[off];
+                off += 1;
+                let mut payload = [0u8; 8];
+                payload.copy_from_slice(&data[off..off + 8]);
+                off += 8;
+                let region = match region_tag {
+                    0 => RegionKey::Spatial(payload[0], payload[1]),
+                    1 => RegionKey::TemporalWindow(u64::from_le_bytes(payload)),
+                    2 => RegionKey::NestSubtree(
+                        u64::from_le_bytes(payload) as u32,
+                    ),
+                    3 => RegionKey::CoOccurCluster(u64::from_le_bytes(payload) as u32),
+                    _ => return None,
+                };
+                let mut centroid_sig = [0.0f64; PG_NODE_SIG_DIM];
+                for v in centroid_sig.iter_mut() {
+                    *v = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                }
+                let bind_strength = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let formed_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let last_active_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let n_members = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
+                off += 8;
+                if data.len() < off + n_members * Self::MEMBER_BYTES { return None; }
+                let mut members = Vec::with_capacity(n_members);
+                for _ in 0..n_members {
+                    let node_id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+                    off += 4;
+                    let weight = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                    let last_refreshed_t_us =
+                        u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                    members.push(GroupMember {
+                        node_id,
+                        weight,
+                        last_refreshed_t_us,
+                    });
+                }
+                groups.push(NodeGroup {
+                    id: gid,
+                    centroid_sig,
+                    members,
+                    region,
+                    bind_strength,
+                    formed_t_us,
+                    last_active_t_us,
+                });
+            }
+            // Relations block
+            if data.len() < off + 8 { return None; }
+            let n_relations = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
+            off += 8;
+            if n_relations > PG_REL_CAP { return None; }
+            if data.len() < off + n_relations * Self::REL_BYTES { return None; }
+            for _ in 0..n_relations {
+                let id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+                off += 4;
+                let from = Self::decode_endpoint(data, &mut off)?;
+                let to = Self::decode_endpoint(data, &mut off)?;
+                let kind_id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+                off += 4;
+                let strength = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let expressivity = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let elig = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let last_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let last_axes_engaged = data[off];
+                off += 1;
+                let first_above_promote_t_us =
+                    u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                relations.push(Relation {
+                    id,
+                    from,
+                    to,
+                    kind_id,
+                    strength,
+                    expressivity,
+                    elig,
+                    last_t_us,
+                    last_axes_engaged,
+                    first_above_promote_t_us,
+                });
+            }
+            // Kinds block
+            if data.len() < off + 8 { return None; }
+            let n_kinds = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
+            off += 8;
+            if n_kinds > PG_KIND_CAP { return None; }
+            if data.len() < off + n_kinds * Self::KIND_BYTES { return None; }
+            for _ in 0..n_kinds {
+                let cluster_id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+                off += 4;
+                let mut prototype = [0.0f64; PG_NODE_SIG_DIM * 2];
+                for v in prototype.iter_mut() {
+                    *v = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                }
+                let strength = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let spawned_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let last_seen_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                kinds.push(RelationKind {
+                    cluster_id,
+                    prototype,
+                    strength,
+                    spawned_t_us,
+                    last_seen_t_us,
+                });
+            }
+            // FastPaths block
+            if data.len() < off + 8 { return None; }
+            let n_fast = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
+            off += 8;
+            if n_fast > PG_FAST_PATH_CAP { return None; }
+            if data.len() < off + n_fast * Self::FAST_PATH_BYTES { return None; }
+            for _ in 0..n_fast {
+                let rel_id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+                off += 4;
+                let promoted_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let usage_count = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let last_fired_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                fast_path_entries.push(FastPath {
+                    rel_id,
+                    promoted_t_us,
+                    usage_count,
+                    last_fired_t_us,
+                });
+            }
+            // VocalProfiles block
+            if data.len() < off + 8 { return None; }
+            let n_vp = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
+            off += 8;
+            if data.len() < off + n_vp * Self::VOCAL_PROFILE_BYTES { return None; }
+            for _ in 0..n_vp {
+                let node_id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+                off += 4;
+                let mut mel64 = [0.0f64; PG_VOCAL_MEL_DIM];
+                for v in mel64.iter_mut() {
+                    *v = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                }
+                let f1_off = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let f2_off = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let fit = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let last_update_t_us =
+                    u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                vocal_profiles.insert(
+                    node_id,
+                    VocalProfile {
+                        mel64,
+                        f1_off,
+                        f2_off,
+                        fit,
+                        last_update_t_us,
+                    },
+                );
+            }
         }
+
+        // If kinds is empty (v1 reload or no kinds in v2), seed the primitives
+        // so the substrate is usable.
+        if kinds.is_empty() {
+            kinds.reserve(PRIMITIVE_KIND_COUNT);
+            for primitive in 0..PRIMITIVE_KIND_COUNT as u32 {
+                kinds.push(RelationKind {
+                    cluster_id: primitive,
+                    prototype: [0.0; PG_NODE_SIG_DIM * 2],
+                    strength: 0.0,
+                    spawned_t_us: 0,
+                    last_seen_t_us: 0,
+                });
+            }
+        }
+
+        // Rebuild the FastPathIndex from the persisted FastPath list. The
+        // by_endpoints / by_from caches are derived from (rel_id → relation).
+        let mut fast_paths = FastPathIndex::default();
+        for fp in fast_path_entries {
+            if let Some(r) = relations.iter().find(|r| r.id == fp.rel_id) {
+                let key = (r.from, r.to);
+                fast_paths.by_endpoints.insert(key, fp);
+                fast_paths
+                    .by_from
+                    .entry(key.0)
+                    .or_default()
+                    .push(fp.rel_id);
+            }
+        }
+
         Some(PerturbationGraph {
             nodes,
             edges,
-            groups: Vec::new(),
-            relations: Vec::new(),
+            groups,
+            relations,
             kinds,
-            fast_paths: FastPathIndex::default(),
-            marks: Vec::new(),
-            vocal_profiles: std::collections::HashMap::new(),
+            fast_paths,
+            marks: Vec::new(), // Marks are not persisted (decay-based)
+            vocal_profiles,
             next_id,
-            next_group_id: 1,
-            next_rel_id: 1,
-            next_kind_id: PRIMITIVE_KIND_COUNT as u32,
+            next_group_id,
+            next_rel_id,
+            next_kind_id,
         })
     }
 }
@@ -3485,6 +3914,150 @@ mod tests {
     }
 
     // ── Phase A8 tests: Sequence as 5th primitive RelationKind ─────────────
+
+    // ── Phase A9 tests: persistence v2 round-trip ─────────────────────────
+
+    #[test]
+    fn persistence_v2_roundtrip_preserves_groups_relations_kinds_fastpaths_vocal() {
+        let mut g = PerturbationGraph::default();
+        // Populate some nodes.
+        let a = g.add_node(1_000, sig_at(0.10));
+        let b = g.add_node(1_000, sig_at(0.20));
+        let c = g.add_node(1_000, sig_at(0.30));
+        // A group.
+        let grp = g.add_group(1_500, RegionKey::Spatial(3, 5), &[a, b, c]).unwrap();
+        // A relation Node→Group.
+        let r1 = g.observe_relation(2_000, Endpoint::Node(a), Endpoint::Group(grp), EdgeKind::Causal).unwrap();
+        // A meta-relation Relation→Node.
+        let r2 = g.observe_relation(2_500, Endpoint::Relation(r1), Endpoint::Node(c), EdgeKind::Sequence).unwrap();
+        // An emergent kind.
+        let r3 = g.observe_relation_emergent(3_000, Endpoint::Node(b), Endpoint::Node(c)).unwrap();
+        // Strong relation → FastPath.
+        for _ in 0..50 {
+            g.observe_relation(4_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+        }
+        g.tick_fast_paths(5_000);
+        g.tick_fast_paths(FAST_PATH_PROMOTE_DURATION_US + 10_000);
+        // A vocal profile on node a.
+        let mel = [0.1_f64; PG_VOCAL_MEL_DIM];
+        g.register_vocal_profile(a, mel, 0.05, -0.02, 0.7, 5_000);
+        // Snapshot baseline counts.
+        let n_nodes = g.nodes.len();
+        let n_groups = g.groups.len();
+        let n_relations = g.relations.len();
+        let n_kinds = g.kinds.len();
+        let n_fp = g.fast_paths.by_endpoints.len();
+        let n_vp = g.vocal_profiles.len();
+        // Roundtrip.
+        let bytes = g.serialize();
+        let back = PerturbationGraph::deserialize(&bytes).expect("v2 roundtrip");
+        assert_eq!(back.nodes.len(), n_nodes);
+        assert_eq!(back.groups.len(), n_groups);
+        assert_eq!(back.relations.len(), n_relations);
+        assert_eq!(back.kinds.len(), n_kinds);
+        assert_eq!(back.fast_paths.by_endpoints.len(), n_fp);
+        assert_eq!(back.vocal_profiles.len(), n_vp);
+        // next_* allocators preserved.
+        assert_eq!(back.next_id, g.next_id);
+        assert_eq!(back.next_group_id, g.next_group_id);
+        assert_eq!(back.next_rel_id, g.next_rel_id);
+        assert_eq!(back.next_kind_id, g.next_kind_id);
+        // Spot checks: the meta-relation Relation→Node endpoint survives.
+        let r2_back = back.relation(r2).expect("meta relation present");
+        assert!(matches!(r2_back.from, Endpoint::Relation(_)));
+        // The emergent kind cluster_id roundtripped.
+        let r3_back = back.relation(r3).expect("emergent relation present");
+        assert!(r3_back.kind_id >= PRIMITIVE_KIND_COUNT as u32);
+        assert!(back.kind(r3_back.kind_id).is_some());
+        // Vocal profile fidelity.
+        let vp_back = back.vocal_profile(a).expect("vocal profile preserved");
+        assert!((vp_back.fit - 0.7).abs() < 1e-9);
+        assert!((vp_back.f1_off - 0.05).abs() < 1e-9);
+        // Group members preserved.
+        let grp_back = back.group(grp).expect("group preserved");
+        assert_eq!(grp_back.members.len(), 3);
+    }
+
+    #[test]
+    fn v1_sidecar_still_loads_under_v2_codepath() {
+        // Build a graph by hand, serialise via the v1-shape bytes (build them
+        // manually so we don't depend on the old v1 serialize being intact),
+        // and confirm deserialize accepts them with empty groups/relations.
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(1_000, sig_at(0.10));
+        let b = g.add_node(1_000, sig_at(0.20));
+        // Hand-craft v1 bytes: magic + version=1 + next_id + n_nodes + nodes +
+        // n_edges + edges.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"PGRA");
+        bytes.push(0x01); // VERSION_V1
+        bytes.extend_from_slice(&g.next_id.to_le_bytes());
+        bytes.extend_from_slice(&(g.nodes.len() as u64).to_le_bytes());
+        for n in &g.nodes {
+            bytes.extend_from_slice(&n.id.to_le_bytes());
+            for v in &n.sig { bytes.extend_from_slice(&v.to_le_bytes()); }
+            for v in &n.cross_modal { bytes.extend_from_slice(&v.to_le_bytes()); }
+            for v in &n.vital_coupling { bytes.extend_from_slice(&v.to_le_bytes()); }
+            bytes.extend_from_slice(&n.motion_var.to_le_bytes());
+            bytes.extend_from_slice(&n.size_ema.to_le_bytes());
+            bytes.extend_from_slice(&n.persistence_ema.to_le_bytes());
+            bytes.extend_from_slice(&n.causal_outflow.to_le_bytes());
+            bytes.extend_from_slice(&n.bind_strength.to_le_bytes());
+            bytes.extend_from_slice(&n.age_us.to_le_bytes());
+            bytes.extend_from_slice(&n.last_active_t_us.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // n_edges = 0
+        let back = PerturbationGraph::deserialize(&bytes).expect("v1 still readable");
+        assert_eq!(back.nodes.len(), 2);
+        assert!(back.groups.is_empty());
+        assert!(back.relations.is_empty());
+        // Kinds were seeded to 5 primitives.
+        assert_eq!(back.kinds.len(), PRIMITIVE_KIND_COUNT);
+        let _ = (a, b);
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_version() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"PGRA");
+        bytes.push(0x99); // unknown version
+        bytes.extend_from_slice(&[0; 32]);
+        assert!(PerturbationGraph::deserialize(&bytes).is_none());
+    }
+
+    #[test]
+    fn merge_propagates_vocal_profiles_via_id_map() {
+        let mut mainline = PerturbationGraph::default();
+        let m_a = mainline.add_node(0, sig_at(0.10));
+        mainline.register_vocal_profile(m_a, [0.1_f64; PG_VOCAL_MEL_DIM], 0.05, 0.0, 0.4, 0);
+        let mut branch = PerturbationGraph::default();
+        let b_a = branch.add_node(0, sig_at(0.105)); // close to mainline m_a → matches
+        // Better fit on branch — should win in merge.
+        branch.register_vocal_profile(b_a, [0.1_f64; PG_VOCAL_MEL_DIM], 0.10, 0.0, 0.9, 100);
+        mainline.merge(&branch, 0.05);
+        let merged_vp = mainline
+            .vocal_profile(m_a)
+            .expect("vocal profile carried via id_map");
+        // Better fit (0.9) should have won.
+        assert!((merged_vp.fit - 0.9).abs() < 1e-9);
+        assert!((merged_vp.f1_off - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn persistence_v2_stride_constants_pinned() {
+        assert_eq!(PerturbationGraph::NODE_BYTES, 364);
+        assert_eq!(PerturbationGraph::EDGE_BYTES, 33);
+        assert_eq!(PerturbationGraph::ENDPOINT_BYTES, 5);
+        assert_eq!(PerturbationGraph::GROUP_HEADER_BYTES, 4 + 1 + 8 + 8 * PG_NODE_SIG_DIM + 8 + 8 + 8 + 8);
+        assert_eq!(PerturbationGraph::MEMBER_BYTES, 20);
+        assert_eq!(PerturbationGraph::REL_BYTES, 4 + 5 + 5 + 4 + 8 + 8 + 8 + 8 + 1 + 8);
+        assert_eq!(PerturbationGraph::REL_BYTES, 59);
+        assert_eq!(PerturbationGraph::KIND_BYTES, 4 + 8 * PG_NODE_SIG_DIM * 2 + 8 + 8 + 8);
+        assert_eq!(PerturbationGraph::KIND_BYTES, 412);
+        assert_eq!(PerturbationGraph::FAST_PATH_BYTES, 28);
+        assert_eq!(PerturbationGraph::VOCAL_PROFILE_BYTES, 4 + 8 * PG_VOCAL_MEL_DIM + 8 + 8 + 8 + 8);
+        assert_eq!(PerturbationGraph::VOCAL_PROFILE_BYTES, 548);
+    }
 
     #[test]
     fn sequence_kind_is_5th_primitive() {
