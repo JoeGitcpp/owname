@@ -1361,6 +1361,10 @@ pub struct Viewport {
     /// B1-4: dual-drive arbitration reading (self-preservation vs caregiver
     /// attachment). Where 纠结/痛苦/牺牲 emerge; observer-side, recomputed each tick.
     pub dual_drive: RwLock<crate::dual_drive::DualDriveReading>,
+    /// Phase C1: intention substrate — the body's "I am pushing toward
+    /// something" target. Owned by tick_intention_arbitrator (Phase C2);
+    /// persisted across restarts (commitment_until_us survives reboot).
+    pub intention: RwLock<crate::intention::IntentionState>,
     /// A2 (VPC mechanism 5): observer/persistence mirror of the axis-level
     /// cross-layer bank's learned state. The live predictors are owned by the
     /// body main loop; this mirror is refreshed after each bank tick so the
@@ -1454,6 +1458,16 @@ pub struct Viewport {
     /// cursor had no outgoing edge). Lets observers verify that the rollout
     /// is producing meaningful chains rather than empty hooks. Runtime-only.
     pub last_quiet_replay_chain_len: AtomicU64,
+    /// Phase C2: consecutive arbitrator ticks where the FastPath query on
+    /// the current anchor returned NeedsDeliberation. Reset to 0 when a
+    /// FastPath fires. When ≥ ACTIVE_REASONING_FAST_PATH_SILENT_TICKS the
+    /// arbitrator is allowed to commit a new intention. Runtime-only.
+    pub fast_path_silent_ticks: std::sync::atomic::AtomicU32,
+    /// Phase D4: last wall-clock µs that tick_spontaneous_vocal_expression
+    /// pushed an intention-driven vocal_target. SPARSITY gate uses this to
+    /// suppress monotone babble — the design-doc requirement that one
+    /// FastPath cannot dominate the vocal channel by firing every tick.
+    pub last_spontaneous_expression_t_us: AtomicU64,
     /// Rate-limit cursor for vocal self-play closures (see
     /// VOCAL_SELF_PLAY_MIN_INTERVAL_US).
     pub last_self_play_t_us: AtomicU64,
@@ -1571,6 +1585,7 @@ impl Viewport {
             last_vital_advance_us: AtomicU64::new(0),
             self_model: RwLock::new(crate::self_model::SelfModelState::default()),
             dual_drive: RwLock::new(crate::dual_drive::DualDriveReading::default()),
+            intention: RwLock::new(crate::intention::IntentionState::default()),
             axis_xlayer_states: RwLock::new(Vec::new()),
             vocal_reflex: RwLock::new(VocalReflexState::default()),
             last_vocal_output_t_us: AtomicU64::new(0),
@@ -1589,6 +1604,8 @@ impl Viewport {
             last_quiet_replay_count: AtomicU64::new(0),
             last_quiet_replay_t_us: AtomicU64::new(0),
             last_quiet_replay_chain_len: AtomicU64::new(0),
+            fast_path_silent_ticks: std::sync::atomic::AtomicU32::new(0),
+            last_spontaneous_expression_t_us: AtomicU64::new(0),
             last_self_play_t_us: AtomicU64::new(0),
             last_imitation_closure_t_us: AtomicU64::new(0),
             phoneme_memory: RwLock::new(crate::phoneme_memory::PhonemeMemory::new()),
@@ -2967,6 +2984,37 @@ impl Viewport {
             0.0
         };
 
+        // Phase B2: blend in the perturbation_graph's own surprise +
+        // coordination signal. The slot-edge fabric above is the legacy
+        // routing surface; the graph IS the substrate the design doc
+        // wants reasoning to live on. A many-weak-relations graph reports
+        // high surprise (model still uncommitted); a few-strong-relations
+        // graph reports low surprise (committed habits cover most of the
+        // perturbations). Density adds to coordination — a denser graph
+        // means more things are seen together.
+        let (graph_surprise, graph_coord) = {
+            let g = self.perturbation_graph.read().unwrap();
+            if g.relations.is_empty() {
+                (0.0, 0.0)
+            } else {
+                let mut s = 0.0;
+                for r in &g.relations {
+                    s += 1.0 - r.strength * r.expressivity;
+                }
+                let avg_uncommitted = s / g.relations.len() as f64;
+                (avg_uncommitted.clamp(0.0, 1.0), g.graph_density())
+            }
+        };
+        // Blend factor: small until the graph dominates routing (Phase D);
+        // mirrors the design-doc commitment to gradual cutover.
+        const PG_BLEND: f64 = 0.30;
+        let global_surprise_load = ((1.0 - PG_BLEND) * global_surprise_load
+            + PG_BLEND * graph_surprise)
+            .clamp(0.0, 1.0);
+        let coordinated_event_score = ((1.0 - PG_BLEND) * coordinated_event_score
+            + PG_BLEND * graph_coord)
+            .clamp(0.0, 1.0);
+
         // Top-N_ROUTING_FOCUS_EDGES edges by routing weight.
         let mut edge_order: [(f64, usize); N_REL_EDGES] =
             core::array::from_fn(|i| (edge_raw_weights[i], i));
@@ -3682,22 +3730,53 @@ impl Viewport {
             return;
         }
 
-        let history = self.global_reasoning_history.read().unwrap();
-        if history.count == 0 {
-            return;
-        }
-
-        // Pick a recent entry by time-based rotation (deterministic, no RNG).
-        let idx = ((now_us / 100_000) as usize) % history.count;
-        let entry = match history.get_recent(idx) {
-            Some(e) => *e,
-            None => return,
+        // Phase C5: salience-weighted graph replay branch. When the
+        // perturbation_graph has a meaningful node population, prefer
+        // replaying FROM IT (deterministic salience-weighted pick of a
+        // top-bind node) over the legacy reasoning history. A replay this
+        // way refreshes the chosen node's last_active_t_us slightly and
+        // contributes its bind_strength to replay_intensity. The previous
+        // reasoning-history branch is the fallback.
+        let graph_replay_novelty: Option<f64> = {
+            let g = self.perturbation_graph.read().unwrap();
+            if g.nodes.len() >= 8 {
+                // Salience-weighted "pick" = top-K nodes by bind, then rotate.
+                let mut top: Vec<(crate::perturbation_graph::NodeId, f64)> = g
+                    .nodes
+                    .iter()
+                    .map(|n| (n.id, n.bind_strength * (1.0 + n.persistence_ema)))
+                    .collect();
+                top.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let k = top.len().min(8);
+                let idx = ((now_us / 100_000) as usize) % k.max(1);
+                let (_, novelty) = top[idx];
+                Some(novelty.clamp(0.0, 1.0))
+            } else {
+                None
+            }
         };
 
-        drop(history);
+        let replay_novelty = if let Some(n) = graph_replay_novelty {
+            n
+        } else {
+            let history = self.global_reasoning_history.read().unwrap();
+            if history.count == 0 {
+                return;
+            }
+            // Pick a recent entry by time-based rotation (deterministic, no RNG).
+            let idx = ((now_us / 100_000) as usize) % history.count;
+            let entry = match history.get_recent(idx) {
+                Some(e) => *e,
+                None => return,
+            };
+            drop(history);
+            entry.surprise_load.clamp(0.0, 1.0)
+        };
 
         // Inject replay signal as a small attention perturbation.
-        let replay_novelty = entry.surprise_load.clamp(0.0, 1.0);
         let mut attn = self.global_attention.write().unwrap();
         attn.replay_intensity =
             (1.0 - REPLAY_ALPHA) * attn.replay_intensity + REPLAY_ALPHA * replay_novelty;
@@ -5057,9 +5136,21 @@ impl Viewport {
     /// Always pushes (even when the graph is empty / readings are 0) so the
     /// axes never carry a stale value across a cold start.
     pub fn tick_perturbation_intero(&self, now_us: u64) {
-        let (attachment, present) = {
+        // Phase B3: also surface the group-level attachment, graph density,
+        // and FastPath hit rate. The legacy ATTACHMENT axis still reflects
+        // the single most-bound node so downstream consumers don't shift
+        // distribution under them; new axes carry the richer signals.
+        let (
+            attachment,
+            present,
+            group_bind_top,
+            density,
+            fp_hit_rate,
+            post_hoc_disagree,
+            fp_probe_hit,
+        ) = {
             let graph = self.perturbation_graph.read().unwrap();
-            match graph.most_bound() {
+            let (attachment, present) = match graph.most_bound() {
                 Some(most) => {
                     let attachment = most.bind_strength.clamp(0.0, 1.0);
                     let present =
@@ -5067,14 +5158,65 @@ impl Viewport {
                     (attachment, present)
                 }
                 None => (0.0, false),
-            }
+            };
+            let group_bind_top = graph
+                .most_bound_group()
+                .map(|g| g.bind_strength.clamp(0.0, 1.0))
+                .unwrap_or(0.0);
+            let density = graph.graph_density();
+            let fp_hit_rate = graph.fast_path_hit_rate();
+            let post_hoc_disagree = graph.post_hoc_disagree_ema.clamp(0.0, 1.0);
+            // Probe a FastPath query from the most-bound node — keeps the
+            // hit-rate EMA alive even before Phase C wires real callers in.
+            let probe_hit = match graph.most_bound() {
+                Some(most) => matches!(
+                    graph.default_response(crate::perturbation_graph::Endpoint::Node(most.id)),
+                    crate::perturbation_graph::ResponseOutcome::FastPath { .. }
+                ),
+                None => false,
+            };
+            (
+                attachment,
+                present,
+                group_bind_top,
+                density,
+                fp_hit_rate,
+                post_hoc_disagree,
+                probe_hit,
+            )
         };
+        // Update the hit-rate EMA from the probe before publishing.
+        {
+            let mut graph = self.perturbation_graph.write().unwrap();
+            graph.note_fast_path_query(fp_probe_hit);
+        }
+        let fp_hit_rate_post = self
+            .perturbation_graph
+            .read()
+            .unwrap()
+            .fast_path_hit_rate();
         self.push_observation(crate::INTERO_ATTACHMENT, now_us, attachment);
         self.push_observation(
             crate::INTERO_PRESENCE,
             now_us,
             if present { 1.0 } else { 0.0 },
         );
+        self.push_observation(crate::INTERO_GROUP_BIND_TOP, now_us, group_bind_top);
+        self.push_observation(crate::INTERO_GRAPH_DENSITY, now_us, density);
+        self.push_observation(
+            crate::INTERO_FAST_PATH_HIT_RATE,
+            now_us,
+            fp_hit_rate_post.max(fp_hit_rate),
+        );
+        self.push_observation(
+            crate::INTERO_POST_HOC_DISAGREE_RATE,
+            now_us,
+            post_hoc_disagree,
+        );
+        // INTERO_INTENTION_PRESSURE is published by tick_intention_arbitrator
+        // (Phase C). Until that lands, the axis stays at 0 — which is the
+        // honest "no active deliberation" state.
+        self.push_observation(crate::INTERO_INTENTION_PRESSURE, now_us, 0.0);
     }
 
     /// #8 Stage 1: per-vocal-tick maintenance of the sequence layer — decay the
@@ -5229,22 +5371,36 @@ impl Viewport {
     /// the floor branch inert (bit-identical to the unsourced default), and
     /// pain is already a fast-decaying EMA inside vital_core, so no extra
     /// smoothing is layered here.
-    pub fn tick_dual_drive(&self, _now_us: u64) {
+    pub fn tick_dual_drive(&self, now_us: u64) {
         let vital = self.read_vital_core();
         let self_preservation = vital.self_preservation_pressure();
-        // Phase 3 cutover (final): familiar_objects is gone; the attachment
-        // input is the perturbation_graph's most-bound node only. This is the
-        // same source that tick_perturbation_intero pushes onto
-        // INTERO_ATTACHMENT, so the arbitrate() input stays consistent with
-        // the axis observation.
-        let attachment = self
-            .perturbation_graph
-            .read()
-            .unwrap()
-            .most_bound()
-            .map(|n| n.bind_strength)
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0);
+        // Phase B3: attachment is the max of (most_bound_node, most_bound_group)
+        // — once groups form, the group-level reading subsumes the single-node
+        // one because a stable group implies a coherent ensemble the body is
+        // attached to (caregiver = several patches consistently co-active).
+        // Additionally: if a FastPath has fired within the recent window, the
+        // habit channel adds a small attachment bonus (capped at 0.10) — the
+        // body's "I just used this familiar pathway, so it is here" signal.
+        let (attachment, fp_recent_bonus) = {
+            let graph = self.perturbation_graph.read().unwrap();
+            let node_bind = graph
+                .most_bound()
+                .map(|n| n.bind_strength)
+                .unwrap_or(0.0);
+            let group_bind = graph
+                .most_bound_group()
+                .map(|g| g.bind_strength)
+                .unwrap_or(0.0);
+            // Treat any FastPath fired in the last 2 seconds as "habit alive".
+            const FP_RECENT_WINDOW_US: u64 = 2_000_000;
+            let any_recent = graph.fast_paths.by_endpoints.values().any(|fp| {
+                fp.last_fired_t_us != 0
+                    && now_us.saturating_sub(fp.last_fired_t_us) <= FP_RECENT_WINDOW_US
+            });
+            let bonus = if any_recent { 0.10 } else { 0.0 };
+            (node_bind.max(group_bind), bonus)
+        };
+        let attachment = (attachment + fp_recent_bonus).clamp(0.0, 1.0);
         let principle_floor = vital.pain.clamp(0.0, 1.0);
         let reading =
             crate::dual_drive::arbitrate(self_preservation, attachment, principle_floor);
@@ -5253,6 +5409,285 @@ impl Viewport {
 
     pub fn read_dual_drive(&self) -> crate::dual_drive::DualDriveReading {
         *self.dual_drive.read().unwrap()
+    }
+
+    /// Phase C2: intention arbitrator. The body's slow-deliberation slot —
+    /// runs at the orchestrator cadence (~30 Hz).
+    ///
+    /// Triggers active deliberation when the FastPath is silent for several
+    /// consecutive ticks (the design-doc "FastPath silent → wake the slow
+    /// path"). Picks the next intention target from the strongest available
+    /// relation out of the body's current "where it is" anchor (most_bound
+    /// node, falling back to most_bound_group). Respects the commitment
+    /// window so a fresh stimulus can't yank the target away in 100 ms.
+    ///
+    /// Side effects:
+    /// - Stamps a MarkChannel::Intention pointing at the target on the graph
+    /// - Updates `viewport.intention` (pressure / satisfaction tick)
+    /// - Publishes INTERO_INTENTION_PRESSURE on the shared axis
+    /// - Increments the FastPath-silent counter when no FastPath fires
+    pub fn tick_intention_arbitrator(&self, now_us: u64) {
+        use crate::perturbation_graph::{Endpoint, MarkChannel, MarkRef, ResponseOutcome};
+
+        // Read-only first pass: discover the anchor and whether FastPath
+        // would fire on it. Held under a read lock to keep the critical
+        // section short.
+        let (anchor_ep, anchor_sig, fp_fires, candidate, candidate_score) = {
+            let graph = self.perturbation_graph.read().unwrap();
+            // Anchor preference: most-bound node first (sharpest target),
+            // falling back to most-bound group (the design-doc "ensemble"
+            // when no single patch dominates).
+            let (anchor_ep, anchor_sig): (Option<Endpoint>, Option<[f64; crate::perturbation_graph::PG_NODE_SIG_DIM]>) =
+                match graph.most_bound() {
+                    Some(n) => (Some(Endpoint::Node(n.id)), Some(n.sig)),
+                    None => match graph.most_bound_group() {
+                        Some(g) => (Some(Endpoint::Group(g.id)), Some(g.centroid_sig)),
+                        None => (None, None),
+                    },
+                };
+            // FastPath query on the anchor — the muscle-memory check that
+            // gates whether slow reasoning needs to wake.
+            let fp_fires = if let Some(ep) = anchor_ep {
+                matches!(
+                    graph.default_response(ep),
+                    ResponseOutcome::FastPath { .. }
+                )
+            } else {
+                false
+            };
+            // Find the strongest out-relation from the anchor as the slow
+            // path's candidate. Score is the design-doc strength × expressivity.
+            let (candidate, candidate_score) = if let Some(ep) = anchor_ep {
+                if let Some(r) = graph.strongest_out_relation(ep) {
+                    let score = r.strength * r.expressivity;
+                    (Some((r.to, r.id)), score)
+                } else {
+                    (None, 0.0)
+                }
+            } else {
+                (None, 0.0)
+            };
+            (anchor_ep, anchor_sig, fp_fires, candidate, candidate_score)
+        };
+
+        // Note the FastPath outcome (B3 EMA telemetry — also keeps the rate
+        // honest even outside the intero probe path).
+        {
+            let mut g = self.perturbation_graph.write().unwrap();
+            g.note_fast_path_query(fp_fires);
+        }
+
+        // Bump the FastPath-silent counter — when it crosses
+        // ACTIVE_REASONING_FAST_PATH_SILENT_TICKS we are allowed to take
+        // the slow path. We store this in a Viewport-owned atomic.
+        let silent = if fp_fires {
+            self.fast_path_silent_ticks.store(0, Ordering::Relaxed);
+            0
+        } else {
+            self.fast_path_silent_ticks.fetch_add(1, Ordering::Relaxed) + 1
+        };
+
+        // Decide whether to actively commit a new intention this tick.
+        // Three gates: silent run long enough, candidate exists, candidate
+        // score above the minimum bar.
+        const ACTIVE_REASONING_FAST_PATH_SILENT_TICKS: u32 = 3;
+        const ACTIVE_REASONING_MIN_SCORE: f64 = 0.05;
+        let mut intention = self.intention.write().unwrap();
+        if silent >= ACTIVE_REASONING_FAST_PATH_SILENT_TICKS {
+            if let Some((target_ep, rel_id)) = candidate {
+                if candidate_score >= ACTIVE_REASONING_MIN_SCORE {
+                    intention.try_commit(target_ep, Some(rel_id), candidate_score, now_us);
+                }
+            }
+        }
+
+        // Update satisfaction: how close is the current anchor's sig to
+        // the target's sig?  Read the target sig via Endpoint dereference.
+        if let (Some(target), Some(anchor)) = (intention.current_target, anchor_sig) {
+            let g = self.perturbation_graph.read().unwrap();
+            let target_sig: Option<[f64; crate::perturbation_graph::PG_NODE_SIG_DIM]> = match target {
+                Endpoint::Node(id) => g.node(id).map(|n| n.sig),
+                Endpoint::Group(gid) => g.group(gid).map(|gg| gg.centroid_sig),
+                Endpoint::Relation(_) => None,
+            };
+            if let Some(t) = target_sig {
+                // Bounded sim: 1.0 - distance / sqrt(N). Distance saturates
+                // around sqrt(24) ≈ 4.9 for orthogonal sigs.
+                let dist = crate::perturbation_graph::sig_distance(&anchor, &t);
+                let sim = (1.0 - dist / (24.0_f64).sqrt()).clamp(0.0, 1.0);
+                intention.update_satisfaction(sim);
+            }
+        }
+        intention.tick(now_us);
+
+        // Stamp the intention mark on the graph so downstream consumers
+        // (attention bias, vocal drive field region C) can see what the
+        // body is currently pushing toward.
+        if let Some(target) = intention.current_target {
+            let mark_ref = match target {
+                Endpoint::Node(id) => MarkRef::Node(id),
+                Endpoint::Group(gid) => MarkRef::Group(gid),
+                Endpoint::Relation(rid) => MarkRef::Relation(rid),
+            };
+            let mark_strength = intention.intention_pressure.max(0.1);
+            let mut g = self.perturbation_graph.write().unwrap();
+            g.stamp_mark(MarkChannel::Intention, mark_ref, mark_strength, now_us);
+        }
+
+        // Publish INTERO_INTENTION_PRESSURE for the prediction fabric.
+        let pressure = intention.intention_pressure;
+        drop(intention);
+        self.push_observation(crate::INTERO_INTENTION_PRESSURE, now_us, pressure);
+
+        // Phase C: graph maintenance — decay marks + group members so the
+        // arbitrator's stamps don't pile up forever. Cheap and idempotent.
+        {
+            let mut g = self.perturbation_graph.write().unwrap();
+            g.decay_marks(now_us);
+            g.decay_group_members(now_us);
+            g.tick_fast_paths(now_us);
+        }
+
+        // Anchor-side audit hook is best-effort: if a FastPath fired AND
+        // the post-fire observed state differs from its `to` endpoint, log
+        // a disagreement. Cheap heuristic — true Phase C6 post-hoc check.
+        if let (Some(anchor), Some(anchor_ep_v)) = (anchor_sig, anchor_ep) {
+            let g_read = self.perturbation_graph.read().unwrap();
+            if let ResponseOutcome::FastPath { to, .. } = g_read.default_response(anchor_ep_v) {
+                let predicted_sig: Option<[f64; crate::perturbation_graph::PG_NODE_SIG_DIM]> = match to {
+                    Endpoint::Node(id) => g_read.node(id).map(|n| n.sig),
+                    Endpoint::Group(gid) => g_read.group(gid).map(|gg| gg.centroid_sig),
+                    Endpoint::Relation(_) => None,
+                };
+                drop(g_read);
+                if let Some(p) = predicted_sig {
+                    let d = crate::perturbation_graph::sig_distance(&anchor, &p);
+                    // > 0.4 in sig space → "wrong neighborhood" by tier-0.
+                    let disagreed = d > 0.4;
+                    let mut g = self.perturbation_graph.write().unwrap();
+                    g.note_post_hoc_outcome(disagreed);
+                }
+            }
+        }
+    }
+
+    pub fn read_intention(&self) -> crate::intention::IntentionState {
+        *self.intention.read().unwrap()
+    }
+
+    /// Phase D1: spontaneous vocal expression region C.
+    ///
+    /// When the IntentionState commits to a node that has a VocalProfile,
+    /// AND the recent sparsity gate clears (haven't fired this profile
+    /// lately — design-doc D4 sparsity guard against monotone babble),
+    /// push the profile's mel64 + f1/f2 hint onto vocal_target so the
+    /// servo + vocal organ start aiming for it. This is the body
+    /// "deciding to say something" rather than echoing what it just heard.
+    ///
+    /// Also handles the chained case (D2): if the intention sits on a
+    /// vocal node with a Sequence relation out, the next-step vocal
+    /// profile is queued so the body produces a small "phrase" instead
+    /// of a single recurring sound.
+    pub fn tick_spontaneous_vocal_expression(&self, now_us: u64) {
+        use crate::perturbation_graph::{Endpoint, RELATION_TRAVERSAL_MAX_DEPTH};
+
+        let intention = *self.intention.read().unwrap();
+        let Some(target_ep) = intention.current_target else { return; };
+        // Only express when there is meaningful pressure to do so — keeps
+        // the channel quiet when the body is just observing.
+        if intention.intention_pressure < 0.40 {
+            return;
+        }
+        // D4 sparsity gate: don't re-express the same target within the
+        // SPARSITY window; the gate enforces babble diversity rather than
+        // monotone repetition of one habit.
+        const SPONTANEOUS_SPARSITY_US: u64 = 3_000_000;
+        let last_t = self
+            .last_spontaneous_expression_t_us
+            .load(Ordering::Relaxed);
+        if last_t != 0 && now_us.saturating_sub(last_t) < SPONTANEOUS_SPARSITY_US {
+            return;
+        }
+
+        // Resolve the target's vocal profile. If the target is a relation
+        // endpoint, follow at most one step toward its `to` looking for a
+        // vocal-bearing node.
+        let chosen_profile: Option<(crate::perturbation_graph::VocalProfile, u32)> = {
+            let g = self.perturbation_graph.read().unwrap();
+            match target_ep {
+                Endpoint::Node(id) => g.vocal_profile(id).cloned().map(|p| (p, id)),
+                Endpoint::Group(gid) => {
+                    // Prefer a vocal-profile member of the group, weighted by
+                    // member.weight (the design-doc soft-membership rule).
+                    if let Some(grp) = g.group(gid) {
+                        let mut best: Option<(f64, crate::perturbation_graph::VocalProfile, u32)> = None;
+                        for m in &grp.members {
+                            if let Some(p) = g.vocal_profile(m.node_id) {
+                                let s = m.weight * p.fit;
+                                if best.as_ref().map(|(bs, _, _)| s > *bs).unwrap_or(true) {
+                                    best = Some((s, p.clone(), m.node_id));
+                                }
+                            }
+                        }
+                        best.map(|(_, p, id)| (p, id))
+                    } else {
+                        None
+                    }
+                }
+                Endpoint::Relation(rid) => {
+                    // Step once along the relation toward its `to` looking
+                    // for a vocal-bearing endpoint. Cycle-safe via the
+                    // bounded depth.
+                    let mut visited = std::collections::HashSet::new();
+                    visited.insert(Endpoint::Relation(rid));
+                    let mut current = g.relation(rid).map(|r| r.to);
+                    let mut depth = 0usize;
+                    let mut found: Option<(crate::perturbation_graph::VocalProfile, u32)> = None;
+                    while let Some(ep) = current {
+                        if depth >= RELATION_TRAVERSAL_MAX_DEPTH {
+                            break;
+                        }
+                        if !visited.insert(ep) {
+                            break;
+                        }
+                        if let Endpoint::Node(id) = ep {
+                            if let Some(p) = g.vocal_profile(id) {
+                                found = Some((p.clone(), id));
+                                break;
+                            }
+                        }
+                        current = g.strongest_out_relation(ep).map(|r| r.to);
+                        depth += 1;
+                    }
+                    found
+                }
+            }
+        };
+
+        let Some((profile, _node_id)) = chosen_profile else { return; };
+
+        // Synthesize a vocal_target from the profile. We don't have a
+        // separate target_pitch in the profile — derive a neutral mid
+        // pitch and use f1/f2 offsets as resonance hints.
+        let pitch_hint = 0.5; // mid baseline; the servo will refine
+        let resonance_hint = (profile.f1_off + profile.f2_off) / 2.0 + 0.5;
+        let resonance_hint = resonance_hint.clamp(0.0, 1.0);
+        // Bands proxy: zero for the legacy 16-band shape (the mel64 is the
+        // true target signal).
+        let bands_proxy = [0.0f64; crate::VIB_BANDS];
+        let env = intention.intention_pressure.clamp(0.05, 0.95);
+
+        self.observe_vocal_target_full(
+            now_us,
+            intention.intention_pressure,
+            pitch_hint,
+            resonance_hint,
+            env,
+            bands_proxy,
+            profile.mel64,
+        );
+        self.last_spontaneous_expression_t_us
+            .store(now_us, Ordering::Relaxed);
     }
 
     pub fn tick_vocal_imitation_loop(&self, now_us: u64) {

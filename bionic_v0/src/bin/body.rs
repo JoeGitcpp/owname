@@ -162,6 +162,15 @@ fn run_global_refresh_cycle(
     vp.tick_self_model(t);
     // B1-4: arbitrate self-preservation vs caregiver attachment (纠结/牺牲).
     vp.tick_dual_drive(t);
+    // Phase C2: arbitrate intention from the perturbation_graph anchor.
+    // Runs BEFORE refresh_global_reasoning so the reasoning fabric can
+    // see the active intention mark.
+    vp.tick_intention_arbitrator(t);
+    // Phase D1: spontaneous vocal expression — when intention points at a
+    // node with a VocalProfile and pressure is high, push it as vocal_target
+    // so the servo drives toward expressing it. Runs after the arbitrator so
+    // the current_target is fresh.
+    vp.tick_spontaneous_vocal_expression(t);
     vp.refresh_global_reasoning(t);
     vp.refresh_global_reasoning_history(t);
     vp.tick_evidence_tension_from_pairs(t);
@@ -686,11 +695,36 @@ fn main() {
             // Phase 3 perturbation_graph Stage 0: persist the (currently empty
             // until Stage 1 wires the visual frontend) sparse tier-0 graph so
             // the lifetime node/edge accumulation survives restart.
-            let pg_bytes = vp_checkpoint
-                .perturbation_graph
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .serialize();
+            let pg_bytes = {
+                let g = vp_checkpoint
+                    .perturbation_graph
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                // Phase B5: also dump a tiny JSON stats sidecar so the gateway
+                // can use relation/group/fast_path counts as growth evidence
+                // without having to walk the binary's variable-stride blocks.
+                // Written every checkpoint tick (~1 Hz) — cheap.
+                let top_group_bind = g.most_bound_group().map(|gr| gr.bind_strength).unwrap_or(0.0);
+                let top_node_bind = g.most_bound().map(|n| n.bind_strength).unwrap_or(0.0);
+                let stats = format!(
+                    "{{\"n_nodes\":{},\"n_edges\":{},\"n_groups\":{},\"n_relations\":{},\"n_fast_paths\":{},\"n_kinds\":{},\"n_vocal_profiles\":{},\"top_node_bind\":{:.6},\"top_group_bind\":{:.6},\"fast_path_hit_rate\":{:.6},\"graph_density\":{:.6},\"post_hoc_disagree\":{:.6}}}\n",
+                    g.nodes.len(),
+                    g.edges.len(),
+                    g.groups.len(),
+                    g.relations.len(),
+                    g.fast_paths.by_endpoints.len(),
+                    g.kinds.len(),
+                    g.vocal_profiles.len(),
+                    top_node_bind,
+                    top_group_bind,
+                    g.fast_path_hit_rate(),
+                    g.graph_density(),
+                    g.post_hoc_disagree_ema,
+                );
+                let pg_stats_cp = runtime_dir.join("pg_stats.json");
+                bionic_v0::atomic_write_or_warn("checkpoint pg_stats", &pg_stats_cp, stats.as_bytes());
+                g.serialize()
+            };
             bionic_v0::atomic_write_or_warn(
                 "checkpoint perturbation_graph",
                 &perturbation_graph_cp,

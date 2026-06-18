@@ -112,6 +112,16 @@ impl Viewport {
         if closure_signal > 0.0 {
             gap_pressure *= 1.0 - 0.70 * closure_signal;
         }
+        // Phase C4: active reasoning gate — when a FastPath fired on the
+        // most-bound anchor THIS cycle, muscle memory is handling things.
+        // The body still PUBLISHES gap_pressure (so the prediction fabric
+        // can learn from the drive shape), but multiplies it down so it
+        // doesn't push downstream consumers into churn while the habit is
+        // doing the work. Matches the design-doc: "active_reasoning gate —
+        // FastPath has applicable response → skip gap_pressure".
+        let fp_hit_rate = self.perturbation_graph.read().unwrap().fast_path_hit_rate();
+        let fp_gate = (1.0 - 0.80 * fp_hit_rate).clamp(0.20, 1.0);
+        gap_pressure *= fp_gate;
         gap_pressure = unit(gap_pressure);
 
         if drive > 0.05 || reentry > 0.05 || gap_pressure > 0.05 {

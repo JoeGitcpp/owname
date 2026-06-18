@@ -34,6 +34,7 @@ fn main() {
     let mut session_header_written = false;
 
     let snapshot_path = PathBuf::from(&runtime_dir).join("snapshot.bin");
+    let pg_stats_path = PathBuf::from(&runtime_dir).join("pg_stats.json");
     let period = Duration::from_millis(1000 / poll_hz.max(1));
 
     println!(
@@ -64,7 +65,8 @@ fn main() {
          tf:fault|count\t\
          dd:sp|at|CF(conflict)|NB(net_toward_bond)|pf|sac\t\
          mat:m\t\
-         axl:n|act|upd|expl(n|avg|max)|top[ax:e|n|w[src:w,...]]"
+         axl:n|act|upd|expl(n|avg|max)|top[ax:e|n|w[src:w,...]]\t\
+         pg:n|e|g|r|fp|k|vp|tnb|tgb|fhr|dens|phd"
         );
     }
 
@@ -76,10 +78,13 @@ fn main() {
             Ok(snap) => {
                 if snap.seq != last_seq {
                     last_seq = snap.seq;
+                    let pg_stats = std::fs::read_to_string(&pg_stats_path)
+                        .ok()
+                        .map(|s| parse_flat_json(&s));
                     if compact {
                         println!("{}", observer_compact::compact_row(&snap));
                     } else {
-                        print_row(&snap);
+                        print_row(&snap, pg_stats.as_ref());
                     }
                     if let Some(path) = session_csv.as_ref() {
                         let _ = observer_session::append_session_row(
@@ -174,7 +179,7 @@ fn predictor_lifecycle_label(state: PredictorLifecycleState) -> &'static str {
     }
 }
 
-fn print_row(snap: &SnapshotData) {
+fn print_row(snap: &SnapshotData, pg_stats: Option<&std::collections::HashMap<String, f64>>) {
     let clock_s = (snap.clock_us.saturating_sub(snap.start_us)) as f64 * 1e-6;
 
     // Age of PHOT startup and last-frame times. Observer renders snapshot
@@ -744,7 +749,53 @@ fn print_row(snap: &SnapshotData) {
     // v59: axis-level cross-layer bank — summary, never a full dump.
     row.push_str(&format!("\taxl:{}", axis_xlayer_summary(&snap.axis_xlayers)));
 
+    // Phase B4: perturbation_graph live summary — node / edge / group /
+    // relation / fast_path / kind / vocal_profile counts + top binds, hit
+    // rate, post-hoc disagree rate. Read from the runtime's pg_stats.json
+    // sidecar; "-" if the body hasn't written it yet (fresh boot).
+    row.push_str(&format!("\tpg:{}", pg_summary(pg_stats)));
+
     println!("{}", row);
+}
+
+/// Tiny flat-JSON parser for pg_stats.json — values are u64 or f64, no
+/// nesting, no escaping. Cheaper than pulling serde_json into the build.
+fn parse_flat_json(text: &str) -> std::collections::HashMap<String, f64> {
+    let mut out = std::collections::HashMap::new();
+    let body = text.trim().trim_start_matches('{').trim_end_matches('}');
+    for piece in body.split(',') {
+        let mut kv = piece.splitn(2, ':');
+        if let (Some(k), Some(v)) = (kv.next(), kv.next()) {
+            let k = k.trim().trim_matches('"').to_string();
+            if let Ok(v) = v.trim().parse::<f64>() {
+                out.insert(k, v);
+            }
+        }
+    }
+    out
+}
+
+/// Phase B4: render the pg_stats.json sidecar (written by body.rs every
+/// checkpoint tick) into a one-block tab-cell.
+fn pg_summary(stats: Option<&std::collections::HashMap<String, f64>>) -> String {
+    let Some(s) = stats else { return "-".to_string(); };
+    let n = |k: &str| s.get(k).copied().unwrap_or(0.0) as u64;
+    let f = |k: &str| s.get(k).copied().unwrap_or(0.0);
+    format!(
+        "n{}|e{}|g{}|r{}|fp{}|k{}|vp{}|tnb{:.3}|tgb{:.3}|fhr{:.3}|dens{:.3}|phd{:.3}",
+        n("n_nodes"),
+        n("n_edges"),
+        n("n_groups"),
+        n("n_relations"),
+        n("n_fast_paths"),
+        n("n_kinds"),
+        n("n_vocal_profiles"),
+        f("top_node_bind"),
+        f("top_group_bind"),
+        f("fast_path_hit_rate"),
+        f("graph_density"),
+        f("post_hoc_disagree"),
+    )
 }
 
 /// Explained fraction of the target error's variance: 1 - mse/var, clamped to

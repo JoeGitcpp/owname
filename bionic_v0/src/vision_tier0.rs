@@ -313,6 +313,55 @@ impl VisionTier0 {
                 );
             }
         }
+        // Phase E2: Nest relation — a large patch that spatially contains
+        // a smaller one. Triggers when patch A's size_ema is ≥ 2× B's AND
+        // A's centroid is within B's bounding region (sig-distance proxy
+        // on the first 2 axes which carry HSV mean — close in color, not
+        // necessarily position, but vision_tier0 doesn't keep raw bbox
+        // here so we approximate). Per-frame emission count is bounded by
+        // the same K²=56 cap from the Cooccur block above.
+        for i in 0..top_active.len() {
+            for j in 0..top_active.len() {
+                if i == j {
+                    continue;
+                }
+                let (id_a, id_b) = (top_active[i].0, top_active[j].0);
+                let Some(na) = graph.node(id_a) else { continue; };
+                let Some(nb) = graph.node(id_b) else { continue; };
+                // Crude containment proxy: A is ≥ 2× the size of B and
+                // their HSV-mean sig coordinates are within 0.15 — they
+                // share the local neighborhood, A is bigger, so B "nests"
+                // inside A.
+                if na.size_ema >= 2.0 * nb.size_ema && nb.size_ema > 1e-6 {
+                    let mut sig_close = 0.0;
+                    for k in 0..6 {
+                        sig_close += (na.sig[k] - nb.sig[k]).abs();
+                    }
+                    if sig_close / 6.0 < 0.15 {
+                        graph.observe_relation(
+                            now_us,
+                            crate::perturbation_graph::Endpoint::Node(id_a),
+                            crate::perturbation_graph::Endpoint::Node(id_b),
+                            EdgeKind::Nest,
+                        );
+                    }
+                }
+            }
+        }
+        // Phase E1: spend one observe_relation_emergent call per frame on
+        // the strongest active pair so the emergent kind clustering keeps
+        // discovering new RelationKinds. Without this, the substrate is
+        // forever stuck in the 5 primitive kinds (Cooccur/Nest/Causal/
+        // CrossModal/Sequence) — the design-doc "open vocabulary" never
+        // materializes. One call per frame keeps the per-frame cost flat
+        // while letting the clustering see new context shapes over time.
+        if top_active.len() >= 2 {
+            let _ = graph.observe_relation_emergent(
+                now_us,
+                crate::perturbation_graph::Endpoint::Node(top_active[0].0),
+                crate::perturbation_graph::Endpoint::Node(top_active[1].0),
+            );
+        }
         // Phase A2: form / refresh region-local NodeGroups from the active set.
         // Each tick, active patches sort themselves into spatial buckets and a
         // shared temporal window; the streaming pass either grows an existing

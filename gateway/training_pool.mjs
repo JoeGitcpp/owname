@@ -210,6 +210,21 @@ export function evaluate_session({
     hasDelta = true
   }
 
+  // Phase B5: relations + fast_paths as additional growth evidence. Once the
+  // post-Phase-A substrate populates, a call may produce comparatively few
+  // NEW nodes (most patches are recognized) but a swarm of new relations and
+  // possibly the first FastPath promotions. That's the genuine "thinking is
+  // happening" signal and should not be rejected as no_delta.
+  let pgStats = null
+  try {
+    pgStats = JSON.parse(readFileSync(join(runtimeDir, 'pg_stats.json'), 'utf8'))
+  } catch { /* sidecar may not exist on a fresh body — graceful skip */ }
+  if (pgStats) {
+    if ((pgStats.n_relations ?? 0) >= 50) hasDelta = true
+    if ((pgStats.n_fast_paths ?? 0) >= 1) hasDelta = true
+    if ((pgStats.n_groups ?? 0) >= 3) hasDelta = true
+  }
+
   if (!hasDelta) {
     return { pass: false, score: 0, reason: 'no_delta' }
   }
@@ -225,7 +240,19 @@ export function evaluate_session({
   const nodeScore     = Math.min(1, nGraphNodes / 500)
   const bindScore     = Math.min(1, topBind)
   const vocalScore    = Math.min(1, vocalEfficacy * 10)
-  const score = (durationScore * 0.3 + nodeScore * 0.3 + bindScore * 0.2 + vocalScore * 0.2)
+  // Phase B5: relation density + fast_path promotions weight up genuine
+  // substrate development. A call that's mostly "Recognizing seen patches"
+  // (low new nodes, high new relations) still scores well.
+  const relScore   = pgStats ? Math.min(1, (pgStats.n_relations ?? 0) / 2000) : 0
+  const fpScore    = pgStats ? Math.min(1, (pgStats.n_fast_paths ?? 0) / 32) : 0
+  const score = (
+    durationScore * 0.25
+    + nodeScore   * 0.20
+    + bindScore   * 0.15
+    + vocalScore  * 0.15
+    + relScore    * 0.15
+    + fpScore     * 0.10
+  )
 
   return { pass: true, score, reason: 'ok' }
 }

@@ -699,6 +699,18 @@ pub struct PerturbationGraph {
     pub next_rel_id: u32,
     /// Next emergent kind id to hand out. Starts at PRIMITIVE_KIND_COUNT.
     pub next_kind_id: u32,
+    /// Phase B3: hit / query EMAs of the FastPath query channel. Tracks
+    /// "muscle memory is doing the work" as a live ratio readable by
+    /// consumers (INTERO_FAST_PATH_HIT_RATE). Both decay every call so a
+    /// long quiet stretch erodes the rate naturally rather than freezing
+    /// the last observed value.
+    pub fast_path_hit_ema: f64,
+    pub fast_path_query_ema: f64,
+    /// Phase C: rolling fraction of post_hoc_check rounds where the
+    /// fired FastPath disagreed with the observed outcome. Surfaced on
+    /// INTERO_POST_HOC_DISAGREE_RATE — if this trends high, FastPath
+    /// promotion is too eager.
+    pub post_hoc_disagree_ema: f64,
 }
 
 impl Default for PerturbationGraph {
@@ -730,6 +742,9 @@ impl Default for PerturbationGraph {
             next_group_id: 1,
             next_rel_id: 1,
             next_kind_id: PRIMITIVE_KIND_COUNT as u32,
+            fast_path_hit_ema: 0.0,
+            fast_path_query_ema: 0.0,
+            post_hoc_disagree_ema: 0.0,
         }
     }
 }
@@ -1504,6 +1519,46 @@ impl PerturbationGraph {
             }
         }
         ResponseOutcome::NeedsDeliberation
+    }
+
+    /// Phase B3 telemetry: record whether the most recent FastPath query was
+    /// a hit. EMA-tracked so consumers (INTERO_FAST_PATH_HIT_RATE) can see a
+    /// smooth "muscle memory is doing the work" reading. Decay is symmetric
+    /// — a long quiet stretch erodes both counters toward zero.
+    pub fn note_fast_path_query(&mut self, was_hit: bool) {
+        const ALPHA: f64 = 0.05;
+        self.fast_path_query_ema = (1.0 - ALPHA) * self.fast_path_query_ema + ALPHA;
+        let hit = if was_hit { 1.0 } else { 0.0 };
+        self.fast_path_hit_ema = (1.0 - ALPHA) * self.fast_path_hit_ema + ALPHA * hit;
+    }
+
+    /// EMA-derived hit rate in [0,1]. Returns 0 when the channel has never
+    /// been probed (fresh boot) — consumers can treat that as "no muscle
+    /// memory in play yet" without special-casing.
+    pub fn fast_path_hit_rate(&self) -> f64 {
+        if self.fast_path_query_ema < 1e-6 {
+            0.0
+        } else {
+            (self.fast_path_hit_ema / self.fast_path_query_ema).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Density readout: relations per node. Capped at 64 (saturates well
+    /// before the design-doc "千丝万缕" ratio); divided by the cap before
+    /// publishing so the axis stays in [0,1].
+    pub fn graph_density(&self) -> f64 {
+        if self.nodes.is_empty() {
+            0.0
+        } else {
+            ((self.relations.len() as f64) / (self.nodes.len() as f64) / 64.0).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Phase C: bump the post-hoc disagree EMA. Caller is `post_hoc_check`.
+    pub fn note_post_hoc_outcome(&mut self, disagreed: bool) {
+        const ALPHA: f64 = 0.05;
+        let d = if disagreed { 1.0 } else { 0.0 };
+        self.post_hoc_disagree_ema = (1.0 - ALPHA) * self.post_hoc_disagree_ema + ALPHA * d;
     }
 
     /// Tally a FastPath usage (called by the consumer after `default_response`
@@ -2645,6 +2700,10 @@ impl PerturbationGraph {
             next_group_id,
             next_rel_id,
             next_kind_id,
+            // Phase B3 telemetry — not persisted, rebuilt online.
+            fast_path_hit_ema: 0.0,
+            fast_path_query_ema: 0.0,
+            post_hoc_disagree_ema: 0.0,
         })
     }
 }

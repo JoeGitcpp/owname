@@ -69,6 +69,7 @@ pub mod vocal_target;
 pub mod vocal_target_recall;
 pub mod vocal_sequence;
 pub mod perturbation_graph;
+pub mod intention;
 pub mod vision_tier0;
 pub mod phoneme_memory;
 pub mod vpc;
@@ -151,7 +152,17 @@ pub const INTERO_PRESENCE: usize = AXIS_INTERO_BASE + 9;   // familiar-object in
 //   low when absent. Persistent high-err on this axis (predicted-present but
 //   actually absent) is the substrate form of "longing" — no label needed.
 
-pub const INTERO_AXES: usize = 10;
+// Phase B: perturbation_graph substrate axes — three richer attachment readings
+// the consumers now publish alongside the scalar most_bound (Phase A → B handoff).
+pub const INTERO_GROUP_BIND_TOP: usize = AXIS_INTERO_BASE + 10; // strongest NodeGroup bind
+pub const INTERO_GRAPH_DENSITY: usize = AXIS_INTERO_BASE + 11;  // relations.len()/nodes.len()
+pub const INTERO_FAST_PATH_HIT_RATE: usize = AXIS_INTERO_BASE + 12; // muscle-memory hit rate
+// Phase C: intention + post-hoc-check telemetry axes — let the prediction
+// fabric learn from "I am pushing toward X" and "FastPath was wrong this time".
+pub const INTERO_INTENTION_PRESSURE: usize = AXIS_INTERO_BASE + 13;     // active deliberation pressure
+pub const INTERO_POST_HOC_DISAGREE_RATE: usize = AXIS_INTERO_BASE + 14; // fraction of FastPath fires that were retroactively wrong
+
+pub const INTERO_AXES: usize = 15;
 
 // Five code/digital-object projection axes — the tier-0 STRUCT/ORDER sub-set as applied to
 // digital objects.  Per design doc §4: physical and digital objects are different projections
@@ -558,7 +569,13 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 /// a fresh lineage maturity reset the cleanest path forward. Existing
 /// snapshot.bin v61 files are rejected; perturbation_graph.bin v1 files keep
 /// loading under the v2 codepath (groups / relations re-seed empty).
-pub const SNAPSHOT_VERSION: u64 = 62;
+/// v63: Phase B/C consumer rewire + intention substrate. INTERO_AXES grows
+/// from 10 to 15 (group bind top, graph density, FastPath hit rate, intention
+/// pressure, post-hoc disagree rate). AXIS_COUNT therefore shifts; every prior
+/// snapshot at v62 carries the wrong tower dimensionality and is rejected.
+/// The intention.rs state is persisted alongside the snapshot block; the
+/// IntentionState block is new and zeroed on first load.
+pub const SNAPSHOT_VERSION: u64 = 63;
 
 /// Precision-war guard rule 2: hard ceiling on any prior magnitude written
 /// into the per-axis prior channel ("prior 精度上限 ≈ 100"). A diverged or
