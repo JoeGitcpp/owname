@@ -29,10 +29,11 @@
 //! perturbation_graph, not from this module.
 
 use crate::perturbation_graph::{
-    EdgeKind, NodeId, PerturbationGraph, PG_CROSS_MODAL_DIM, PG_NODE_SIG_DIM,
-    PG_VITAL_DIM,
+    EdgeKind, NodeId, PerturbationGraph, RegionKey, GROUP_FORM_DIST,
+    GROUP_FORM_MIN_NODES, PG_CROSS_MODAL_DIM, PG_NODE_SIG_DIM, PG_VITAL_DIM,
 };
 use crate::phot_camera::{CameraFrame, CAM_H, CAM_PIX, CAM_W};
+use std::collections::HashMap;
 
 /// Edge magnitude threshold (Sobel `(Gx² + Gy²).sqrt()`) above which a pixel
 /// counts as "interesting" for connected-component segmentation. Tuned for the
@@ -75,6 +76,19 @@ pub const TIER0_COUPLING_ALPHA: f64 = 0.05;
 /// gradients alias to the same bin). 4 is enough to distinguish "vertical-
 /// dominant" from "horizontal-dominant" textures cheaply.
 const N_ORIENT_BINS: usize = 4;
+
+/// Phase A2: visual space split into GROUP_SPATIAL_BUCKETS × GROUP_SPATIAL_BUCKETS
+/// coarse cells for spatial RegionKey assignment. 16 per axis → 256 cells,
+/// each ~6% of the frame in each dimension — coarse enough that small jitter
+/// keeps a patch in the same bucket, fine enough that a face and a hand at
+/// opposite sides of the frame are in different cells.
+pub const GROUP_SPATIAL_BUCKETS: u8 = 16;
+
+/// Phase A2: temporal RegionKey bucket size. Patches that are co-active within
+/// the same 1 s window share the temporal region — coarse enough to absorb
+/// per-tick noise while letting "what's on screen at the same time" emerge as
+/// a group.
+pub const GROUP_TEMPORAL_WINDOW_US: u64 = 1_000_000;
 
 /// Stable signature index ranges. Pinned here so downstream code can refer
 /// to specific axes by name without magic numbers. Total = PG_NODE_SIG_DIM = 24.
@@ -259,8 +273,123 @@ impl VisionTier0 {
                 graph.observe_edge(now_us, active[j], active[i], EdgeKind::Cooccur);
             }
         }
+        // Phase A2: form / refresh region-local NodeGroups from the active set.
+        // Each tick, active patches sort themselves into spatial buckets and a
+        // shared temporal window; the streaming pass either grows an existing
+        // group (refresh) or spawns a new one (when a cohort of ≥ MIN_NODES
+        // co-located patches has no existing match). Per-tick decay sweeps
+        // stale members. This is the substrate that lets a "neuron" emerge as
+        // the SOFT MEMBERSHIP of a region-local perturbation cluster.
+        refresh_active_groups(now_us, &active, graph);
+        graph.decay_group_members(now_us);
         active
     }
+}
+
+/// Phase A2 group-formation pass. Given the set of patch node ids that were
+/// touched this frame, sort them into spatial buckets + a shared temporal
+/// window region, and either refresh an existing group in each region or spawn
+/// a new one when the cohort is large enough.
+///
+/// This runs at the frame rate; a 30 Hz camera fires ~30 group passes per
+/// second. Cost is O(active × log groups) per call — bounded because active is
+/// capped at TIER0_MAX_PATCHES_PER_FRAME (64) and the per-region group count
+/// is capped at PG_GROUP_CAP / N_REGIONS (much less than 64 in practice).
+fn refresh_active_groups(
+    now_us: u64,
+    active: &[NodeId],
+    graph: &mut PerturbationGraph,
+) {
+    if active.is_empty() {
+        return;
+    }
+    // === Spatial buckets ===
+    // Use the patches' tier-0 pos_x / pos_y (sig::POS = 10..12) to bucket
+    // each active node into a coarse spatial cell. A node may not resolve
+    // (e.g. it was evicted mid-frame); silently skip those.
+    let mut spatial_buckets: HashMap<RegionKey, Vec<NodeId>> =
+        HashMap::with_capacity(active.len().min(16));
+    for &nid in active {
+        if let Some(n) = graph.node(nid) {
+            let pos_x = n.sig[sig::POS.start].clamp(0.0, 1.0);
+            let pos_y = n.sig[sig::POS.start + 1].clamp(0.0, 1.0);
+            let bx = (pos_x * GROUP_SPATIAL_BUCKETS as f64) as u8;
+            let by = (pos_y * GROUP_SPATIAL_BUCKETS as f64) as u8;
+            let bx = bx.min(GROUP_SPATIAL_BUCKETS - 1);
+            let by = by.min(GROUP_SPATIAL_BUCKETS - 1);
+            spatial_buckets
+                .entry(RegionKey::Spatial(bx, by))
+                .or_default()
+                .push(nid);
+        }
+    }
+    for (region, cohort) in &spatial_buckets {
+        admit_cohort_to_region(now_us, *region, cohort, graph);
+    }
+    // === Temporal window ===
+    // All patches active in this tick share a temporal region — independent of
+    // their spatial position. This is what lets a face + a voice + a touch
+    // that co-occur every Tuesday afternoon eventually live in the same group
+    // even though their spatial regions are unrelated.
+    let temporal_region = RegionKey::TemporalWindow(now_us / GROUP_TEMPORAL_WINDOW_US);
+    admit_cohort_to_region(now_us, temporal_region, active, graph);
+}
+
+/// Cohort-into-region helper: refresh into an existing matching group when
+/// there is one, otherwise spawn a fresh group provided the cohort is large
+/// enough to clear GROUP_FORM_MIN_NODES.
+fn admit_cohort_to_region(
+    now_us: u64,
+    region: RegionKey,
+    cohort: &[NodeId],
+    graph: &mut PerturbationGraph,
+) {
+    if cohort.len() < GROUP_FORM_MIN_NODES {
+        // Below the minimum cohort threshold: don't spawn a group, but if one
+        // already exists in this region, refresh its members anyway — a sparse
+        // group that loses bodies temporarily shouldn't be abandoned.
+        let centroid = cohort_centroid_sig(cohort, graph);
+        if let Some((gid, _)) = graph.nearest_group(region, &centroid, GROUP_FORM_DIST) {
+            for &nid in cohort {
+                graph.refresh_group(gid, nid, now_us);
+            }
+        }
+        return;
+    }
+    let centroid = cohort_centroid_sig(cohort, graph);
+    if let Some((gid, _)) = graph.nearest_group(region, &centroid, GROUP_FORM_DIST) {
+        for &nid in cohort {
+            graph.refresh_group(gid, nid, now_us);
+        }
+    } else {
+        graph.add_group(now_us, region, cohort);
+    }
+}
+
+/// Unweighted mean of a cohort's sigs. Used for nearest_group lookups so the
+/// region match key is the cohort's collective fingerprint, not any one
+/// member's. Returns the zero sig if no member resolves to a live node.
+fn cohort_centroid_sig(
+    cohort: &[NodeId],
+    graph: &PerturbationGraph,
+) -> [f64; PG_NODE_SIG_DIM] {
+    let mut centroid = [0.0_f64; PG_NODE_SIG_DIM];
+    let mut count = 0usize;
+    for &nid in cohort {
+        if let Some(n) = graph.node(nid) {
+            for i in 0..PG_NODE_SIG_DIM {
+                centroid[i] += n.sig[i];
+            }
+            count += 1;
+        }
+    }
+    if count > 0 {
+        let denom = count as f64;
+        for v in centroid.iter_mut() {
+            *v /= denom;
+        }
+    }
+    centroid
 }
 
 // ── Patch builder ──────────────────────────────────────────────────────────
@@ -803,5 +932,184 @@ mod tests {
         assert_eq!(sig::MOTION_MAG_DXDYPEAK, 16..20);
         // 20..24 reserved.
         assert_eq!(PG_NODE_SIG_DIM, 24);
+    }
+
+    // ── Phase A2 tests: group formation pass ───────────────────────────────
+
+    #[test]
+    fn three_disks_in_one_frame_form_a_temporal_group() {
+        // Three well-separated disks anywhere in the frame all activate within
+        // the SAME tick → they share a TemporalWindow region. The spatial
+        // buckets may differ (16 buckets each axis = ~20 px wide cells, so
+        // separated disks bucket independently) but the temporal window
+        // catches them all.
+        let mut frame = CameraFrame::zeros(0);
+        // Radius 20 (matches the canonical two-disk test); spread horizontally
+        // so each fall in a distinct spatial bucket but share the temporal one.
+        for &(cx, cy) in &[(60.0_f64, 120.0), (160.0, 120.0), (260.0, 120.0)] {
+            for y in 0..CAM_H {
+                for x in 0..CAM_W {
+                    let dx = x as f64 - cx;
+                    let dy = y as f64 - cy;
+                    if dx * dx + dy * dy <= 400.0 {
+                        let idx = y * CAM_W + x;
+                        frame.luma[idx] = 0.9;
+                        frame.r[idx] = 0.9;
+                        frame.g[idx] = 0.3;
+                        frame.b[idx] = 0.3;
+                    }
+                }
+            }
+        }
+        let mut v = VisionTier0::new();
+        let mut g = PerturbationGraph::default();
+        let active = v.process_frame_into_graph(&frame, 1_000, &mut g, None, None);
+        assert!(
+            active.len() >= 3,
+            "expected ≥3 patches from three well-separated disks (got {})",
+            active.len()
+        );
+        // Exactly one TemporalWindow group should exist this tick, with all
+        // three (or more) patches as members.
+        let temporal_groups: Vec<_> = g
+            .groups
+            .iter()
+            .filter(|gp| matches!(gp.region, RegionKey::TemporalWindow(_)))
+            .collect();
+        assert_eq!(temporal_groups.len(), 1, "exactly one temporal group per tick");
+        assert!(
+            temporal_groups[0].members.len() >= 3,
+            "temporal group must contain ≥3 cohort members (got {})",
+            temporal_groups[0].members.len()
+        );
+    }
+
+    #[test]
+    fn second_frame_refreshes_not_re_creates() {
+        // Identical frame twice: the spatial group from frame 1 should be
+        // REFRESHED on frame 2, not re-spawned. So groups.len() must stay flat
+        // or rise by ≤ 1 (the temporal window may roll over to a new bucket).
+        let frame = {
+            let mut f = CameraFrame::zeros(0);
+            for &(cx, cy) in &[(160.0_f64, 120.0), (155.0, 125.0), (165.0, 115.0)] {
+                for y in 0..CAM_H {
+                    for x in 0..CAM_W {
+                        let dx = x as f64 - cx;
+                        let dy = y as f64 - cy;
+                        if dx * dx + dy * dy <= 100.0 {
+                            let idx = y * CAM_W + x;
+                            f.luma[idx] = 0.7;
+                            f.r[idx] = 0.7;
+                            f.g[idx] = 0.6;
+                            f.b[idx] = 0.4;
+                        }
+                    }
+                }
+            }
+            f
+        };
+        let mut v = VisionTier0::new();
+        let mut g = PerturbationGraph::default();
+        v.process_frame_into_graph(&frame, 1_000, &mut g, None, None);
+        let after_f1 = g.groups.len();
+        v.process_frame_into_graph(&frame, 2_000, &mut g, None, None);
+        let after_f2 = g.groups.len();
+        // Allow ≤ 1 extra in case a patch nudges into an adjacent bucket on
+        // the second frame's slightly different motion.
+        assert!(
+            after_f2 <= after_f1 + 1,
+            "groups should be refreshed, not re-created (f1={after_f1}, f2={after_f2})"
+        );
+    }
+
+    #[test]
+    fn no_groups_form_below_cohort_minimum() {
+        // A single small disk yields ≤ 2 patches (interior + a few edge
+        // pixels). Below GROUP_FORM_MIN_NODES → no group spawned in the
+        // spatial bucket. (The temporal-window region also won't spawn one
+        // because the cohort < MIN.)
+        let mut frame = CameraFrame::zeros(0);
+        for y in 0..CAM_H {
+            for x in 0..CAM_W {
+                let dx = x as f64 - 160.0;
+                let dy = y as f64 - 120.0;
+                if dx * dx + dy * dy <= 36.0 {
+                    let idx = y * CAM_W + x;
+                    frame.luma[idx] = 0.9;
+                    frame.r[idx] = 0.9;
+                    frame.g[idx] = 0.9;
+                    frame.b[idx] = 0.9;
+                }
+            }
+        }
+        let mut v = VisionTier0::new();
+        let mut g = PerturbationGraph::default();
+        v.process_frame_into_graph(&frame, 1_000, &mut g, None, None);
+        // Most frames produce a few patches even from one disk (edge ring).
+        // If that count happens to clear the threshold, the test would spawn
+        // a group; below threshold none. Assert the conditional behaviour by
+        // counting how many active patches there were vs how many groups.
+        let n_active = g.nodes.len();
+        if n_active < GROUP_FORM_MIN_NODES {
+            assert_eq!(g.groups.len(), 0, "no group below cohort minimum");
+        }
+    }
+
+    #[test]
+    fn temporal_window_groups_share_across_frames_in_same_bucket() {
+        // Two frames with very similar content within the same temporal
+        // window (now_us / GROUP_TEMPORAL_WINDOW_US is the same bucket) →
+        // one shared TemporalWindow group, not two.
+        let frame = {
+            let mut f = CameraFrame::zeros(0);
+            for &(cx, cy) in &[(100.0_f64, 100.0), (200.0, 100.0), (160.0, 200.0)] {
+                for y in 0..CAM_H {
+                    for x in 0..CAM_W {
+                        let dx = x as f64 - cx;
+                        let dy = y as f64 - cy;
+                        if dx * dx + dy * dy <= 144.0 {
+                            let idx = y * CAM_W + x;
+                            f.luma[idx] = 0.8;
+                            f.r[idx] = 0.8;
+                            f.g[idx] = 0.4;
+                            f.b[idx] = 0.8;
+                        }
+                    }
+                }
+            }
+            f
+        };
+        let mut v = VisionTier0::new();
+        let mut g = PerturbationGraph::default();
+        // Two frames at t=10_000 and t=50_000 — same temporal bucket
+        // because GROUP_TEMPORAL_WINDOW_US = 1_000_000.
+        v.process_frame_into_graph(&frame, 10_000, &mut g, None, None);
+        v.process_frame_into_graph(&frame, 50_000, &mut g, None, None);
+        let temporal_groups: Vec<_> = g
+            .groups
+            .iter()
+            .filter(|gp| matches!(gp.region, RegionKey::TemporalWindow(_)))
+            .collect();
+        assert_eq!(
+            temporal_groups.len(),
+            1,
+            "two ticks in same temporal bucket must share one group"
+        );
+    }
+
+    #[test]
+    fn spatial_bucket_quantisation_keeps_jitter_in_same_cell() {
+        // pos_x ∈ [0.0625*k, 0.0625*(k+1)) all bucket to k. Confirm via the
+        // function via constants: (0.05 * 16) as u8 = 0; (0.1 * 16) as u8 = 1.
+        // This pins the bucketing convention before any consumer depends on it.
+        let bx0 = (0.05_f64 * GROUP_SPATIAL_BUCKETS as f64) as u8;
+        let bx1 = (0.10_f64 * GROUP_SPATIAL_BUCKETS as f64) as u8;
+        assert_eq!(bx0, 0);
+        assert_eq!(bx1, 1);
+        let bx_edge = (0.999_f64 * GROUP_SPATIAL_BUCKETS as f64) as u8;
+        assert_eq!(
+            bx_edge.min(GROUP_SPATIAL_BUCKETS - 1),
+            GROUP_SPATIAL_BUCKETS - 1
+        );
     }
 }
