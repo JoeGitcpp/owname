@@ -5388,27 +5388,71 @@ impl Viewport {
         self.push_observation(crate::GAUSS_ACTIVE_FRAC_AXIS, now_us, active_frac.clamp(0.0, 1.0));
     }
 
-    /// Phase 3 Stage 2: drive the tier-0 visual frontend from one CameraFrame.
+    /// Phase 3 Stage 3: read the body's current cross-modal + vital state so
+    /// vision_tier0 can accumulate those correlations onto refreshed nodes.
+    ///
+    /// cross_modal[8]: 8 bins of the body's own VOICE — pairs of self_vocal_bands
+    /// averaged down from 16 to 8. A node that is reliably active while the
+    /// body voices spectrum X accumulates that signature in its cross_modal
+    /// stats. The "can sound" / "speaks-like-this" affordance emerges as the
+    /// MARGINAL STATISTIC of which spectral bins co-fire with this node, not
+    /// as a label.
+    ///
+    /// vital_coupling[6]: the body's current metabolic + protective scalars
+    /// (reserve, vital_anxiety, pain, drain_baseline, last_supply, last_drain).
+    /// A node that is reliably active when the body feels safe/well accumulates
+    /// positive vital_coupling; a node active during pain/anxiety accumulates
+    /// the opposite. The "friendly / dangerous" affordance emerges from the
+    /// signed pattern of these stats, never as a binary flag.
+    fn read_tier0_couplings(
+        &self,
+    ) -> (
+        [f64; crate::perturbation_graph::PG_CROSS_MODAL_DIM],
+        [f64; crate::perturbation_graph::PG_VITAL_DIM],
+    ) {
+        let mut cm = [0.0f64; crate::perturbation_graph::PG_CROSS_MODAL_DIM];
+        let (bands, _) = self.read_self_vocal_bands();
+        // 16 → 8 averaging pairs (VIB_BANDS / PG_CROSS_MODAL_DIM = 2).
+        let stride = crate::VIB_BANDS / crate::perturbation_graph::PG_CROSS_MODAL_DIM;
+        for i in 0..crate::perturbation_graph::PG_CROSS_MODAL_DIM {
+            let mut acc = 0.0;
+            for j in 0..stride {
+                acc += bands[i * stride + j].abs();
+            }
+            cm[i] = (acc / stride as f64).clamp(0.0, 1.0);
+        }
+        let vital = self.read_vital_core();
+        let vc = [
+            vital.reserve.clamp(0.0, 1.0),
+            vital.vital_anxiety.clamp(0.0, 1.0),
+            vital.pain.clamp(0.0, 1.0),
+            vital.drain_baseline.clamp(0.0, 1.0),
+            vital.last_supply.clamp(0.0, 1.0),
+            vital.last_drain.clamp(0.0, 1.0),
+        ];
+        (cm, vc)
+    }
+
+    /// Phase 3 Stage 2/3: drive the tier-0 visual frontend from one CameraFrame.
     /// Used by the hardware path (RealPhotAdapter) and the virtual-neck
-    /// curriculum path. Runs IN PARALLEL with the legacy region_perception +
-    /// slot-claim pipeline — does not touch slots. Cross-modal and vital
-    /// coupling readings are left as None at this stage; Stage 3 will wire
-    /// them so affordances (sound-coupling, attachment) accumulate on nodes.
+    /// curriculum path. Cross-modal (8 vocal bins) + vital_coupling (6 vital
+    /// scalars) are read here and forwarded so refreshed nodes accumulate
+    /// affordance statistics. Novel nodes start with zero couplings — the
+    /// stats only accumulate on RE-RECOGNISED nodes (Stage 1 contract).
     pub fn tick_vision_tier0_from_frame(
         &self,
         frame: &crate::phot_camera::CameraFrame,
         now_us: u64,
     ) {
+        let (cm, vc) = self.read_tier0_couplings();
         let mut vt = self.vision_tier0.write().unwrap();
         let mut graph = self.perturbation_graph.write().unwrap();
-        vt.process_frame_into_graph(frame, now_us, &mut graph, None, None);
+        vt.process_frame_into_graph(frame, now_us, &mut graph, Some(&cm), Some(&vc));
     }
 
-    /// Phase 3 Stage 2: drive the tier-0 visual frontend from a headless
-    /// 160×120 RGB planar grid (the gateway's SensesFrame.grid). Mirrors
-    /// `tick_gaussian_field_from_net`'s 2× nearest-neighbour upsample so
-    /// vision_tier0 sees a frame at its expected CAM_W×CAM_H resolution.
-    /// Same coupling-readings caveat as the from_frame path.
+    /// Phase 3 Stage 2/3: drive the tier-0 visual frontend from a headless
+    /// 160×120 RGB planar grid (the gateway's SensesFrame.grid). Same Stage 3
+    /// coupling reads as the from_frame path.
     pub fn tick_vision_tier0_from_net(&self, grid: &[f32], now_us: u64) {
         use crate::phot_camera::{CameraFrame, CAM_H, CAM_PIX, CAM_W};
         const SRC_W: usize = 160;
@@ -5440,8 +5484,9 @@ impl Viewport {
                 frame.luma[dst_i] = (r + g + b) / 3.0;
             }
         }
+        let (cm, vc) = self.read_tier0_couplings();
         let mut vt = self.vision_tier0.write().unwrap();
         let mut graph = self.perturbation_graph.write().unwrap();
-        vt.process_frame_into_graph(&frame, now_us, &mut graph, None, None);
+        vt.process_frame_into_graph(&frame, now_us, &mut graph, Some(&cm), Some(&vc));
     }
 }

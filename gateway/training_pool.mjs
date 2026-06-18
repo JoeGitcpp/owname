@@ -194,6 +194,17 @@ export function evaluate_session({
     }
   } catch { }
 
+  // Phase 3 cutover: also count perturbation_graph growth as delta evidence.
+  // A 5-minute visitor call produced 1545 nodes but learned_bias scalars barely
+  // moved (the new substrate lives in its own sidecar, not in learned_bias) —
+  // so a genuinely-learning call was wrongly rejected as no_delta. nGraphNodes
+  // > GRAPH_DELTA_MIN means perception accumulated meaningfully even when the
+  // legacy learned_bias didn't budge.
+  const GRAPH_DELTA_MIN = 100  // ≈ 30 s of real visual stream
+  if (nGraphNodes >= GRAPH_DELTA_MIN) {
+    hasDelta = true
+  }
+
   if (!hasDelta) {
     return { pass: false, score: 0, reason: 'no_delta' }
   }

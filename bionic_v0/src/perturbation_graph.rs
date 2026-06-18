@@ -66,14 +66,19 @@ pub const PG_CROSS_MODAL_DIM: usize = 8;
 pub const PG_VITAL_DIM: usize = 6;
 
 /// Soft cap on lifetime nodes. Way larger than SLOT_COUNT=8 — the whole point
-/// of the cutover is that the world is bigger than 8 things. 2048 fits in
-/// <1 MB and gives months of headroom before the first eviction. Eviction is
+/// of the cutover is that the world is bigger than 8 things. 8192 was chosen
+/// after the first 5-minute real visitor call filled 1545 nodes (~5 min × ~5
+/// nodes/s), with the prior 2048 already hitting eviction at ~3 min: 8192
+/// gives several hours of headroom before the first eviction. Eviction is
 /// age-protected so rare-but-old nodes survive a burst of new ones.
-pub const PG_NODE_CAP: usize = 2048;
+pub const PG_NODE_CAP: usize = 8192;
 
-/// Soft cap on edges. Average ~8 edges/node (sparse in practice — most node
-/// pairs never co-occur).
-pub const PG_EDGE_CAP: usize = 16384;
+/// Soft cap on edges. The 5-minute visitor data shows the previous 16384 cap
+/// saturates after ~3 min — the cooccurrence layer between every pair of
+/// in-frame patches is dense (TIER0_MAX_PATCHES_PER_FRAME² edges per tick).
+/// 65536 gives ~4× headroom and keeps the per-call edge eviction infrequent
+/// enough that the strongest relations stabilise before being squeezed out.
+pub const PG_EDGE_CAP: usize = 65536;
 
 /// Window after `last_active_t_us` during which a node is considered "live"
 /// and keeps getting tier-0 statistic updates (the active-neuron semantics).
