@@ -4775,6 +4775,52 @@ impl Viewport {
                         commit_r,
                         fit,
                     );
+                    // Phase A6 mirror: register a VocalProfile on a
+                    // perturbation_graph node that carries the same mel64
+                    // identity. If the graph already has a vocal node within
+                    // VOCAL_MEL_MATCH_DIST of this target, refresh its
+                    // profile; otherwise spawn a brand-new node (24-D sig
+                    // derived from the first 24 mel bands, normalised) and
+                    // register its profile. Additive — vocal_target_recall
+                    // continues to drive the formant servo; the mirror gives
+                    // downstream consumers a unified PerturbationGraph view.
+                    {
+                        let mut graph = self.perturbation_graph.write().unwrap();
+                        let node_id = match graph
+                            .nearest_vocal_node(&target.target_mel64)
+                        {
+                            Some((nid, _)) => nid,
+                            None => {
+                                // Build a 24-D sig from the first 24 mel bands
+                                // (normalised by their sum) so the new vocal
+                                // node sits in the same tier-0 signature space
+                                // as visual nodes, even if the projection is
+                                // coarse. Visual nodes that happen to align
+                                // remain distinguishable via the VocalProfile
+                                // sidecar; non-vocal nodes have no profile.
+                                let mut sig =
+                                    [0.0_f64; crate::perturbation_graph::PG_NODE_SIG_DIM];
+                                let s: f64 = target.target_mel64[..crate::perturbation_graph::PG_NODE_SIG_DIM]
+                                    .iter()
+                                    .map(|v| v.abs())
+                                    .sum();
+                                if s > 1e-9 {
+                                    for i in 0..crate::perturbation_graph::PG_NODE_SIG_DIM {
+                                        sig[i] = target.target_mel64[i].abs() / s;
+                                    }
+                                }
+                                graph.add_node(now_us, sig)
+                            }
+                        };
+                        graph.register_vocal_profile(
+                            node_id,
+                            target.target_mel64,
+                            commit_p,
+                            commit_r,
+                            fit,
+                            now_us,
+                        );
+                    }
                 }
             }
             // #8 Stage 1: learn the ORDER of vocal targets — an edge forms between

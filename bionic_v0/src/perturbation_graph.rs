@@ -388,6 +388,48 @@ pub struct Mark {
 /// considered stale and cleared. Q-C default in the design doc.
 pub const MARK_DECAY_US: u64 = 30_000_000;
 
+// ── Phase A6: VocalProfile (vocal-specific extension on PerturbationNode)
+//
+// vocal_target_recall stores RecallEntry { mel64: [f64; 64], f1_off, f2_off, fit,
+// last_update_t_us } as a content-addressed (mel64-keyed) target↔motor map. To
+// unify vocal cognition with the rest of the graph the substrate, A6 adds a
+// sidecar map `vocal_profiles: HashMap<NodeId, VocalProfile>` on PerturbationGraph.
+// Vocal-relevant nodes carry the full mel64 fingerprint and motor recipe as
+// their VocalProfile, while non-vocal nodes have no profile (Option-typed).
+//
+// This is an ADDITIVE migration: vocal_target_recall continues to exist and
+// drive the formant servo (its existing role). The mirror into perturbation_graph
+// gives downstream consumers a unified API: "look up a node by mel64; if it
+// has a vocal profile, that's the motor recipe to use".
+
+/// Dimensions of the per-vocal-node mel64 fingerprint.
+pub const PG_VOCAL_MEL_DIM: usize = 64;
+
+/// mel64 shape distance below which a candidate sound counts as the SAME
+/// vocal node. Mirrors RECALL_MATCH_DIST in vocal_target_recall (0.04).
+pub const VOCAL_MEL_MATCH_DIST: f64 = 0.04;
+
+/// Minimum fit below which a correction is not memorised (just noise).
+/// Mirrors RECALL_STORE_MIN_FIT (0.30).
+pub const VOCAL_FIT_MIN_STORE: f64 = 0.30;
+
+/// Vocal-specific profile for a PerturbationNode. Carries the 64-band mel
+/// fingerprint that identifies the target sound, plus the (f1_off, f2_off)
+/// motor correction the body learned for producing it, and the best fit
+/// achieved on that correction.
+///
+/// The profile is OPTIONAL — only vocal nodes have one. Visual nodes carry
+/// their identity in PerturbationNode.sig (24-D) and no VocalProfile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VocalProfile {
+    pub mel64: [f64; PG_VOCAL_MEL_DIM],
+    pub f1_off: f64,
+    pub f2_off: f64,
+    /// Best-known fit (1 - shape_dist) on this correction.
+    pub fit: f64,
+    pub last_update_t_us: u64,
+}
+
 /// Maximum traversal depth for relation walks. Cycle-protected by a visited
 /// set; depth cap kicks in for non-cyclic but deep chains (a → b → c → d ...
 /// where each step is a distinct Endpoint). Per the design doc Q-G default.
@@ -634,6 +676,13 @@ pub struct PerturbationGraph {
     /// on the same channel. Decay to empty after MARK_DECAY_US of idleness.
     /// Stored as a small Vec<Mark>; lookups are linear over ≤ 4 entries.
     pub marks: Vec<Mark>,
+    /// Phase A6: vocal-specific extension on selected PerturbationNodes.
+    /// Vocal nodes have a VocalProfile (mel64 fingerprint + motor recipe);
+    /// non-vocal nodes have none. Stored as a HashMap because the population
+    /// is small (~16 entries — mirrors vocal_target_recall's RECALL_CAP) and
+    /// the access pattern is lookup by NodeId. Runtime-only this commit;
+    /// persistence lands in Phase A9.
+    pub vocal_profiles: std::collections::HashMap<NodeId, VocalProfile>,
     /// Next id to hand out — never resets to 0 (the sentinel) and never reuses
     /// an evicted node's id within the same session.
     pub next_id: u32,
@@ -669,6 +718,7 @@ impl Default for PerturbationGraph {
             kinds,
             fast_paths: FastPathIndex::default(),
             marks: Vec::new(),
+            vocal_profiles: std::collections::HashMap::new(),
             next_id: 1,
             next_group_id: 1,
             next_rel_id: 1,
@@ -1585,6 +1635,82 @@ impl PerturbationGraph {
         correct
     }
 
+    // ── Vocal profile ops (Phase A6) ───────────────────────────────────────
+
+    /// Register or refresh a vocal profile on an existing node. The mel64
+    /// fingerprint identifies the target; (f1_off, f2_off) is the motor
+    /// recipe; fit is the best-known shape match. If the node has no profile
+    /// yet, one is created. If it already has one, fit-gated update: only
+    /// overwrite when the new fit is at least as good (mirrors
+    /// vocal_target_recall::store's "best-so-far" rule).
+    /// No-op if fit < VOCAL_FIT_MIN_STORE or node_id is unknown.
+    pub fn register_vocal_profile(
+        &mut self,
+        node_id: NodeId,
+        mel64: [f64; PG_VOCAL_MEL_DIM],
+        f1_off: f64,
+        f2_off: f64,
+        fit: f64,
+        now_us: u64,
+    ) {
+        if fit < VOCAL_FIT_MIN_STORE {
+            return;
+        }
+        if !self.has_node(node_id) {
+            return;
+        }
+        let entry = self.vocal_profiles.entry(node_id).or_insert(VocalProfile {
+            mel64,
+            f1_off,
+            f2_off,
+            fit,
+            last_update_t_us: now_us,
+        });
+        // Existing profile: update only if the new fit is at least as good.
+        if fit >= entry.fit {
+            entry.mel64 = mel64;
+            entry.f1_off = f1_off;
+            entry.f2_off = f2_off;
+            entry.fit = fit;
+            entry.last_update_t_us = now_us;
+        }
+    }
+
+    pub fn vocal_profile(&self, node_id: NodeId) -> Option<&VocalProfile> {
+        self.vocal_profiles.get(&node_id)
+    }
+
+    /// Content-addressed lookup: find the vocal node whose mel64 fingerprint is
+    /// nearest to the query target within VOCAL_MEL_MATCH_DIST. Returns
+    /// (node_id, distance). Mirrors vocal_target_recall::recall.
+    pub fn nearest_vocal_node(
+        &self,
+        target: &[f64; PG_VOCAL_MEL_DIM],
+    ) -> Option<(NodeId, f64)> {
+        // Silent target → no fingerprint → no match.
+        if target.iter().sum::<f64>() <= 1e-6 {
+            return None;
+        }
+        let mut best: Option<(NodeId, f64)> = None;
+        for (&nid, vp) in &self.vocal_profiles {
+            let d = mel64_shape_distance(target, &vp.mel64);
+            if d <= VOCAL_MEL_MATCH_DIST
+                && best.map(|(_, bd)| d < bd).unwrap_or(true)
+            {
+                best = Some((nid, d));
+            }
+        }
+        best
+    }
+
+    /// Drop vocal profiles whose backing node has been evicted. Safe to call
+    /// every tick; bounded by `vocal_profiles.len()` (small).
+    pub fn prune_orphan_vocal_profiles(&mut self) {
+        let live_ids: std::collections::HashSet<NodeId> =
+            self.nodes.iter().map(|n| n.id).collect();
+        self.vocal_profiles.retain(|nid, _| live_ids.contains(nid));
+    }
+
     // ── Mark ops (Phase A7: the "指向/标记" operator) ───────────────────────
 
     /// Returns true if the MarkRef target still resolves to a live entity.
@@ -2066,6 +2192,7 @@ impl PerturbationGraph {
             kinds,
             fast_paths: FastPathIndex::default(),
             marks: Vec::new(),
+            vocal_profiles: std::collections::HashMap::new(),
             next_id,
             next_group_id: 1,
             next_rel_id: 1,
@@ -2133,6 +2260,30 @@ pub fn ctx_distance(
         s += d * d;
     }
     s.sqrt()
+}
+
+/// Shape distance between two 64-band mel fingerprints. Mirrors the
+/// normalised-shape metric vocal_target_recall uses (spectral_shape_distance_mel64);
+/// here we implement the same idea inline so perturbation_graph stays
+/// self-contained: normalise each to sum-1 (treats it as a shape, not a level),
+/// then Euclidean distance.
+pub fn mel64_shape_distance(
+    a: &[f64; PG_VOCAL_MEL_DIM],
+    b: &[f64; PG_VOCAL_MEL_DIM],
+) -> f64 {
+    let sa: f64 = a.iter().map(|v| v.abs()).sum();
+    let sb: f64 = b.iter().map(|v| v.abs()).sum();
+    if sa < 1e-9 || sb < 1e-9 {
+        return f64::INFINITY;
+    }
+    let mut acc = 0.0;
+    for i in 0..PG_VOCAL_MEL_DIM {
+        let na = a[i].abs() / sa;
+        let nb = b[i].abs() / sb;
+        let d = na - nb;
+        acc += d * d;
+    }
+    acc.sqrt()
 }
 
 #[cfg(test)]
@@ -3243,6 +3394,100 @@ mod tests {
         g.stamp_mark(MarkChannel::Intention, MarkRef::Relation(rid), 0.7, 1_000);
         assert_eq!(g.get_mark(MarkChannel::DualDrive).unwrap().target, MarkRef::Group(grp));
         assert_eq!(g.get_mark(MarkChannel::Intention).unwrap().target, MarkRef::Relation(rid));
+    }
+
+    // ── Phase A6 tests: VocalProfile additive migration ───────────────────
+
+    fn mel64_at(peak_bin: usize) -> [f64; PG_VOCAL_MEL_DIM] {
+        let mut m = [0.0; PG_VOCAL_MEL_DIM];
+        for (i, v) in m.iter_mut().enumerate() {
+            let d = i as f64 - peak_bin as f64;
+            *v = (-(d * d) / 18.0).exp();
+        }
+        m
+    }
+
+    #[test]
+    fn register_vocal_profile_creates_entry() {
+        let mut g = PerturbationGraph::default();
+        let nid = g.add_node(0, sig_at(0.1));
+        let mel = mel64_at(20);
+        g.register_vocal_profile(nid, mel, 0.05, -0.02, 0.7, 1_000);
+        let vp = g.vocal_profile(nid).expect("profile registered");
+        assert!((vp.f1_off - 0.05).abs() < 1e-9);
+        assert!((vp.f2_off + 0.02).abs() < 1e-9);
+        assert!((vp.fit - 0.7).abs() < 1e-9);
+        assert_eq!(vp.last_update_t_us, 1_000);
+    }
+
+    #[test]
+    fn register_vocal_profile_skips_below_min_fit() {
+        let mut g = PerturbationGraph::default();
+        let nid = g.add_node(0, sig_at(0.1));
+        let mel = mel64_at(20);
+        g.register_vocal_profile(nid, mel, 0.0, 0.0, 0.10, 1_000);
+        assert!(g.vocal_profile(nid).is_none(), "below VOCAL_FIT_MIN_STORE → no profile");
+    }
+
+    #[test]
+    fn register_vocal_profile_only_updates_when_fit_improves() {
+        let mut g = PerturbationGraph::default();
+        let nid = g.add_node(0, sig_at(0.1));
+        let mel = mel64_at(20);
+        g.register_vocal_profile(nid, mel, 0.05, -0.02, 0.7, 1_000);
+        // Worse fit: ignored.
+        g.register_vocal_profile(nid, mel, 0.99, 0.99, 0.50, 2_000);
+        let vp = g.vocal_profile(nid).unwrap();
+        assert!((vp.fit - 0.7).abs() < 1e-9, "worse fit must not overwrite");
+        assert!((vp.f1_off - 0.05).abs() < 1e-9);
+        // Better fit: overwrites.
+        g.register_vocal_profile(nid, mel, 0.10, -0.01, 0.85, 3_000);
+        let vp2 = g.vocal_profile(nid).unwrap();
+        assert!((vp2.fit - 0.85).abs() < 1e-9);
+        assert!((vp2.f1_off - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nearest_vocal_node_finds_close_match() {
+        let mut g = PerturbationGraph::default();
+        let nid_a = g.add_node(0, sig_at(0.1));
+        let mel_a = mel64_at(20);
+        let nid_b = g.add_node(0, sig_at(0.5));
+        let mel_b = mel64_at(40);
+        g.register_vocal_profile(nid_a, mel_a, 0.0, 0.0, 0.8, 0);
+        g.register_vocal_profile(nid_b, mel_b, 0.0, 0.0, 0.8, 0);
+        // Query very close to mel_a → returns nid_a.
+        let q = mel64_at(20);
+        let (hit, _) = g.nearest_vocal_node(&q).expect("match");
+        assert_eq!(hit, nid_a);
+        // Query close to neither (peak at 5 — far from 20 and 40) → no match.
+        let q = mel64_at(5);
+        assert!(g.nearest_vocal_node(&q).is_none());
+    }
+
+    #[test]
+    fn prune_orphan_vocal_profiles_drops_evicted() {
+        let mut g = PerturbationGraph::default();
+        let nid = g.add_node(0, sig_at(0.1));
+        g.register_vocal_profile(nid, mel64_at(20), 0.0, 0.0, 0.8, 0);
+        assert!(g.vocal_profile(nid).is_some());
+        // Manually evict the node (simulate eviction).
+        g.nodes.retain(|n| n.id != nid);
+        g.prune_orphan_vocal_profiles();
+        assert!(g.vocal_profile(nid).is_none());
+    }
+
+    #[test]
+    fn mel64_shape_distance_basics() {
+        let a = mel64_at(20);
+        // Identical fingerprints → 0 distance.
+        assert!(mel64_shape_distance(&a, &a) < 1e-9);
+        // Silent target → infinite distance (no shape to compare).
+        let zero = [0.0; PG_VOCAL_MEL_DIM];
+        assert!(mel64_shape_distance(&zero, &a).is_infinite());
+        // Distinct peaks → strictly positive distance.
+        let b = mel64_at(40);
+        assert!(mel64_shape_distance(&a, &b) > 0.01);
     }
 
     #[test]
