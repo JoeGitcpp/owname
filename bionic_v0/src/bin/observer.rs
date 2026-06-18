@@ -280,22 +280,8 @@ fn print_row(snap: &SnapshotData) {
                 if sp.valid { 1 } else { 0 },
             ),
         };
-        // High-layer block: snapshot truth only; observer never recomputes.
-        let hl_block = match s.high_layer.as_ref() {
-            None => "hl=-".to_string(),
-            Some(hl) => {
-                let hl_age_ms = snap.clock_us.saturating_sub(hl.last_update_t_us) as f64 / 1000.0;
-                format!(
-                    "hl:c{:.3}|a{:.3}|s{:.3}|err{:.4}|bias{:.3}|{:.0}ms",
-                    hl.predicted_confidence,
-                    hl.predicted_alignment,
-                    hl.predicted_surprise,
-                    hl.object_err,
-                    hl.attention_bias,
-                    hl_age_ms,
-                )
-            }
-        };
+        // (Phase 3 cutover) high_layer block removed — ObjectHighLayer deleted.
+        let hl_block = String::from("hl=-");
         // Joint marker is pure rendering — the observer never binds; it
         // reports what the viewport already decided.
         let kind = match (s.vib.is_some(), s.phot.is_some()) {

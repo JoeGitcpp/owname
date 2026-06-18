@@ -134,17 +134,9 @@ fn run_global_refresh_cycle(
     vp.refresh_global_attention(t);
     vp.refresh_global_relations(t);
     vp.refresh_global_relation_predictor(t);
-    // B1-3b: drive each active slot's cross-layer predictor AFTER the relation
-    // graph is refreshed (its sources are relation-gated). object_err is kept
-    // fresh by the sensory adapters' refresh_slot_high_layer.
-    for slot_id in 0..bionic_v0::N_OBJECT_SLOTS {
-        vp.tick_slot_cross_layer(slot_id, t);
-    }
-    // Stage 1 (recursive PC depth): grow + tick the residual tower above tier 1,
-    // level by level, AFTER all tier-1 errors are fresh. READ-UP ONLY — these
-    // tiers never write a prior downward (that is Stage 2). Depth emerges only
-    // where the tier below is a permanent explainer, and self-limits on noise.
-    vp.tick_cross_layer_tower_sweep(t);
+    // (Phase 3 cutover) per-slot cross-layer + recursive tower removed —
+    // replaced by perturbation_graph relations. The axis-level cross-layer
+    // bank below remains active (axis tier, not slot tier).
     // A2 (VPC mechanism 5, prior write-back leg): tick the axis-level
     // cross-layer bank on the serial global-refresh rhythm — strictly slower
     // than the 100 Hz AR-2 ticker it explains. Each predictor reads its
@@ -159,9 +151,10 @@ fn run_global_refresh_cycle(
         }
         vp.store_axis_xlayer_states(bank.iter().map(|c| c.to_state()).collect());
     }
-    // C5: re-recognize active objects into the familiar-objects sediment;
-    // object identity and the responsible-person bond emerge from familiarity.
-    vp.tick_familiar_objects(t);
+    // Phase 3 replacement for tick_familiar_objects: mirror perturbation_graph
+    // most_bound + active onto INTERO_ATTACHMENT + INTERO_PRESENCE so
+    // dual_drive + vpc_cross_layer keep getting their attachment/presence input.
+    vp.tick_perturbation_intero(t);
     // C1: drive the vital core (reserve depletes with exertion, restores with
     // input continuity; bottoms out → Standby). The self-survival drive source.
     vp.tick_vital_core(t);
@@ -235,15 +228,8 @@ fn main() {
     // (learned_bias::decay_vocal_suppression, driven by the body's own
     // closure-observation cadence) and the endogenous baseline keeps a
     // multiplicative damping floor (vocal_reflex::SUPPRESSION_DAMP_FLOOR).
-    // C5: restore familiar objects so the responsible-person bond is
-    // re-recognized after restart (死后保留).
-    let familiar_paths =
-        bionic_v0::familiar_objects::FamiliarObjectsCheckpointPaths::new(&runtime_dir);
-    if let Ok(state) =
-        bionic_v0::familiar_objects::read_familiar_objects_checkpoint(&familiar_paths.final_path)
-    {
-        *vp.familiar_objects.write().unwrap() = state;
-    }
+    // (Phase 3 cutover) familiar_objects checkpoint restore removed —
+    // perturbation_graph.bin loaded above carries the analogous identity state.
     // C1: restore the survival reserve (a body that was running low comes back
     // still tired, not magically reset).
     let vital_paths = bionic_v0::vital_core::VitalCoreCheckpointPaths::new(&runtime_dir);
@@ -412,14 +398,10 @@ fn main() {
     // older-version, or structurally incompatible snapshot yields a fresh bank.
     let xlayer_axis: Arc<Mutex<Vec<CrossLayerPredictor>>> = {
         let snap = read_snapshot(&paths.final_path).ok();
-        // B1 (#10): re-install the per-slot cross-layer banks (slot_xlayers +
-        // slot_towers) into the live viewport. They were serialized (v50/v51) and
-        // parsed into SnapshotData, but only the AXIS bank below was ever rebuilt
-        // — the slot relation rules ("死后保留") were dropped on every boot. Restore
-        // them so the learned object→object rules actually survive death.
-        if let Some(snap) = snap.as_ref() {
-            vp.restore_slot_cross_layer_banks(&snap.slot_xlayers, &snap.slot_towers);
-        }
+        // (Phase 3 cutover) per-slot cross-layer + tower restore removed —
+        // SlotCrossLayer deleted, snapshot v61 no longer carries slot_xlayers /
+        // slot_towers. The axis-level bank below is the only cross-layer state
+        // that survives across restarts now.
         let restored: Vec<CrossLayerPredictor> = snap
             .map(|snap| {
                 snap.axis_xlayers
@@ -594,7 +576,7 @@ fn main() {
         let paths_checkpoint = learned_bias_paths.clone();
         // Life-state checkpoints written periodically too, so the living
         // process can be observed over time (not only at exit).
-        let fam_cp = bionic_v0::familiar_objects::FamiliarObjectsCheckpointPaths::new(&runtime_dir);
+        // (Phase 3 cutover) familiar_objects checkpoint path removed.
         let vital_cp = bionic_v0::vital_core::VitalCoreCheckpointPaths::new(&runtime_dir);
         let self_cp = bionic_v0::self_model::SelfModelCheckpointPaths::new(&runtime_dir);
         let phoneme_cp = runtime_dir.join("phoneme_memory.bin");
@@ -660,10 +642,7 @@ fn main() {
                     let _ = f.write_all(line.as_bytes());
                 }
             }
-            let _ = bionic_v0::familiar_objects::write_familiar_objects_checkpoint(
-                &vp_checkpoint.read_familiar_objects(),
-                &fam_cp,
-            );
+            // (Phase 3 cutover) familiar_objects checkpoint write removed.
             let _ = bionic_v0::vital_core::write_vital_core_checkpoint(
                 &vp_checkpoint.read_vital_core(),
                 &vital_cp,
@@ -806,11 +785,8 @@ fn main() {
 
     let state = vp.read_learned_bias();
     let _ = write_learned_bias_checkpoint(&state, &learned_bias_paths);
-    // C5: persist familiar objects (死后保留).
-    let _ = bionic_v0::familiar_objects::write_familiar_objects_checkpoint(
-        &vp.read_familiar_objects(),
-        &familiar_paths,
-    );
+    // (Phase 3 cutover) familiar_objects shutdown checkpoint removed —
+    // perturbation_graph.bin sidecar (written below) carries identity now.
     // C1: persist the survival reserve (死后保留).
     let _ = bionic_v0::vital_core::write_vital_core_checkpoint(
         &vp.read_vital_core(),

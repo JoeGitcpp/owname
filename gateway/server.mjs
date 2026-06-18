@@ -156,7 +156,9 @@ const MAX_SESSION_MIN  = parseInt(process.env.ABORN_MAX_MIN  || '30',     10)
 const POOL_DIR         = process.env.ABORN_POOL_DIR  || resolve('../training_pool')
 const MASTER_BIAS      = process.env.ABORN_MASTER_BIAS || resolve('../master_learned_bias.bin')
 const MASTER_RUNTIME   = process.env.ABORN_RUNTIME     || resolve('../runtime')
-// Per-user persistent memory: familiar_objects, vital_core, self_model survive across sessions.
+// Per-user persistent memory: perturbation_graph + vital_core + self_model survive
+// across sessions. Phase 3 cutover replaced familiar_objects (slot-derived 4D
+// fingerprint sediment) with perturbation_graph (sparse tier-0 node-edge graph).
 // Keyed by SHA-256(email)[0:16] — no raw email on disk.
 const USERS_DIR        = process.env.ABORN_USERS_DIR  || resolve('../user-memories')
 // Per-session diagnostics retained AFTER the runtime dir is wiped, so a call can
@@ -171,7 +173,12 @@ const EPHEMERAL_PERIP_MAX   = parseInt(process.env.ABORN_EPH_PERIP      || '3', 
 const EPHEMERAL_TIMEOUT_MIN = parseInt(process.env.ABORN_EPH_IDLE_MIN   || '30', 10)
 
 // Personal checkpoint files that belong to the user and must never be merged into master.
-const PERSONAL_FILES = ['familiar_objects.bin', 'vital_core.bin', 'self_model.bin']
+// Phase 3 cutover: familiar_objects.bin removed (the slot-derived sediment is
+// gone). perturbation_graph.bin is the new per-user-perceptual memory; it is
+// already shared SKILL via MAINLINE_VOCAL_FILES + MAINLINE_HARVEST_FILES below,
+// so per-user memory is the union of (a) the master perturbation_graph seeded
+// at session start and (b) the user's own vital_core + self_model.
+const PERSONAL_FILES = ['vital_core.bin', 'self_model.bin']
 
 // Mainline GENERAL skill (vocal repertoire + cross-layer abstraction) seeded into
 // every branch so a new conversation starts at the CURRENT mainline level rather

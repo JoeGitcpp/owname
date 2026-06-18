@@ -4527,7 +4527,6 @@ fn write_vib_disturbance_sample(vp: &Viewport, slot_id: usize, t_us: u64, amplit
     let surprise = [0.25 + amplitude * 0.5; VIB_BANDS];
     vp.write_slot_vib(slot_id, t_us, &observed, &predicted, &err, &surprise);
     vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
-    vp.refresh_slot_high_layer(slot_id, t_us);
 }
 
 fn write_vib_band_shape_sample(
@@ -4553,7 +4552,6 @@ fn write_vib_band_shape_sample(
     let surprise = observed.map(|value| 0.20 + value * 0.40);
     vp.write_slot_vib(slot_id, t_us, &observed, &predicted, &err, &surprise);
     vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
-    vp.refresh_slot_high_layer(slot_id, t_us);
     vib_band_center(&observed)
 }
 
@@ -4585,7 +4583,6 @@ fn write_phot_spatial_sample(vp: &Viewport, slot_id: usize, t_us: u64, base_x: f
         0.86,
     );
     vp.refresh_slot_fusion(slot_id, MOD_PHOT, t_us);
-    vp.refresh_slot_high_layer(slot_id, t_us);
 }
 
 fn apply_pattern_binding(
@@ -5337,7 +5334,6 @@ fn seed_attended_slot(vp: &Viewport, slot_id: usize, t_us: u64) {
         &phot_surprise,
     );
     vp.refresh_slot_fusion(slot_id, MOD_PHOT, t_us);
-    vp.refresh_slot_high_layer(slot_id, t_us);
 }
 
 fn relation_scores(relations: &GlobalRelationState, src: usize, dst: usize) -> (f64, f64) {

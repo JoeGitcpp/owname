@@ -39,7 +39,7 @@ fn tick_relation_slot(vp: &Arc<Viewport>, slot_id: usize, t_us: u64) {
     let phot_surp = vec![0.4f64; PHOT_BANDS];
     vp.write_slot_phot(slot_id, t_us, &phot_obs, &phot_pred, &phot_err, &phot_surp);
     vp.refresh_slot_fusion(slot_id, MOD_PHOT, t_us);
-    vp.refresh_slot_high_layer(slot_id, t_us);
+    // (Phase 3 cutover) refresh_slot_high_layer removed — ObjectHighLayer deleted.
 }
 
 fn run_relation_cycle(vp: &Arc<Viewport>, slot_a: usize, slot_b: usize, t_a: u64, t_b: u64) {

@@ -17,7 +17,6 @@ use crate::language_binding::{
     BindingStatus, BindingTargetRef, BindingTrace, LanguageBindingState, PatternKind,
 };
 use crate::learned_bias::LearnedBiasSummary;
-use crate::object_high_layer::ObjectHighLayerState;
 use crate::probe_law::ProbeLawState;
 use crate::self_development::SelfDevelopmentState;
 use crate::viewport::{
@@ -141,7 +140,7 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
         write_spatial(&mut buf, snap.spatial);
         write_spatial_worldline(&mut buf, snap.spatial_worldline);
         write_fusion(&mut buf, snap.fusion);
-        write_high_layer(&mut buf, snap.high_layer);
+        // Phase 3 cutover: high_layer field removed; no bytes written here.
         buf.extend_from_slice(&snap.attention_share.to_le_bytes());
         buf.extend_from_slice(&snap.precision_bias.to_le_bytes());
     }
@@ -222,46 +221,9 @@ pub fn write_snapshot(vp: &Arc<Viewport>, paths: &SnapshotPaths) -> std::io::Res
     buf.extend_from_slice(&vp.audio_raw.total_samples().to_le_bytes());
     buf.extend_from_slice(&vp.audio_raw.last_sample_clock_us().to_le_bytes());
 
-    // v50: per-slot cross-layer (B1) learned weights — the "relation rules"
-    // that must survive death (死后保留). Written as an independent block (not
-    // inside SnapshotSlot) to keep the slot struct stable. Per slot:
-    //   present:u8, [ n_sources:u16, (src_slot:u16, weight:f64)*n,
-    //                 bias:f64, err_pred_mse:f64 ] if present
-    for slot_id in 0..N_OBJECT_SLOTS {
-        match vp.read_slot_cross_layer(slot_id) {
-            Some(st) => {
-                buf.push(1u8);
-                buf.extend_from_slice(&(st.source_slots.len() as u16).to_le_bytes());
-                for (s, w) in st.source_slots.iter().zip(st.source_weights.iter()) {
-                    buf.extend_from_slice(&(*s as u16).to_le_bytes());
-                    buf.extend_from_slice(&w.to_le_bytes());
-                }
-                buf.extend_from_slice(&st.bias.to_le_bytes());
-                buf.extend_from_slice(&st.err_pred_mse.to_le_bytes());
-            }
-            None => buf.push(0u8),
-        }
-    }
-
-    // v51: per-slot residual TOWER (recursive PC depth, tiers ≥2). Observer-
-    // visible so emergent abstraction depth shows up in a live run. Per slot:
-    //   n_tiers:u16, then per tier (bottom-up):
-    //     n_sources:u16, (src_slot:u16, weight:f64)*n,
-    //     bias:f64, err_pred_mse:f64, explained_fraction:f64
-    for slot_id in 0..N_OBJECT_SLOTS {
-        let tower = vp.read_slot_tower(slot_id);
-        buf.extend_from_slice(&(tower.len() as u16).to_le_bytes());
-        for st in &tower {
-            buf.extend_from_slice(&(st.source_slots.len() as u16).to_le_bytes());
-            for (s, w) in st.source_slots.iter().zip(st.source_weights.iter()) {
-                buf.extend_from_slice(&(*s as u16).to_le_bytes());
-                buf.extend_from_slice(&w.to_le_bytes());
-            }
-            buf.extend_from_slice(&st.bias.to_le_bytes());
-            buf.extend_from_slice(&st.err_pred_mse.to_le_bytes());
-            buf.extend_from_slice(&st.explained_fraction.to_le_bytes());
-        }
-    }
+    // Phase 3 cutover: v50 slot_xlayers and v51 slot_towers blocks removed
+    // (SlotCrossLayer stack deleted). No bytes are written here; the next
+    // block (thread-fault axis) follows directly.
 
     // v57: tier-0 thread-fault axis (catch_unwind absorbed tick panics +
     // watchdog-observed dead rhythm threads). Appended at the end to keep all
@@ -360,21 +322,6 @@ fn write_fusion(buf: &mut Vec<u8>, f: Option<CrossModalFusionState>) {
     }
 }
 
-fn write_high_layer(buf: &mut Vec<u8>, hl: Option<ObjectHighLayerState>) {
-    match hl {
-        None => buf.push(0u8),
-        Some(s) => {
-            buf.push(1u8);
-            buf.extend_from_slice(&s.predicted_confidence.to_le_bytes());
-            buf.extend_from_slice(&s.predicted_alignment.to_le_bytes());
-            buf.extend_from_slice(&s.predicted_surprise.to_le_bytes());
-            buf.extend_from_slice(&s.object_err.to_le_bytes());
-            buf.extend_from_slice(&s.attention_bias.to_le_bytes());
-            buf.extend_from_slice(&s.last_update_t_us.to_le_bytes());
-        }
-    }
-}
-
 fn write_ambient_sub(buf: &mut Vec<u8>, sub: AmbientModalitySnapshot) {
     buf.extend_from_slice(&sub.event_energy.to_le_bytes());
     buf.extend_from_slice(&sub.surprise.to_le_bytes());
@@ -447,8 +394,6 @@ pub struct SnapshotSlot {
     pub spatial_worldline: Option<SpatialWorldlineState>,
     /// Phase 5A: cross-modal fusion state. None when never refreshed.
     pub fusion: Option<CrossModalFusionState>,
-    /// Phase 5B: high-layer output state. None when never refreshed.
-    pub high_layer: Option<ObjectHighLayerState>,
     /// Phase 5C: normalised attention share suggestion (0.0 if not yet allocated).
     pub attention_share: f64,
     /// Phase 5C: precision bias suggestion (2 * share, clamped [0,2]).
@@ -540,13 +485,6 @@ pub struct SnapshotData {
     // v49: audio_raw tier-0 waveform summary
     pub audio_raw_total_samples: u64,
     pub audio_raw_last_clock_us: u64,
-    /// v50: per-slot cross-layer (B1) learned relation rules. One entry per
-    /// object slot; None where that slot had no cross-layer predictor.
-    pub slot_xlayers: Vec<Option<crate::vpc_cross_layer::SlotCrossLayerState>>,
-    /// v51: per-slot residual TOWER (recursive PC depth, tiers ≥2), bottom-up.
-    /// One Vec per object slot (empty where no tier above tier 1 was born).
-    /// Observer-visible so emergent abstraction depth shows up in a live run.
-    pub slot_towers: Vec<Vec<crate::vpc_cross_layer::SlotCrossLayerState>>,
     /// v57: tier-0 thread-fault axis — true once any rhythm-thread tick panic
     /// was absorbed (catch_unwind) or a dead rhythm thread was observed.
     pub thread_fault: bool,
@@ -872,7 +810,7 @@ fn read_snapshot_inner(path: &Path) -> std::io::Result<SnapshotData> {
         let spatial = read_spatial(&bytes, &mut cur);
         let spatial_worldline = read_spatial_worldline(&bytes, &mut cur);
         let fusion = read_fusion(&bytes, &mut cur);
-        let high_layer = read_high_layer(&bytes, &mut cur);
+        // Phase 3 cutover: high_layer block no longer in snapshot.
         let attention_share = rd_f64(&bytes, &mut cur);
         let precision_bias = rd_f64(&bytes, &mut cur);
         slots.push(SnapshotSlot {
@@ -886,7 +824,6 @@ fn read_snapshot_inner(path: &Path) -> std::io::Result<SnapshotData> {
             spatial,
             spatial_worldline,
             fusion,
-            high_layer,
             attention_share,
             precision_bias,
         });
@@ -1048,91 +985,9 @@ fn read_snapshot_inner(path: &Path) -> std::io::Result<SnapshotData> {
     let audio_raw_total_samples = if version >= 49 { rd_u64(&bytes, &mut cur) } else { 0 };
     let audio_raw_last_clock_us = if version >= 49 { rd_u64(&bytes, &mut cur) } else { 0 };
 
-    // v50: per-slot cross-layer (B1) learned relation rules.
-    let mut slot_xlayers: Vec<Option<crate::vpc_cross_layer::SlotCrossLayerState>> = Vec::new();
-    if version >= 50 {
-        for _ in 0..N_OBJECT_SLOTS {
-            let present = bytes[cur];
-            cur += 1;
-            if present == 0 {
-                slot_xlayers.push(None);
-                continue;
-            }
-            let n = {
-                let mut a = [0u8; 2];
-                a.copy_from_slice(&bytes[cur..cur + 2]);
-                cur += 2;
-                u16::from_le_bytes(a) as usize
-            };
-            let mut source_slots = Vec::with_capacity(n);
-            let mut source_weights = Vec::with_capacity(n);
-            for _ in 0..n {
-                let mut sa = [0u8; 2];
-                sa.copy_from_slice(&bytes[cur..cur + 2]);
-                cur += 2;
-                source_slots.push(u16::from_le_bytes(sa) as usize);
-                source_weights.push(rd_f64(&bytes, &mut cur));
-            }
-            let bias = rd_f64(&bytes, &mut cur);
-            let err_pred_mse = rd_f64(&bytes, &mut cur);
-            slot_xlayers.push(Some(crate::vpc_cross_layer::SlotCrossLayerState {
-                source_slots,
-                source_weights,
-                bias,
-                err_pred_mse,
-                learning_progress: 0.0,
-                n_updates: 0,
-                // Runtime-derived (recomputed within a few ticks); not in v50.
-                residual: 0.0,
-                explained_fraction: 0.0,
-            }));
-        }
-    }
-
-    // v51: per-slot residual TOWER (tiers ≥2). Observer-visible depth.
-    let mut slot_towers: Vec<Vec<crate::vpc_cross_layer::SlotCrossLayerState>> = Vec::new();
-    if version >= 51 {
-        for _ in 0..N_OBJECT_SLOTS {
-            let n_tiers = {
-                let mut a = [0u8; 2];
-                a.copy_from_slice(&bytes[cur..cur + 2]);
-                cur += 2;
-                u16::from_le_bytes(a) as usize
-            };
-            let mut tower = Vec::with_capacity(n_tiers);
-            for _ in 0..n_tiers {
-                let n = {
-                    let mut a = [0u8; 2];
-                    a.copy_from_slice(&bytes[cur..cur + 2]);
-                    cur += 2;
-                    u16::from_le_bytes(a) as usize
-                };
-                let mut source_slots = Vec::with_capacity(n);
-                let mut source_weights = Vec::with_capacity(n);
-                for _ in 0..n {
-                    let mut sa = [0u8; 2];
-                    sa.copy_from_slice(&bytes[cur..cur + 2]);
-                    cur += 2;
-                    source_slots.push(u16::from_le_bytes(sa) as usize);
-                    source_weights.push(rd_f64(&bytes, &mut cur));
-                }
-                let bias = rd_f64(&bytes, &mut cur);
-                let err_pred_mse = rd_f64(&bytes, &mut cur);
-                let explained_fraction = rd_f64(&bytes, &mut cur);
-                tower.push(crate::vpc_cross_layer::SlotCrossLayerState {
-                    source_slots,
-                    source_weights,
-                    bias,
-                    err_pred_mse,
-                    learning_progress: 0.0,
-                    n_updates: 0,
-                    residual: 0.0,
-                    explained_fraction,
-                });
-            }
-            slot_towers.push(tower);
-        }
-    }
+    // Phase 3 cutover: v50 slot_xlayers and v51 slot_towers blocks removed
+    // from the snapshot format. The SNAPSHOT_VERSION bump rejects any older
+    // file that still contains those bytes, so no skip path is needed here.
 
     // v57: tier-0 thread-fault axis (appended at the end; symmetric with the
     // writer above).
@@ -1223,8 +1078,6 @@ fn read_snapshot_inner(path: &Path) -> std::io::Result<SnapshotData> {
         self_development,
         audio_raw_total_samples,
         audio_raw_last_clock_us,
-        slot_xlayers,
-        slot_towers,
         thread_fault,
         thread_fault_count,
         dual_drive,
@@ -1361,40 +1214,6 @@ fn read_fusion(bytes: &[u8], cur: &mut usize) -> Option<CrossModalFusionState> {
         phot_weight,
         fused_surprise,
         is_cross_modal,
-    })
-}
-
-fn read_high_layer(bytes: &[u8], cur: &mut usize) -> Option<ObjectHighLayerState> {
-    fn rd_u64(b: &[u8], c: &mut usize) -> u64 {
-        let mut a = [0u8; 8];
-        a.copy_from_slice(&b[*c..*c + 8]);
-        *c += 8;
-        u64::from_le_bytes(a)
-    }
-    fn rd_f64(b: &[u8], c: &mut usize) -> f64 {
-        let mut a = [0u8; 8];
-        a.copy_from_slice(&b[*c..*c + 8]);
-        *c += 8;
-        f64::from_le_bytes(a)
-    }
-    let present = bytes[*cur];
-    *cur += 1;
-    if present == 0 {
-        return None;
-    }
-    let predicted_confidence = rd_f64(bytes, cur);
-    let predicted_alignment = rd_f64(bytes, cur);
-    let predicted_surprise = rd_f64(bytes, cur);
-    let object_err = rd_f64(bytes, cur);
-    let attention_bias = rd_f64(bytes, cur);
-    let last_update_t_us = rd_u64(bytes, cur);
-    Some(ObjectHighLayerState {
-        predicted_confidence,
-        predicted_alignment,
-        predicted_surprise,
-        object_err,
-        attention_bias,
-        last_update_t_us,
     })
 }
 

@@ -252,39 +252,27 @@ fn slot_to_glyph(slot_id: usize, slot: &SnapshotSlot, sp: SnapshotSpatial) -> Su
 }
 
 fn compute_stability_hint(slot: &SnapshotSlot) -> f64 {
+    // Phase 3 cutover: slot.high_layer (ObjectHighLayer) deleted. The fusion
+    // surprise still surfaces; the per-slot AR-1 object_err / predicted_surprise
+    // / attention_bias signal no longer exists.
     let mut hint = 1.0;
-
-    if let Some(ref hl) = slot.high_layer {
-        let surprise = hl.predicted_surprise;
-        let err = hl.object_err;
-        hint *= 1.0 - surprise.clamp(0.0, 1.0);
-        hint *= 1.0 - err.clamp(0.0, 1.0);
-    }
-
     if let Some(ref fusion) = slot.fusion {
-        let fused_surprise = fusion.fused_surprise;
-        hint *= 1.0 - fused_surprise.clamp(0.0, 1.0);
+        hint *= 1.0 - fusion.fused_surprise.clamp(0.0, 1.0);
     }
-
     hint.clamp(0.0, 1.0)
 }
 
 fn compute_endogenous_hints(slot: &SnapshotSlot) -> (f64, f64, f64) {
-    let mut err_hint = 0.0;
+    // Phase 3 cutover: slot.high_layer deleted. err_hint / attention_bias_hint
+    // come from nothing now (the high layer was their only source); fusion still
+    // contributes surprise. Future work: replace these readings with
+    // perturbation_graph node-level stats (motion_var, causal_outflow) for an
+    // analogous endogenous hint.
     let mut surprise_hint = 0.0;
-    let mut attention_bias_hint = 0.0;
-
-    if let Some(ref hl) = slot.high_layer {
-        err_hint = hl.object_err.clamp(0.0, 1.0);
-        surprise_hint = hl.predicted_surprise.clamp(0.0, 1.0);
-        attention_bias_hint = hl.attention_bias.clamp(0.0, 1.0);
-    }
-
     if let Some(ref fusion) = slot.fusion {
-        surprise_hint = surprise_hint.max(fusion.fused_surprise.clamp(0.0, 1.0));
+        surprise_hint = fusion.fused_surprise.clamp(0.0, 1.0);
     }
-
-    (err_hint, surprise_hint, attention_bias_hint)
+    (0.0, surprise_hint, 0.0)
 }
 
 fn clamp01(value: f64) -> f64 {

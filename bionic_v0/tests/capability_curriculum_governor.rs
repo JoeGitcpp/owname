@@ -227,7 +227,6 @@ fn depth_probe_fails_without_parallax() {
             valid: true,
         }),
         fusion: None,
-        high_layer: None,
         attention_share: 0.5,
         precision_bias: 0.0,
     };

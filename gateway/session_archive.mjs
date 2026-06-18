@@ -10,7 +10,7 @@ import {
 import { join } from 'node:path'
 
 // Diagnostics worth keeping. Deliberately excludes snapshot.bin / learned_bias.bin
-// / familiar_objects.bin etc. — those are large and/or personal.
+// etc. — those are large or relate to durable personal state, not per-call diag.
 //
 // perturbation_graph.bin is small (~1–20 KB even after a long session) AND its
 // node signatures are tier-0 statistics (HSV / gradient histogram / motion)

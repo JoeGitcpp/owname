@@ -341,7 +341,6 @@ impl ModalityAdapter for NetSensesAdapter {
                 }
                 vp.write_slot_vib(sid, now_us, &vib_bands, &vib_pred, &vib_err, &vib_surp);
                 vp.refresh_slot_fusion(sid, MOD_VIB, now_us);
-                vp.refresh_slot_high_layer(sid, now_us);
             }
         }
 
@@ -510,7 +509,6 @@ impl ModalityAdapter for NetSensesAdapter {
                     ];
                     vp.update_slot_phot_with_predictor(sid, now_us, &phot_obs);
                     vp.refresh_slot_fusion(sid, MOD_PHOT, now_us);
-                    vp.refresh_slot_high_layer(sid, now_us);
                 }
             }
         }

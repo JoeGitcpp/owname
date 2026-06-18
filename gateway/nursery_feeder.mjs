@@ -415,7 +415,9 @@ const MASTER_DIR = MASTER_BIAS ? dirname(MASTER_BIAS) : null
 const MASTER_ARTIFACTS = [
   ['learned_bias.bin',    MASTER_BIAS],
   ['phoneme_memory.bin',  MASTER_DIR ? join(MASTER_DIR, 'master_phoneme_memory.bin') : null],
-  ['familiar_objects.bin', MASTER_DIR ? join(MASTER_DIR, 'master_familiar_objects.bin') : null],
+  // Phase 3 cutover: familiar_objects.bin removed (the slot-derived 4D
+  // fingerprint sediment is gone — perturbation_graph.bin below carries
+  // the analogous shared visual-cognition state).
   ['vital_core.bin',      MASTER_DIR ? join(MASTER_DIR, 'master_vital_core.bin') : null],
   ['vocal_memory.bin',    MASTER_DIR ? join(MASTER_DIR, 'master_vocal_memory.bin') : null],
   // Phase 2: the mainline must carry its full vocal + abstraction level.
@@ -527,7 +529,7 @@ const biasPath   = join(RUNTIME_DIR, 'learned_bias.bin')
 rmSync(RUNTIME_DIR, { recursive: true, force: true })
 mkdirSync(RUNTIME_DIR, { recursive: true })
 if (SEED_DIR) {
-  for (const f of ['learned_bias.bin', 'vital_core.bin', 'familiar_objects.bin', 'self_model.bin', 'phoneme_memory.bin', 'vocal_memory.bin', 'vocal_target_recall.bin', 'snapshot.bin']) {
+  for (const f of ['learned_bias.bin', 'vital_core.bin', 'self_model.bin', 'phoneme_memory.bin', 'vocal_memory.bin', 'vocal_target_recall.bin', 'snapshot.bin', 'perturbation_graph.bin']) {
     const src = join(SEED_DIR, f)
     if (existsSync(src)) { try { copyFileSync(src, join(RUNTIME_DIR, f)) } catch {} }
   }

@@ -19,7 +19,6 @@ use crate::language_binding::{BindingEvent, BindingTargetRef, BindingTrace, Lang
 use crate::learned_bias::{LearnedBiasEventInput, LearnedBiasState};
 use crate::efference_copy::EfferenceCopyState;
 use crate::mark_disturbance::MarkDisturbanceState;
-use crate::object_high_layer::{ObjectHighLayerPredictor, ObjectHighLayerState};
 use crate::phot_predictor::{PhotSlotPredictor, VPC_FAMILY_PHOT};
 use crate::prediction_pressure_field::PredictionPressureFieldState;
 use crate::probe_law::ProbeLawState;
@@ -35,7 +34,7 @@ use crate::vpc::{
     PredictionPublicationTrace, PredictorLifecycleState, PublicationStatus, VpcContractState,
 };
 use crate::{
-    ATTN_ERR_REBALANCE_ALPHA, ATTN_PRECISION_BIAS_MAX, AXIS_COUNT, BINDING_ATTN_ALPHA,
+    ATTN_PRECISION_BIAS_MAX, AXIS_COUNT, BINDING_ATTN_ALPHA,
     BINDING_MAINTENANCE_DECAY_STEP, BINDING_MAINTENANCE_IDLE_US, BINDING_RESONANCE_THRESHOLD,
     CLAIM_CROSS_MODALITY_BASE, CLAIM_KIND_ALLOCATED, CLAIM_KIND_DROPPED, CLAIM_KIND_REUSED,
     CLAIM_LOG_ENERGY_BAND, CLAIM_REUSE_MIN_SCORE, CLAIM_SAME_MODALITY_BONUS, CLAIM_SURPRISE_BAND,
@@ -938,24 +937,6 @@ pub struct ObjectSlot {
     /// Phase 5A: cross-modal fusion subtree. Numeric-only. Reset with slot.
     /// Populated by Viewport::refresh_slot_fusion(); adapters never write here.
     pub fusion: Option<CrossModalFusionState>,
-    /// Phase 5B: high-layer output subtree. Snapshot'd. Reset with slot.
-    /// Populated by Viewport::refresh_slot_high_layer() after fusion refresh.
-    pub high_layer: Option<ObjectHighLayerState>,
-    /// Phase 5B: high-layer predictor state. Ephemeral — not snapshot'd.
-    /// Reset with slot lifecycle. None until first high-layer refresh.
-    pub hl_pred: Option<ObjectHighLayerPredictor>,
-    /// B1-3b: per-slot cross-layer predictor (object→object). Ephemeral runtime
-    /// state; weights persisted separately via snapshot. Predicts this slot's
-    /// object_err from relation-gated neighbour slots. None until first tick.
-    pub xlayer: Option<crate::vpc_cross_layer::SlotCrossLayerPredictor>,
-    /// Stage 1 (recursive PC depth): the per-slot residual TOWER above tier 1.
-    /// `xstack[i]` = tier (i+2): predicts the residual of the tier BELOW it
-    /// (tier 1 = `xlayer` for i=0, else `xstack[i-1]`) from relation-gated
-    /// neighbours' SAME-tier-below residual. READ-UP ONLY in Stage 1 — these
-    /// tiers never write a prior downward (that is Stage 2). Depth grows only
-    /// where the tier below is a permanent explainer (emergent, self-limiting).
-    /// Ephemeral runtime state (like `xlayer`); persisted separately.
-    pub xstack: Vec<crate::vpc_cross_layer::SlotCrossLayerPredictor>,
     /// Phase 5C: normalised attention share (suggestion only; does NOT modify
     /// fusion). Written by refresh_global_attention; 0.0 by default.
     pub attention_share: f64,
@@ -978,10 +959,6 @@ impl ObjectSlot {
             spatial_worldline: None,
             phot_pred: None,
             fusion: None,
-            high_layer: None,
-            hl_pred: None,
-            xlayer: None,
-            xstack: Vec::new(),
             attention_share: 0.0,
             precision_bias: 1.0,
         }
@@ -1001,8 +978,6 @@ pub struct ObjectSlotSnapshot {
     pub spatial_worldline: Option<SpatialWorldlineState>,
     /// Phase 5A: cross-modal fusion state snapshot. None until first refresh.
     pub fusion: Option<CrossModalFusionState>,
-    /// Phase 5B: high-layer output state snapshot. None until first hl refresh.
-    pub high_layer: Option<ObjectHighLayerState>,
     /// Phase 5C: normalised attention share suggestion. 0.0 until first refresh.
     pub attention_share: f64,
     /// Phase 5C: precision bias suggestion (2 * share, clamped [0,2]).
@@ -1365,10 +1340,6 @@ pub struct Viewport {
     /// to dump a numeric trace file. Never read back into any law — pure
     /// observer-side instrumentation, not body state. Not persisted.
     pub vocal_diag: RwLock<VocalLoopDiag>,
-    /// C5: familiar-objects sediment. Numeric fingerprints + accumulated
-    /// familiarity; object identity and the responsible-person bond EMERGE here
-    /// (no id table, no role label). Persisted via learned_bias for 死后保留.
-    pub familiar_objects: RwLock<crate::familiar_objects::FamiliarObjectsState>,
     /// C1: vital core — the self-survival source of the dual-drive soul.
     /// reserve depletes with exertion, restores with continuous input; bottoms
     /// out → readable Standby (待机), revivable. Persisted for 死后保留.
@@ -1594,9 +1565,6 @@ impl Viewport {
             vision_tier0: RwLock::new(crate::vision_tier0::VisionTier0::new()),
             last_recall_idx: AtomicI64::new(-1),
             vocal_diag: RwLock::new(VocalLoopDiag::default()),
-            familiar_objects: RwLock::new(
-                crate::familiar_objects::FamiliarObjectsState::default(),
-            ),
             vital_core: RwLock::new(crate::vital_core::VitalCoreState::default()),
             vital_env: crate::vital_env::VitalEnv::default(),
             nursery_metabolic: false,
@@ -2298,7 +2266,6 @@ impl Viewport {
             spatial: s.spatial,
             spatial_worldline: s.spatial_worldline,
             fusion: s.fusion,
-            high_layer: s.high_layer,
             attention_share: s.attention_share,
             precision_bias: s.precision_bias,
         })
@@ -2560,51 +2527,16 @@ impl Viewport {
         });
     }
 
-    /// Phase 5B: recompute the high-layer subtree for an active slot.
-    ///
-    /// Must be called AFTER `refresh_slot_fusion` so the fusion subtree is
-    /// current. The method:
-    ///   1. Reads `slot.fusion` — no-op if fusion is None (e.g. slot not yet
-    ///      fused) or slot is inactive.
-    ///   2. Initialises `slot.hl_pred` on first call.
-    ///   3. Feeds the three fusion scalars (confidence, alignment, surprise)
-    ///      into the AR-1 predictor.
-    ///   4. Writes the predictor output to `slot.high_layer`.
-    ///
-    /// Rules:
-    ///   * Does NOT touch claim, scoring, spatial, band families, or adapters.
-    ///   * Predictor state (`hl_pred`) is ephemeral — reset when slot clears.
-    ///   * `high_layer` is observer-facing and snapshot'd.
-    pub fn refresh_slot_high_layer(&self, slot_id: usize, now_us: u64) {
-        if slot_id >= N_OBJECT_SLOTS {
-            return;
-        }
-        let mut s = self.slots[slot_id].write().unwrap();
-        if !s.active {
-            return;
-        }
-        let Some(fusion) = s.fusion else {
-            return;
-        };
-        if s.hl_pred.is_none() {
-            s.hl_pred = Some(ObjectHighLayerPredictor::new());
-        }
-        let out = s.hl_pred.as_mut().unwrap().update(
-            fusion.cross_modal_confidence,
-            fusion.temporal_alignment_score,
-            fusion.fused_surprise,
-            now_us,
-        );
-        s.high_layer = Some(out);
-    }
-
     /// Phase 5C: recompute global attention allocation across all active slots.
     ///
-    /// Reads each slot's `high_layer.attention_bias` and
-    /// `fusion.cross_modal_confidence`, plus a recency factor from
-    /// `fusion.last_fused_t_us`. Produces normalised attention shares and
+    /// Reads each slot's `fusion.cross_modal_confidence` and a recency factor
+    /// from `fusion.last_fused_t_us`. Produces normalised attention shares and
     /// writes them back as `attention_share` and `precision_bias` (suggestion
     /// values only — these do NOT feed back into the fusion formula).
+    ///
+    /// Phase 3 cutover: the prior `high_layer.attention_bias` weighting was
+    /// dropped along with the slot high-layer subtree. The fusion-only score
+    /// is the same shape (confidence × recency), with `attention_bias = 1`.
     ///
     /// Rules:
     ///   * Two-pass: read pass collects data (all read locks released before
@@ -2613,14 +2545,13 @@ impl Viewport {
     ///     active slots.
     ///   * Does NOT touch claim/scoring, band families, or fusion formulas.
     pub fn refresh_global_attention(&self, now_us: u64) {
-        // First pass: collect (attention_bias, confidence, last_fused_t_us).
-        let mut info = [None::<(f64, f64, u64)>; N_OBJECT_SLOTS];
+        // First pass: collect (confidence, last_fused_t_us).
+        let mut info = [None::<(f64, u64)>; N_OBJECT_SLOTS];
         for i in 0..N_OBJECT_SLOTS {
             let s = self.slots[i].read().unwrap();
             if s.active {
-                if let (Some(hl), Some(fusion)) = (s.high_layer, s.fusion) {
+                if let Some(fusion) = s.fusion {
                     info[i] = Some((
-                        hl.attention_bias,
                         fusion.cross_modal_confidence,
                         fusion.last_fused_t_us,
                     ));
@@ -2628,13 +2559,13 @@ impl Viewport {
             }
         }
 
-        // Compute raw scores: attention_bias * confidence * recency.
+        // Compute raw scores: confidence * recency (attention_bias = 1).
         let mut raw = [0.0f64; N_OBJECT_SLOTS];
         for i in 0..N_OBJECT_SLOTS {
-            if let Some((bias, conf, last_t)) = info[i] {
+            if let Some((conf, last_t)) = info[i] {
                 let dt = now_us.saturating_sub(last_t);
                 let recency = (1.0 - dt as f64 / SLOT_IDLE_US as f64).clamp(0.0, 1.0);
-                raw[i] = bias * conf * recency;
+                raw[i] = conf * recency;
             }
         }
 
@@ -2718,7 +2649,7 @@ impl Viewport {
     ///
     /// Must be called AFTER `refresh_global_attention` so `attention_share`
     /// fields are current. Only considers slots with `attention_share > 1e-6`
-    /// that also have both `high_layer` and `fusion` populated.
+    /// that have `fusion` populated.
     ///
     /// Per directed edge (src→dst), three EMA scores are updated:
     ///   - `co_change_score`   — `1 - |bias_src - bias_dst|`
@@ -2726,20 +2657,26 @@ impl Viewport {
     ///   - `predictive_score`  — `clamp01(err_src * err_dst * max(0, lag_obs))`
     /// All decay toward 0 when either slot is inactive or unattended.
     ///
+    /// Phase 3 cutover: the prior `high_layer.attention_bias / object_err`
+    /// inputs were dropped along with the slot high-layer subtree. `bias` is
+    /// fixed at 1 and `err` at 0, so the co/predictive channels collapse to
+    /// constant signals while the lead/lag/spatial channels remain meaningful.
+    ///
     /// Rules:
     ///   * Two-pass: read pass first (all locks released), then write pass.
     ///   * Does NOT touch claim/scoring, band families, fusion, or adapters.
     ///   * `precision_bias` / `attention_share` are never written here.
     pub fn refresh_global_relations(&self, now_us: u64) {
         // First pass: collect per-slot data (bias, err, last_fused_t_us, share, spatial).
+        // bias/err are now constants — see method-level note on the Phase 3 cutover.
         let mut slot_data = [None::<(f64, f64, u64, f64, Option<SpatialState>)>; N_OBJECT_SLOTS];
         for i in 0..N_OBJECT_SLOTS {
             let s = self.slots[i].read().unwrap();
             if s.active {
-                if let (Some(hl), Some(fusion)) = (s.high_layer, s.fusion) {
+                if let Some(fusion) = s.fusion {
                     slot_data[i] = Some((
-                        hl.attention_bias,
-                        hl.object_err.min(1.0),
+                        1.0,
+                        0.0,
                         fusion.last_fused_t_us,
                         s.attention_share,
                         s.spatial.filter(|sp| sp.valid),
@@ -3251,27 +3188,15 @@ impl Viewport {
         }
         let slot_id = gist.top_slot_id as usize;
 
-        // 3. Re-descend. If the target slot carries a learned cross-layer
-        //    relation rule, RECONSTRUCT the detail by running that rule forward
-        //    over the relation-neighbours' current object_err — "想起梗概 →
-        //    用关系把细节推断出来". Otherwise fall back to the raw live detail.
+        // 3. Re-descend. Historically the target slot's learned cross-layer
+        //    relation rule reconstructed the detail by running forward over
+        //    the relation-neighbours' current `object_err`. Phase 3 cutover
+        //    removed BOTH the slot high-layer subtree (which carried per-slot
+        //    `object_err`) and the per-slot cross-layer predictor, so the
+        //    reconstruction path is gone — we now always fall back to the raw
+        //    live detail carried by the slot itself.
         let slot = self.read_slot(slot_id)?;
-
-        let (reconstructed, reconstructed_err) = match self.read_slot_cross_layer(slot_id) {
-            Some(xl) if !xl.source_slots.is_empty() => {
-                let mut err = xl.bias;
-                for (src, w) in xl.source_slots.iter().zip(xl.source_weights.iter()) {
-                    let neighbour_err = self
-                        .read_slot(*src)
-                        .and_then(|s| s.high_layer)
-                        .map(|hl| hl.object_err)
-                        .unwrap_or(0.0);
-                    err += w * neighbour_err;
-                }
-                (true, err)
-            }
-            _ => (false, 0.0),
-        };
+        let (reconstructed, reconstructed_err) = (false, 0.0);
 
         Some(RecallDetail {
             slot_id: gist.top_slot_id,
@@ -3731,44 +3656,17 @@ impl Viewport {
 
     /// Err-driven attention rebalancing (self-regulation law §2.2).
     ///
-    /// Reads per-slot high_layer.err, computes err-weighted target shares,
-    /// and EMA-shifts attention shares toward those targets. High-err slots
-    /// gain attention; low-err slots lose attention.
+    /// Historically read per-slot `high_layer.object_err` to bias attention
+    /// toward high-err slots. Phase 3 cutover removed the slot high-layer
+    /// subtree, so the per-slot residual signal is no longer available here.
+    /// With every slot's `err` pinned to 0 the total-err guard fires
+    /// immediately and the function becomes a no-op until a replacement
+    /// residual source (e.g. fusion.fused_surprise) is wired in.
     ///
-    /// `ATTN_ERR_REBALANCE_ALPHA` is an engineering approximation — not a
-    /// theoretical resource law. Should be revised as exploration history
-    /// accumulates.
+    /// `ATTN_ERR_REBALANCE_ALPHA` remains an engineering approximation.
     pub fn tick_err_driven_attention(&self, _now_us: u64) {
-        // Collect per-slot err from active slots.
-        let mut errs: Vec<(usize, f64)> = Vec::new();
-        for (i, slot_lock) in self.slots.iter().enumerate() {
-            let slot = slot_lock.read().unwrap();
-            if slot.active {
-                let err = slot
-                    .high_layer
-                    .as_ref()
-                    .map(|hl| hl.object_err)
-                    .unwrap_or(0.0);
-                errs.push((i, err));
-            }
-        }
-
-        if errs.is_empty() {
-            return;
-        }
-
-        let total_err: f64 = errs.iter().map(|(_, e)| e).sum();
-        if total_err < 1e-9 {
-            return;
-        }
-
-        let mut attn = self.global_attention.write().unwrap();
-        for (slot_id, err) in errs.iter() {
-            let target_share = err / total_err;
-            attn.attention_shares[*slot_id] = (1.0 - ATTN_ERR_REBALANCE_ALPHA)
-                * attn.attention_shares[*slot_id]
-                + ATTN_ERR_REBALANCE_ALPHA * target_share;
-        }
+        // No per-slot err source after the Phase 3 cutover. Leave attention
+        // shares untouched.
     }
 
     /// Quiet-period history replay (endogenous activity law §2.1).
@@ -5058,72 +4956,26 @@ impl Viewport {
         vt.tick_decay(now_us);
     }
 
-    /// C5 (DERIVED LAYER): observe active slots' VIB+PHOT fingerprints into the
-    /// familiar-objects sediment. familiar_objects reads the tier-0 slot
-    /// projections already written by adapters — it does not establish a separate
-    /// representation. Outputs feed back into shared axes via INTERO_ATTACHMENT
-    /// and INTERO_PRESENCE. Each active slot contributes an 8-dim fingerprint
-    /// (4 VIB + 4 PHOT halves); identity and the responsible-person bond emerge
-    /// from accumulated familiarity (no id table, no label).
-    pub fn tick_familiar_objects(&self, now_us: u64) {
-        for slot_id in 0..N_OBJECT_SLOTS {
-            let Some(slot) = self.read_slot(slot_id) else {
-                continue;
-            };
-            if !slot.active {
-                continue;
-            }
-            let Some(fp) =
-                crate::familiar_objects::fingerprint_from_slot(slot.vib.as_ref(), slot.phot.as_ref())
-            else {
-                continue;
-            };
-            self.familiar_objects.write().unwrap().observe(now_us, fp);
-        }
-        // Stage 0: mirror familiarity scalars onto shared axes.
-        // ATTACHMENT = strongest emergent bond (most-familiar object's score).
-        // PRESENCE   = whether that most-familiar object is currently active/seen.
-        //   High PRESENCE + low PRESENCE next tick → prediction miss = "longing" substrate.
-        //
-        // Cutover step 3 (Phase 3): perturbation_graph contributes too. The two
-        // attachment scores (familiar_objects vs perturbation_graph) are MAXed
-        // before push, so a young body's familiar_objects bond keeps working
-        // until the graph builds up enough evidence, at which point the graph
-        // takes over. PRESENCE is OR'd across both sources for the same reason.
-        // This is the additive half of the cutover; later steps delete the
-        // familiar_objects half, leaving only the graph signal.
-        let fo = self.familiar_objects.read().unwrap();
-        let (fam_attachment, fam_present) = if let Some(most) = fo.most_familiar() {
-            let attachment = most.familiarity;
-            let most_fp = most.fingerprint;
-            drop(fo); // release read lock before slot reads
-            let present = (0..crate::N_OBJECT_SLOTS).any(|sid| {
-                self.read_slot(sid)
-                    .filter(|s| s.active)
-                    .and_then(|s| crate::familiar_objects::fingerprint_from_slot(s.vib.as_ref(), s.phot.as_ref()))
-                    .map(|fp| {
-                        let d: f64 = fp.iter().zip(most_fp.iter())
-                            .map(|(a, b)| (a - b) * (a - b))
-                            .sum::<f64>()
-                            .sqrt();
-                        d < crate::familiar_objects::MATCH_DIST_PUB
-                    })
-                    .unwrap_or(false)
-            });
-            (attachment, present)
-        } else {
-            drop(fo);
-            (0.0, false)
-        };
-        // perturbation_graph readings. most_bound() is the closest analog of
-        // most_familiar(): the highest-bind_strength node = the 责任人. Presence
-        // = that same node is currently in the active window (i.e. perceived
-        // this frame or very recently).
-        let (graph_attachment, graph_present) = {
+    /// Phase 3 cutover replacement for the deleted `tick_familiar_objects`:
+    /// pushes the perturbation_graph's attachment + presence readings onto the
+    /// shared INTERO axes so dual_drive and the predictor fabric keep getting
+    /// fresh inputs.
+    ///
+    /// ATTACHMENT = strongest emergent bond (highest `bind_strength` node, i.e.
+    /// the 责任人 analog).
+    /// PRESENCE   = whether that most-bound node is currently active (perceived
+    /// this frame or very recently) AND its bind_strength is above a small
+    /// floor — a high→low PRESENCE transition next tick is the "longing"
+    /// substrate that dual_drive feeds on.
+    ///
+    /// Always pushes (even when the graph is empty / readings are 0) so the
+    /// axes never carry a stale value across a cold start.
+    pub fn tick_perturbation_intero(&self, now_us: u64) {
+        let (attachment, present) = {
             let graph = self.perturbation_graph.read().unwrap();
             match graph.most_bound() {
                 Some(most) => {
-                    let attachment = most.bind_strength;
+                    let attachment = most.bind_strength.clamp(0.0, 1.0);
                     let present =
                         graph.is_active(most.id, now_us) && most.bind_strength > 0.3;
                     (attachment, present)
@@ -5131,19 +4983,12 @@ impl Viewport {
                 None => (0.0, false),
             }
         };
-        let attachment = fam_attachment.max(graph_attachment).clamp(0.0, 1.0);
-        let present = fam_present || graph_present;
-        // Always push so dual_drive's attachment input is fresh even when both
-        // sources read 0 (a cold start with no learned bond). The previous code
-        // skipped the push when fo.most_familiar() was None, leaving attachment
-        // stale; that's a latent bug worth fixing now since the graph path can
-        // also be None on a cold start.
         self.push_observation(crate::INTERO_ATTACHMENT, now_us, attachment);
-        self.push_observation(crate::INTERO_PRESENCE, now_us, if present { 1.0 } else { 0.0 });
-    }
-
-    pub fn read_familiar_objects(&self) -> crate::familiar_objects::FamiliarObjectsState {
-        self.familiar_objects.read().unwrap().clone()
+        self.push_observation(
+            crate::INTERO_PRESENCE,
+            now_us,
+            if present { 1.0 } else { 0.0 },
+        );
     }
 
     /// #8 Stage 1: per-vocal-tick maintenance of the sequence layer — decay the
@@ -5301,26 +5146,19 @@ impl Viewport {
     pub fn tick_dual_drive(&self, _now_us: u64) {
         let vital = self.read_vital_core();
         let self_preservation = vital.self_preservation_pressure();
-        // Cutover step 3 (Phase 3): dual_drive's attachment input now reads
-        // from BOTH familiar_objects.most_familiar() AND perturbation_graph
-        // .most_bound() — the max wins. Both sources push to INTERO_ATTACHMENT
-        // in tick_familiar_objects, so this mirrors that mixing here so the
-        // arbitrate() input is consistent with the axis observation. Once
-        // familiar_objects is deleted (step 7), the max collapses to just
-        // the graph reading with no behavioural discontinuity.
-        let fam_attachment = self
-            .read_familiar_objects()
-            .most_familiar()
-            .map(|o| o.familiarity)
-            .unwrap_or(0.0);
-        let graph_attachment = self
+        // Phase 3 cutover (final): familiar_objects is gone; the attachment
+        // input is the perturbation_graph's most-bound node only. This is the
+        // same source that tick_perturbation_intero pushes onto
+        // INTERO_ATTACHMENT, so the arbitrate() input stays consistent with
+        // the axis observation.
+        let attachment = self
             .perturbation_graph
             .read()
             .unwrap()
             .most_bound()
             .map(|n| n.bind_strength)
-            .unwrap_or(0.0);
-        let attachment = fam_attachment.max(graph_attachment).clamp(0.0, 1.0);
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
         let principle_floor = vital.pain.clamp(0.0, 1.0);
         let reading =
             crate::dual_drive::arbitrate(self_preservation, attachment, principle_floor);

@@ -4,7 +4,6 @@ use bionic_v0::code_ingress::CodeIngressState;
 use bionic_v0::evidence_tension::EvidenceTensionState;
 use bionic_v0::language_binding::LanguageBindingState;
 use bionic_v0::learned_bias::LearnedBiasSummary;
-use bionic_v0::object_high_layer::ObjectHighLayerState;
 use bionic_v0::self_development::SelfDevelopmentState;
 use bionic_v0::snapshot::{
     SnapshotActionConsequence, SnapshotActionOutput, SnapshotAmbientSub, SnapshotData,
@@ -72,8 +71,6 @@ fn make_empty_snapshot() -> SnapshotData {
         self_development: SelfDevelopmentState::default(),
         audio_raw_total_samples: 0,
         audio_raw_last_clock_us: 0,
-        slot_xlayers: Vec::new(),
-        slot_towers: Vec::new(),
         thread_fault: false,
         thread_fault_count: 0,
         dual_drive: Default::default(),
@@ -111,7 +108,6 @@ fn make_snapshot_with_one_slot(
         spatial: Some(spatial),
         spatial_worldline: None,
         fusion: None,
-        high_layer: None,
         attention_share,
         precision_bias: 0.0,
     };
@@ -142,7 +138,6 @@ fn make_snapshot_with_mixed_slots() -> SnapshotData {
         spatial: Some(active_spatial.clone()),
         spatial_worldline: None,
         fusion: None,
-        high_layer: None,
         attention_share: 0.0,
         precision_bias: 0.0,
     };
@@ -166,7 +161,6 @@ fn make_snapshot_with_mixed_slots() -> SnapshotData {
         spatial: Some(invalid_spatial),
         spatial_worldline: None,
         fusion: None,
-        high_layer: None,
         attention_share: 0.0,
         precision_bias: 0.0,
     };
@@ -181,7 +175,6 @@ fn make_snapshot_with_mixed_slots() -> SnapshotData {
         spatial: Some(active_spatial),
         spatial_worldline: None,
         fusion: None,
-        high_layer: None,
         attention_share: 0.6,
         precision_bias: 1.0,
     };
@@ -210,55 +203,9 @@ fn projection_ignores_inactive_or_invalid_slots() {
     assert_eq!(frame.objects.len(), 1);
 }
 
-fn make_snapshot_with_high_layer() -> SnapshotData {
-    let mut snap = make_empty_snapshot();
-    let spatial = SnapshotSpatial {
-        pos_x: 0.5,
-        pos_y: 0.5,
-        span_x: 0.1,
-        span_y: 0.1,
-        precision: 0.5,
-        last_update_t_us: 1000,
-        valid: true,
-    };
-    let high_layer = ObjectHighLayerState {
-        predicted_confidence: 0.8,
-        predicted_alignment: 0.7,
-        predicted_surprise: 0.3,
-        object_err: 0.4,
-        attention_bias: 0.9,
-        last_update_t_us: 1000,
-    };
-    let slot = SnapshotSlot {
-        active: true,
-        last_update_t_us: 1000,
-        source_modality: 0b0000_0001,
-        nomination_seq: 1,
-        vib: None,
-        phot: None,
-        mech: None,
-        spatial: Some(spatial),
-        spatial_worldline: None,
-        fusion: None,
-        high_layer: Some(high_layer),
-        attention_share: 0.5,
-        precision_bias: 0.5,
-    };
-    snap.slots = vec![slot];
-    snap
-}
-
-#[test]
-fn projection_includes_endogenous_hints_from_high_layer() {
-    let snap = make_snapshot_with_high_layer();
-    let frame = project_surface_frame(&snap);
-
-    assert_eq!(frame.objects.len(), 1);
-    let g = &frame.objects[0];
-    assert!((g.err_hint - 0.4).abs() < 0.001);
-    assert!((g.surprise_hint - 0.3).abs() < 0.001);
-    assert!((g.attention_bias_hint - 0.9).abs() < 0.001);
-}
+// Removed: make_snapshot_with_high_layer + projection_includes_endogenous_hints_from_high_layer
+// Phase 3 cutover: object_high_layer was deleted; endogenous hints from the
+// high layer no longer exist. The projection now derives hints differently.
 
 #[test]
 fn projection_includes_global_state() {
@@ -349,7 +296,6 @@ fn projection_includes_relations_from_active_edges() {
         spatial: Some(spatial1),
         spatial_worldline: None,
         fusion: None,
-        high_layer: None,
         attention_share: 0.5,
         precision_bias: 0.5,
     };
@@ -374,7 +320,6 @@ fn projection_includes_relations_from_active_edges() {
         spatial: Some(spatial2),
         spatial_worldline: None,
         fusion: None,
-        high_layer: None,
         attention_share: 0.5,
         precision_bias: 0.5,
     };

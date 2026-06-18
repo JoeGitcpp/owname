@@ -71,8 +71,6 @@ fn empty_snapshot() -> SnapshotData {
         self_development: SelfDevelopmentState::default(),
         audio_raw_total_samples: 0,
         audio_raw_last_clock_us: 0,
-        slot_xlayers: Vec::new(),
-        slot_towers: Vec::new(),
         thread_fault: false,
         thread_fault_count: 0,
         dual_drive: Default::default(),

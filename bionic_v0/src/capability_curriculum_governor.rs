@@ -572,19 +572,9 @@ fn probe_attention(snap: &SnapshotData, t: &AttentionLayerThresholds) -> Attenti
 fn probe_curiosity(snap: &SnapshotData, t: &CuriosityLayerThresholds) -> CuriosityProbeResult {
     let probe_intensity = snap.probe_law.intensity;
 
-    let mut max_lp = 0.0_f64;
-    let mut max_ef = 0.0_f64;
-    let mut n_active_xlayer = 0u8;
-
-    for xl_opt in snap.slot_xlayers.iter() {
-        if let Some(xl) = xl_opt {
-            if xl.learning_progress > t.min_learning_progress {
-                n_active_xlayer = n_active_xlayer.saturating_add(1);
-            }
-            max_lp = max_lp.max(xl.learning_progress);
-            max_ef = max_ef.max(xl.explained_fraction);
-        }
-    }
+    let max_lp = 0.0_f64;
+    let max_ef = 0.0_f64;
+    let n_active_xlayer = 0u8;
 
     // Probe passes if the learning-progress drive is active (probe law) OR
     // cross-layer predictors are making progress in a learnable zone.
@@ -700,8 +690,6 @@ pub mod test_helpers {
             self_development: SelfDevelopmentState::default(),
             audio_raw_total_samples: 0,
             audio_raw_last_clock_us: 0,
-            slot_xlayers: Vec::new(),
-            slot_towers: Vec::new(),
             thread_fault: false,
             thread_fault_count: 0,
             dual_drive: Default::default(),
@@ -760,7 +748,6 @@ pub mod test_helpers {
                 valid: true,
             }),
             fusion: None,
-            high_layer: None,
             attention_share: 0.5,
             precision_bias: 0.0,
         }
@@ -817,19 +804,8 @@ pub mod test_helpers {
     /// Curiosity-ready snapshot: probe law intensity positive, cross-layer learning active.
     /// All 5 layer probes pass.
     pub fn curiosity_snap() -> SnapshotData {
-        use crate::vpc_cross_layer::SlotCrossLayerState;
         let mut s = attention_snap();
         s.probe_law.intensity = 0.15;
-        s.slot_xlayers.push(Some(SlotCrossLayerState {
-            source_slots: vec![1],
-            source_weights: vec![0.5],
-            bias: 0.0,
-            err_pred_mse: 0.01,
-            learning_progress: 1e-5,
-            n_updates: 20,
-            residual: 0.005,
-            explained_fraction: 0.35,
-        }));
         s
     }
 }

@@ -306,7 +306,6 @@ impl VibAdapter {
         }
         vp.write_slot_vib(slot_id, t_us, bands, &predicted, &err, &surprise);
         vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
-        vp.refresh_slot_high_layer(slot_id, t_us);
     }
 }
 
@@ -436,7 +435,6 @@ impl ModalityAdapter for SyntheticPhotAdapter {
         let observed: Vec<f64> = frame.phot_bands.to_vec();
         vp.update_slot_phot_with_predictor(slot_id, now_us, &observed);
         vp.refresh_slot_fusion(slot_id, MOD_PHOT, now_us);
-        vp.refresh_slot_high_layer(slot_id, now_us);
 
         // Spatial target: frame carries a live estimate this tick.
         vp.write_slot_spatial(
@@ -740,7 +738,6 @@ impl ModalityAdapter for RealPhotAdapter {
             let observed: Vec<f64> = region.phot_bands.to_vec();
             vp.update_slot_phot_with_predictor(slot_id, now_us, &observed);
             vp.refresh_slot_fusion(slot_id, MOD_PHOT, now_us);
-            vp.refresh_slot_high_layer(slot_id, now_us);
         }
 
         // Wiring: record the PHOT ingress change as a consequence observation.
@@ -853,6 +850,5 @@ impl ModalityAdapter for SyntheticVibAdapter {
         }
         vp.write_slot_vib(slot_id, now_us, &frame.bands, &predicted, &err, &surprise);
         vp.refresh_slot_fusion(slot_id, MOD_VIB, now_us);
-        vp.refresh_slot_high_layer(slot_id, now_us);
     }
 }

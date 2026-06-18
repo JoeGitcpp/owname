@@ -46,7 +46,6 @@ fn body_owned_sources_contain_no_human_readable_diagnostics() {
         "src/clock.rs",
         "src/snapshot.rs",
         "src/action_consequence.rs",
-        "src/object_high_layer.rs",
         "src/prediction_pressure_field.rs",
         "src/vpc_cross_layer.rs",
         // --- sensory adapters / IO (body side) ---
@@ -78,7 +77,6 @@ fn body_owned_sources_contain_no_human_readable_diagnostics() {
         "src/dual_drive.rs",
         "src/self_model.rs",
         "src/self_development.rs",
-        "src/familiar_objects.rs",
         "src/learned_bias.rs",
         "src/evidence_tension.rs",
         "src/adaptive_stability.rs",

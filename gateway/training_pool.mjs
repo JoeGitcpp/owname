@@ -49,46 +49,47 @@ const CURVE_COUNT_OFFSET   = 16  // u32 (4 bytes)
 const VOCAL_EFF_OFFSET     = 20  // f64 (8 bytes) — after curve_count in v4
 // (exact layout depends on learned_bias serialization; we read conservatively)
 
-// ── Familiar-objects checkpoint binary layout ───────────────────────────────
-// Mirrors bionic_v0/src/familiar_objects.rs::write_familiar_objects_checkpoint:
-//   header : MAGIC u64 + VERSION u64 + count u32                       = 20 bytes
-//   object : fingerprint OBJECT_FINGERPRINT_DIM(8)×f64 + familiarity f64
-//            + recognition_count u32 + last_seen_us u64                = 84 bytes
-//   trailer: last_update_t_us u64                                      =  8 bytes
-// NOTE: the fingerprint is 8 f64 (VIB half [0..4] + PHOT half [4..8]), NOT 4.
-// A prior 52-byte stride (4-f64 fingerprint) misread recognition_count as
-// garbage, silently corrupting Gate 2 below.
-const FAM_HEADER_BYTES      = 20
-const FAM_COUNT_OFFSET      = 16
-const FAM_FINGERPRINT_BYTES = 64   // 8 × f64
-const FAM_OBJ_STRIDE        = FAM_FINGERPRINT_BYTES + 8 + 4 + 8   // = 84
+// ── Perturbation graph checkpoint binary layout (Phase 3 cutover) ────────────
+// Mirrors bionic_v0/src/perturbation_graph.rs serialize():
+//   header : "PGRA"(4) + version u8(1) + next_id u32(4) + n_nodes u64(8) = 17 bytes
+//   node   : id u32 + sig 24×f64 + cross_modal 8×f64 + vital_coupling 6×f64
+//            + motion_var/size_ema/persistence_ema/causal_outflow f64×4
+//            + bind_strength f64 + age_us u64 + last_active_t_us u64    = 364 bytes
+//   [8] n_edges u64-le  then edges of 33 bytes each (not parsed here).
+// Stage 0 ships a fixed stride so the JS parser can't silently misread.
+const PG_HEADER_BYTES = 17
+const PG_MAGIC = 'PGRA'
+const PG_NODE_BYTES = 364
+const PG_NODE_BIND_OFFSET = 4 + 8 * 24 + 8 * 8 + 8 * 6 + 8 * 4  // 332
 
 /**
- * Parse a familiar_objects.bin buffer → { count, topFam, topRecog, objects }.
- * topRecog is the recognition_count of the MOST-FAMILIAR object (highest familiarity).
+ * Parse a perturbation_graph.bin buffer → { n_nodes, top_bind, sum_bind }.
+ * top_bind = the highest bind_strength across all nodes; sum_bind = total
+ * accumulated evidence (a coarse "this session perceived non-trivially").
  */
-export function parseFamiliarObjects(buf) {
-  const empty = { count: 0, topFam: 0, topRecog: 0, objects: [] }
-  if (!buf || buf.length < FAM_HEADER_BYTES) return empty
+export function parsePerturbationGraph(buf) {
+  const empty = { n_nodes: 0, top_bind: 0, sum_bind: 0 }
+  if (!buf || buf.length < PG_HEADER_BYTES) return empty
+  const magic = String.fromCharCode(buf[0], buf[1], buf[2], buf[3])
+  if (magic !== PG_MAGIC) return empty
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-  const count = dv.getUint32(FAM_COUNT_OFFSET, true)
-  const objects = []
-  let topFam = 0, topRecog = 0
-  let off = FAM_HEADER_BYTES
-  for (let i = 0; i < count && off + FAM_OBJ_STRIDE <= buf.length; i++) {
-    const fam = dv.getFloat64(off + FAM_FINGERPRINT_BYTES, true)
-    const rec = dv.getUint32(off + FAM_FINGERPRINT_BYTES + 8, true)
-    objects.push({ familiarity: fam, recognitionCount: rec })
-    if (fam > topFam) { topFam = fam; topRecog = rec }
-    off += FAM_OBJ_STRIDE
+  const n_nodes = Number(dv.getBigUint64(9, true))
+  let top_bind = 0
+  let sum_bind = 0
+  let off = PG_HEADER_BYTES
+  for (let i = 0; i < n_nodes && off + PG_NODE_BYTES <= buf.length; i++) {
+    const bind = dv.getFloat64(off + PG_NODE_BIND_OFFSET, true)
+    if (bind > top_bind) top_bind = bind
+    sum_bind += bind
+    off += PG_NODE_BYTES
   }
-  return { count, topFam, topRecog, objects }
+  return { n_nodes, top_bind, sum_bind }
 }
 
 /**
  * Grade one session. Returns { pass: bool, score: number, reason: string }.
  *
- * Reads vital_core.bin and familiar_objects.bin for life signals, and
+ * Reads vital_core.bin and perturbation_graph.bin for life signals, and
  * learned_bias.bin for delta evidence.
  */
 export function evaluate_session({
@@ -122,17 +123,26 @@ export function evaluate_session({
     return { pass: false, score: 0, reason: `too_short:${Math.round(sessionSecs)}s` }
   }
 
-  // ── Gate 2: recognition count (familiar_objects.bin) ──────────────────────
-  let topRecog = 0
-  let topFam   = 0
+  // ── Gate 2: perception accumulation (perturbation_graph.bin) ─────────────
+  // Phase 3 cutover: was familiar_objects recognition_count, now
+  // perturbation_graph node count. A session that actually saw a continuous
+  // visual stream accumulates dozens-to-hundreds of nodes per minute (a 58s
+  // visitor call produced 260 nodes); a no-show session sits near zero.
+  // MIN_GRAPH_NODES is a deliberately gentle floor — the strict admission
+  // still happens via Gate 4 (learned_bias delta) + Gate 5 (vocal_efficacy).
+  let nGraphNodes = 0
+  let topBind = 0
   try {
-    const parsed = parseFamiliarObjects(readFileSync(join(runtimeDir, 'familiar_objects.bin')))
-    topFam   = parsed.topFam
-    topRecog = parsed.topRecog
-  } catch { /* no familiar_objects yet — fail gate */ }
+    const parsed = parsePerturbationGraph(readFileSync(join(runtimeDir, 'perturbation_graph.bin')))
+    nGraphNodes = parsed.n_nodes
+    topBind = parsed.top_bind
+  } catch { /* no perturbation_graph yet — fail gate */ }
 
-  if (topRecog < MIN_RECOG) {
-    return { pass: false, score: 0, reason: `low_recog:${topRecog}` }
+  // MIN_RECOG (20) was the OLD familiar_objects recognition_count threshold;
+  // a graph node forms in ~quarter-second of camera time, so 20 nodes ≈ a
+  // few seconds of any non-blank visual stream.
+  if (nGraphNodes < MIN_RECOG) {
+    return { pass: false, score: 0, reason: `low_graph_nodes:${nGraphNodes}` }
   }
 
   // ── Gate 3: vital state (vital_core.bin) ──────────────────────────────────
@@ -140,11 +150,11 @@ export function evaluate_session({
   // instant. A session that engaged for minutes then dipped to Standby (a talky
   // call drained by the body's voicing_cost + the simulated famine schedule)
   // would look "standby_only" here and be wrongly discarded — the more engaged
-  // the call, the more likely it powers down. Sustained recognition is the
-  // trustworthy liveness signal: Gate 2 above already proved topRecog ≥
-  // MIN_RECOG recognitions, which only accrue while perceiving. So an engaged
-  // session counts as having been alive even if it ends tired; a truly parked
-  // session is already rejected by Gate 2 (low_recog).
+  // the call, the more likely it powers down. Sustained perception is the
+  // trustworthy liveness signal: Gate 2 above already proved n_graph_nodes ≥
+  // MIN_RECOG, which only accrues while perceiving. So an engaged session
+  // counts as having been alive even if it ends tired; a truly parked session
+  // is already rejected by Gate 2.
   let aliveAtEnd   = false
   let finalReserve = 0
   try {
@@ -157,7 +167,7 @@ export function evaluate_session({
     }
   } catch { }
 
-  if (!aliveAtEnd && topRecog < MIN_RECOG) {
+  if (!aliveAtEnd && nGraphNodes < MIN_RECOG) {
     return { pass: false, score: 0, reason: 'standby_only' }
   }
 
@@ -192,11 +202,14 @@ export function evaluate_session({
   }
 
   // ── Score (0–1) for sorting/weighting ─────────────────────────────────────
+  // Phase 3 cutover: replaced (recogScore, famScore) with (nodeScore, bindScore)
+  // — perturbation_graph node count saturates at 500 nodes (≈2 min of real
+  // video) and top bind_strength is already in [0,1].
   const durationScore = Math.min(1, sessionSecs / (30 * 60))   // saturates at 30 min
-  const recogScore    = Math.min(1, topRecog / 500)
-  const famScore      = topFam
+  const nodeScore     = Math.min(1, nGraphNodes / 500)
+  const bindScore     = Math.min(1, topBind)
   const vocalScore    = Math.min(1, vocalEfficacy * 10)
-  const score = (durationScore * 0.3 + recogScore * 0.3 + famScore * 0.2 + vocalScore * 0.2)
+  const score = (durationScore * 0.3 + nodeScore * 0.3 + bindScore * 0.2 + vocalScore * 0.2)
 
   return { pass: true, score, reason: 'ok' }
 }

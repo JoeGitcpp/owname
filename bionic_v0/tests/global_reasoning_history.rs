@@ -26,7 +26,6 @@ fn tick_joint(vp: &Arc<Viewport>, slot_id: usize, t_us: u64) {
     let vib_prec = [0.5f64; VIB_BANDS];
     vp.write_slot_vib(slot_id, t_us, &vib_obs, &vib_pred, &vib_err, &vib_prec);
     vp.refresh_slot_fusion(slot_id, MOD_VIB, t_us);
-    vp.refresh_slot_high_layer(slot_id, t_us);
 }
 
 fn run_cycle(vp: &Arc<Viewport>, slot_a: usize, slot_b: usize, t_a: u64, t_b: u64) {

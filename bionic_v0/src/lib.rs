@@ -8,7 +8,11 @@ pub mod active_surface;
 pub mod adapter;
 pub mod adaptive_stability;
 pub mod substrate;
-pub mod familiar_objects;
+// Cutover Phase 3: familiar_objects + object_high_layer + SlotCrossLayer
+// removed — perturbation_graph (Phase 3) replaces the categorical-object slot
+// derivation of attachment/presence + per-slot AR-1 high layer +
+// per-slot cross-layer predictor + recursive tier residual tower.
+// See perturbation_graph.rs for the new architecture.
 pub mod vital_core;
 pub mod vital_env;
 pub mod self_model;
@@ -431,19 +435,10 @@ pub const PHOT_REGION_THRESHOLD: f64 = 0.05;
 /// Minimum number of above-threshold pixels for a region to be emitted.
 pub const PHOT_REGION_MIN_PIXELS: usize = 6;
 
-// --- Phase 5B: Object-level high-layer predictor ---
-pub mod object_high_layer;
-
-/// AR-1 EMA alpha for high-layer feature smoothers (confidence, alignment, surprise).
-pub const OBJECT_HL_ALPHA: f64 = 0.2;
-
-/// EMA alpha for err² used to compute attention_bias. Slower than ALPHA so
-/// attention_bias has a memory effect and doesn't bounce on single-tick spikes.
-pub const OBJECT_HL_ERR_ALPHA: f64 = 0.1;
-
-/// Warm-up ticks before the high-layer predictor emits real predictions.
-/// During warm-up, object_err = 0 and attention_bias = 0.5 (neutral).
-pub const OBJECT_HL_WARMUP_MIN: u32 = 2;
+// (Cutover Phase 3) object_high_layer + OBJECT_HL_* constants removed —
+// the per-slot AR-1 predictor on top of slot fusion features fed only the
+// per-slot SlotCrossLayerPredictor (also removed). perturbation_graph.rs
+// is the new substrate for object-level evidence.
 
 // --- Phase 6B: probe-law substrate ---
 
@@ -551,7 +546,11 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 /// v60: A3 developmental clock (Viewport::developmental_maturity, one LE f64)
 /// appended after the v59 axis cross-layer bank, so the observer can watch the
 /// coarse→fine precision annealing curve. Older snapshots read back 0.0.
-pub const SNAPSHOT_VERSION: u64 = 60;
+/// v61: Phase 3 cutover: removed high_layer + slot_xlayers + slot_towers.
+/// Older snapshot files at v60 are rejected (the per-slot high_layer 1-byte
+/// `present` flag and the v50/v51 cross-layer blocks no longer exist in the
+/// format). Independent sidecars (perturbation_graph, vocal_sequence) survive.
+pub const SNAPSHOT_VERSION: u64 = 61;
 
 /// Precision-war guard rule 2: hard ceiling on any prior magnitude written
 /// into the per-axis prior channel ("prior 精度上限 ≈ 100"). A diverged or
@@ -774,8 +773,8 @@ pub const REPLAY_ALPHA: f64 = 0.05;
 /// Covers every ordered (src, dst) pair among N_OBJECT_SLOTS, src ≠ dst.
 pub const N_REL_EDGES: usize = N_OBJECT_SLOTS * (N_OBJECT_SLOTS - 1);
 
-/// EMA alpha for all relation edge scores. Slower than OBJECT_HL_ALPHA so
-/// relation scores accumulate evidence over multiple seconds.
+/// EMA alpha for all relation edge scores. Slow enough that scores accumulate
+/// evidence over multiple seconds rather than bouncing tick to tick.
 pub const REL_ALPHA: f64 = 0.15;
 
 // --- Phase 5E: Relation-level predictor ---
