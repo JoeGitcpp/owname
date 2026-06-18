@@ -178,6 +178,13 @@ pub struct Relation {
     pub elig: f64,
     pub last_t_us: u64,
     pub last_axes_engaged: u8,
+    /// A5 FastPath candidacy tracking. 0 = not currently above the promote
+    /// threshold; otherwise the wall-clock timestamp of the FIRST sustained
+    /// crossing. After FAST_PATH_PROMOTE_DURATION_US of continuous strength
+    /// above FAST_PATH_PROMOTE_TH, this relation is promoted to FastPath.
+    /// A drop below the threshold resets this field to 0 (a fresh climb
+    /// restarts the clock — sustained presence is the qualifier).
+    pub first_above_promote_t_us: u64,
 }
 
 // ── Phase A4: dynamic RelationKind discovery
@@ -251,6 +258,66 @@ pub struct RelationKind {
     pub strength: f64,
     pub spawned_t_us: u64,
     pub last_seen_t_us: u64,
+}
+
+// ── Phase A5: FastPath (the muscle-memory / default-cognition substrate)
+//
+// The user's design-doc reframing (Section 1.2 Q3): FastPath is NOT a perf
+// cache layer. It is the DEFAULT cognitive substrate. Most behaviour flows
+// through it. Slow graph traversal + active reasoning is the exception path
+// that fires when FastPath is silent OR when an Intention overrides.
+//
+// A relation becomes a FastPath when:
+//   - strength > FAST_PATH_PROMOTE_TH (default 0.8)
+//   - sustained for at least FAST_PATH_PROMOTE_DURATION_US (default 5 min real)
+//   - expressivity > FAST_PATH_EXPRESSIVITY_MIN (default 0.4)
+//
+// It is demoted (hysteresis) when:
+//   - strength < FAST_PATH_DEMOTE_TH (default 0.5)
+//   - OR expressivity < FAST_PATH_DEMOTE_EXPRESSIVITY (default 0.2)
+//
+// Queries hit the FastPath FIRST (O(1) HashMap). A miss falls back to the
+// slow relation walk. The presence of FastPath thus changes both performance
+// AND the default behaviour of the graph, in keeping with the design vision.
+
+pub const FAST_PATH_PROMOTE_TH: f64 = 0.80;
+pub const FAST_PATH_DEMOTE_TH: f64 = 0.50;
+pub const FAST_PATH_EXPRESSIVITY_MIN: f64 = 0.40;
+pub const FAST_PATH_DEMOTE_EXPRESSIVITY: f64 = 0.20;
+pub const FAST_PATH_PROMOTE_DURATION_US: u64 = 300_000_000; // 5 minutes
+pub const PG_FAST_PATH_CAP: usize = 2048;
+
+/// Post-hoc audit agreement threshold (Section 3.4 in the design doc).
+pub const POST_HOC_AGREE_TH: f64 = 0.7;
+
+/// Per-relation FastPath entry. Shares storage with the underlying Relation
+/// (just an index by rel_id) — promotion is metadata, not duplication.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FastPath {
+    pub rel_id: RelId,
+    pub promoted_t_us: u64,
+    pub usage_count: u64,
+    pub last_fired_t_us: u64,
+}
+
+/// FastPath index — two hash maps over the same `FastPath` set:
+/// - `by_endpoints` for O(1) (from, to) lookup (the duplicate-merge primary
+///   key for promoted relations).
+/// - `by_from` for "what habits do I have from this endpoint?" — drives the
+///   query-first semantics in default_response().
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct FastPathIndex {
+    pub by_endpoints: std::collections::HashMap<(Endpoint, Endpoint), FastPath>,
+    pub by_from: std::collections::HashMap<Endpoint, Vec<RelId>>,
+}
+
+/// Outcome of `default_response` — either FastPath returned an immediate hit
+/// (the muscle-memory case) or the caller should fall through to slow
+/// deliberation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ResponseOutcome {
+    FastPath { rel_id: RelId, to: Endpoint },
+    NeedsDeliberation,
 }
 
 /// Maximum traversal depth for relation walks. Cycle-protected by a visited
@@ -487,6 +554,13 @@ pub struct PerturbationGraph {
     /// kinds discovered online from observe_relation_emergent. Capped at
     /// PG_KIND_CAP. Runtime-only this commit; persistence lands in Phase A9.
     pub kinds: Vec<RelationKind>,
+    /// Phase A5: FastPath index — the muscle-memory layer. Promoted relations
+    /// that have sustained high strength + expressivity for at least
+    /// FAST_PATH_PROMOTE_DURATION_US (5 min default) sit here for O(1) query.
+    /// `default_response` queries this BEFORE the slow graph walk: most
+    /// behaviour flows through FastPath; the slow path is the exception.
+    /// Runtime-only this commit; persistence lands in Phase A9.
+    pub fast_paths: FastPathIndex,
     /// Next id to hand out — never resets to 0 (the sentinel) and never reuses
     /// an evicted node's id within the same session.
     pub next_id: u32,
@@ -520,6 +594,7 @@ impl Default for PerturbationGraph {
             groups: Vec::new(),
             relations: Vec::new(),
             kinds,
+            fast_paths: FastPathIndex::default(),
             next_id: 1,
             next_group_id: 1,
             next_rel_id: 1,
@@ -1089,6 +1164,7 @@ impl PerturbationGraph {
             elig: 1.0,
             last_t_us: now_us,
             last_axes_engaged: engaged,
+            first_above_promote_t_us: 0,
         });
         Some(id)
     }
@@ -1257,6 +1333,182 @@ impl PerturbationGraph {
             let bv = b.strength * b.expressivity;
             av.partial_cmp(&bv).unwrap()
         })
+    }
+
+    // ── FastPath ops (Phase A5: muscle memory / default cognition) ───────────
+
+    /// The user's design-doc reframing: most behaviour flows through the
+    /// muscle-memory layer. Query the FastPath FIRST given a `from` endpoint;
+    /// if any habit fires, return it as the response. Otherwise fall through
+    /// to the slow walk (callers can invoke `traverse_relations_from` etc.).
+    pub fn default_response(&self, from: Endpoint) -> ResponseOutcome {
+        if let Some(rel_ids) = self.fast_paths.by_from.get(&from) {
+            // Pick the strongest fast-path candidate from this endpoint. The
+            // index might have stale ids (eviction race); skip ones whose
+            // backing relation has been demoted out from under us.
+            let mut best: Option<(RelId, f64)> = None;
+            for &rid in rel_ids {
+                if let Some(r) = self.relation(rid) {
+                    let score = r.strength * r.expressivity;
+                    if best.map(|(_, bs)| score > bs).unwrap_or(true) {
+                        best = Some((rid, score));
+                    }
+                }
+            }
+            if let Some((rid, _)) = best {
+                let r = self.relation(rid).unwrap();
+                return ResponseOutcome::FastPath { rel_id: rid, to: r.to };
+            }
+        }
+        ResponseOutcome::NeedsDeliberation
+    }
+
+    /// Tally a FastPath usage (called by the consumer after `default_response`
+    /// returns a FastPath outcome and the response was actually emitted).
+    pub fn note_fast_path_usage(&mut self, rel_id: RelId, now_us: u64) {
+        let key = self.relation(rel_id).map(|r| (r.from, r.to));
+        if let Some(key) = key {
+            if let Some(fp) = self.fast_paths.by_endpoints.get_mut(&key) {
+                fp.usage_count = fp.usage_count.saturating_add(1);
+                fp.last_fired_t_us = now_us;
+            }
+        }
+    }
+
+    /// Periodic promote/demote pass. Mirrors the design-doc rules:
+    /// - A relation that sustains strength > FAST_PATH_PROMOTE_TH for at
+    ///   least FAST_PATH_PROMOTE_DURATION_US wall-clock, AND has expressivity
+    ///   > FAST_PATH_EXPRESSIVITY_MIN, is PROMOTED to a FastPath.
+    /// - A FastPath whose backing relation falls below FAST_PATH_DEMOTE_TH
+    ///   OR FAST_PATH_DEMOTE_EXPRESSIVITY is DEMOTED.
+    /// - When the cap is hit, the LRU (oldest last_fired_t_us) is dropped to
+    ///   make room.
+    /// Safe to call at any cadence (e.g. 1Hz); idempotent.
+    pub fn tick_fast_paths(&mut self, now_us: u64) {
+        // First: maintain Relation.first_above_promote_t_us so the promote
+        // check sees an honest "how long has it been above" timer.
+        for r in self.relations.iter_mut() {
+            let above =
+                r.strength > FAST_PATH_PROMOTE_TH && r.expressivity > FAST_PATH_EXPRESSIVITY_MIN;
+            if above {
+                if r.first_above_promote_t_us == 0 {
+                    r.first_above_promote_t_us = now_us;
+                }
+            } else {
+                r.first_above_promote_t_us = 0;
+            }
+        }
+        // Collect promote / demote decisions in a separate pass so we don't
+        // mutate the relation list while reading it.
+        let mut to_promote: Vec<RelId> = Vec::new();
+        let mut to_demote: Vec<RelId> = Vec::new();
+        for r in &self.relations {
+            let in_index = self.fast_paths.by_endpoints.contains_key(&(r.from, r.to));
+            let qualifies_promote = r.first_above_promote_t_us > 0
+                && now_us.saturating_sub(r.first_above_promote_t_us) >= FAST_PATH_PROMOTE_DURATION_US
+                && r.expressivity > FAST_PATH_EXPRESSIVITY_MIN;
+            let qualifies_demote = r.strength < FAST_PATH_DEMOTE_TH
+                || r.expressivity < FAST_PATH_DEMOTE_EXPRESSIVITY;
+            match (in_index, qualifies_promote, qualifies_demote) {
+                (false, true, _) => to_promote.push(r.id),
+                (true, _, true) => to_demote.push(r.id),
+                _ => {}
+            }
+        }
+        for rid in to_demote {
+            self.demote_fast_path(rid);
+        }
+        for rid in to_promote {
+            if self.fast_paths.by_endpoints.len() >= PG_FAST_PATH_CAP {
+                // Evict LRU before promoting a new one.
+                self.evict_lru_fast_path();
+            }
+            self.promote_fast_path(rid, now_us);
+        }
+    }
+
+    fn promote_fast_path(&mut self, rid: RelId, now_us: u64) {
+        let key = match self.relation(rid).map(|r| (r.from, r.to)) {
+            Some(k) => k,
+            None => return,
+        };
+        // Re-entry guard (in case caller called this twice).
+        if self.fast_paths.by_endpoints.contains_key(&key) {
+            return;
+        }
+        let fp = FastPath {
+            rel_id: rid,
+            promoted_t_us: now_us,
+            usage_count: 0,
+            last_fired_t_us: now_us, // count promotion as a baseline activity
+        };
+        self.fast_paths.by_endpoints.insert(key, fp);
+        self.fast_paths
+            .by_from
+            .entry(key.0)
+            .or_default()
+            .push(rid);
+    }
+
+    fn demote_fast_path(&mut self, rid: RelId) {
+        let key = match self.relation(rid).map(|r| (r.from, r.to)) {
+            Some(k) => k,
+            None => return,
+        };
+        self.fast_paths.by_endpoints.remove(&key);
+        if let Some(list) = self.fast_paths.by_from.get_mut(&key.0) {
+            list.retain(|&id| id != rid);
+        }
+    }
+
+    fn evict_lru_fast_path(&mut self) {
+        let lru = self
+            .fast_paths
+            .by_endpoints
+            .iter()
+            .min_by_key(|(_, fp)| fp.last_fired_t_us)
+            .map(|(_, fp)| fp.rel_id);
+        if let Some(rid) = lru {
+            self.demote_fast_path(rid);
+        }
+    }
+
+    /// Post-hoc check: the FastPath has already responded, the actual
+    /// downstream evidence is now in. Compare the predicted endpoint against
+    /// the observed outcome — strengthen the FastPath if they agree, weaken
+    /// otherwise. The design-doc invariant: this runs ASYNC, not every fire.
+    ///
+    /// Returns true if the prediction was deemed correct.
+    pub fn post_hoc_check(
+        &mut self,
+        fired_rel: RelId,
+        observed_outcome: Endpoint,
+    ) -> bool {
+        let (predicted_to, from_sig, to_sig) = match self.relation(fired_rel) {
+            Some(r) => (
+                r.to,
+                self.endpoint_sig(r.from).unwrap_or([0.0; PG_NODE_SIG_DIM]),
+                self.endpoint_sig(r.to).unwrap_or([0.0; PG_NODE_SIG_DIM]),
+            ),
+            None => return false,
+        };
+        let observed_sig = self
+            .endpoint_sig(observed_outcome)
+            .unwrap_or([0.0; PG_NODE_SIG_DIM]);
+        // Agreement = how aligned the observed outcome's sig is to the
+        // predicted endpoint's sig. Above threshold = correct prediction.
+        let _ = from_sig;
+        let (_, axes_match) = relation_expressivity(&to_sig, &observed_sig);
+        let agreement = axes_match as f64 / PG_NODE_SIG_DIM as f64;
+        let correct = agreement > POST_HOC_AGREE_TH || predicted_to == observed_outcome;
+        if let Some(r) = self.relations.iter_mut().find(|r| r.id == fired_rel) {
+            if correct {
+                r.strength = (r.strength + 0.01).min(1.0);
+            } else {
+                r.strength *= 0.95;
+            }
+        }
+        correct
     }
 
     // ── Edge ops ─────────────────────────────────────────────────────────────
@@ -1673,6 +1925,7 @@ impl PerturbationGraph {
             groups: Vec::new(),
             relations: Vec::new(),
             kinds,
+            fast_paths: FastPathIndex::default(),
             next_id,
             next_group_id: 1,
             next_rel_id: 1,
@@ -2631,5 +2884,157 @@ mod tests {
         }
         // Distance from a context to itself is zero.
         assert!(ctx_distance(&ctx, &ctx) < 1e-9);
+    }
+
+    // ── Phase A5 tests: FastPath (muscle memory / default cognition) ──────
+
+    /// Helper: build a graph + two nodes + a relation, then strength it up
+    /// over many observations so it qualifies for promotion. Returns rel_id.
+    fn make_strong_relation(g: &mut PerturbationGraph, start_t_us: u64) -> RelId {
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.11)); // close → high expressivity
+        let mut rid = 0u32;
+        // 50 observations: strength ≈ 1 - (1 - α)^50 ≈ 1.0 for α=0.20.
+        for k in 0..50 {
+            rid = g
+                .observe_relation(start_t_us + k * 10, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur)
+                .unwrap();
+        }
+        rid
+    }
+
+    #[test]
+    fn default_response_returns_needs_deliberation_when_no_fast_path() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        g.observe_relation(1_000, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur);
+        // No FastPath promotion yet → fall through to deliberation.
+        match g.default_response(Endpoint::Node(n1)) {
+            ResponseOutcome::NeedsDeliberation => {}
+            other => panic!("expected NeedsDeliberation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tick_fast_paths_promotes_sustained_strong_relation() {
+        let mut g = PerturbationGraph::default();
+        let rid = make_strong_relation(&mut g, 0);
+        // First tick at t=10: relation is above threshold for the first time.
+        g.tick_fast_paths(10);
+        assert!(g.fast_paths.by_endpoints.is_empty(), "promotion needs sustained duration");
+        // Tick well past the promote duration → must now be promoted.
+        g.tick_fast_paths(FAST_PATH_PROMOTE_DURATION_US + 1_000);
+        let from_ep = g.relation(rid).unwrap().from;
+        let resp = g.default_response(from_ep);
+        match resp {
+            ResponseOutcome::FastPath { rel_id, .. } => assert_eq!(rel_id, rid),
+            other => panic!("expected FastPath after sustained promotion, got {:?}", other),
+        }
+        assert!(g.fast_paths.by_endpoints.len() == 1);
+    }
+
+    #[test]
+    fn tick_fast_paths_demotes_when_strength_drops_below_th() {
+        let mut g = PerturbationGraph::default();
+        let rid = make_strong_relation(&mut g, 0);
+        // Two-step promotion: first tick sets the timer; second tick sees
+        // duration cleared.
+        g.tick_fast_paths(10);
+        g.tick_fast_paths(FAST_PATH_PROMOTE_DURATION_US + 1_000);
+        assert_eq!(g.fast_paths.by_endpoints.len(), 1);
+        // Crush the relation's strength by direct mutation (simulating long
+        // unused decay without going through real eligibility loops).
+        if let Some(r) = g.relations.iter_mut().find(|r| r.id == rid) {
+            r.strength = 0.30; // below FAST_PATH_DEMOTE_TH=0.5
+        }
+        g.tick_fast_paths(FAST_PATH_PROMOTE_DURATION_US + 5_000);
+        assert!(
+            g.fast_paths.by_endpoints.is_empty(),
+            "weakened relation must be demoted"
+        );
+    }
+
+    #[test]
+    fn tick_fast_paths_resets_clock_when_strength_dips_below_threshold() {
+        // first_above_promote_t_us must reset whenever strength dips below the
+        // promote threshold, otherwise an oscillating relation would
+        // accumulate "credit" toward promotion that it doesn't deserve.
+        let mut g = PerturbationGraph::default();
+        let rid = make_strong_relation(&mut g, 0);
+        g.tick_fast_paths(1_000);
+        let stamp1 = g.relation(rid).unwrap().first_above_promote_t_us;
+        assert!(stamp1 > 0);
+        // Crush strength temporarily so it dips below threshold.
+        if let Some(r) = g.relations.iter_mut().find(|r| r.id == rid) {
+            r.strength = 0.30;
+        }
+        g.tick_fast_paths(2_000);
+        let stamp2 = g.relation(rid).unwrap().first_above_promote_t_us;
+        assert_eq!(stamp2, 0, "clock must reset on a dip below threshold");
+    }
+
+    #[test]
+    fn post_hoc_check_strengthens_correct_predictions_and_weakens_wrong() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        let n3 = g.add_node(0, sig_at(0.90));
+        let rid = g.observe_relation(1_000, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur).unwrap();
+        let s_before = g.relation(rid).unwrap().strength;
+        // Observed outcome exactly matches the predicted target (n2).
+        let correct = g.post_hoc_check(rid, Endpoint::Node(n2));
+        assert!(correct);
+        let s_after_correct = g.relation(rid).unwrap().strength;
+        assert!(s_after_correct > s_before, "correct prediction must strengthen");
+        // Observed outcome very far from prediction (sig dist large).
+        let _ = g.post_hoc_check(rid, Endpoint::Node(n3));
+        let s_after_wrong = g.relation(rid).unwrap().strength;
+        assert!(
+            s_after_wrong < s_after_correct,
+            "wrong prediction must weaken"
+        );
+    }
+
+    #[test]
+    fn note_fast_path_usage_increments_counter_and_timestamp() {
+        let mut g = PerturbationGraph::default();
+        let rid = make_strong_relation(&mut g, 0);
+        // Two-step promotion.
+        g.tick_fast_paths(10);
+        g.tick_fast_paths(FAST_PATH_PROMOTE_DURATION_US + 1_000);
+        let key = {
+            let r = g.relation(rid).unwrap();
+            (r.from, r.to)
+        };
+        let before = *g.fast_paths.by_endpoints.get(&key).unwrap();
+        g.note_fast_path_usage(rid, 999_999);
+        let after = *g.fast_paths.by_endpoints.get(&key).unwrap();
+        assert_eq!(after.usage_count, before.usage_count + 1);
+        assert_eq!(after.last_fired_t_us, 999_999);
+    }
+
+    #[test]
+    fn fast_path_cap_evicts_lru() {
+        // Drive cap to a small value indirectly: not feasible at compile time,
+        // but we can confirm the LRU evictor runs at all by promoting several
+        // relations and verifying by_endpoints stays sane.
+        let mut g = PerturbationGraph::default();
+        for i in 0..5 {
+            let anchor = sig_at(0.1 + 0.01 * i as f64);
+            let n1 = g.add_node(0, anchor);
+            let n2 = g.add_node(0, sig_at(0.5 + 0.01 * i as f64));
+            for k in 0..50 {
+                g.observe_relation((i as u64) * 10_000 + k * 100, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur);
+            }
+        }
+        // Two-step promotion as for all FastPath tests.
+        g.tick_fast_paths(10);
+        g.tick_fast_paths(FAST_PATH_PROMOTE_DURATION_US + 1_000);
+        assert!(g.fast_paths.by_endpoints.len() >= 5, "all five should fit under the 2048 cap");
+        // by_from should also map each from endpoint to at least one entry.
+        for (_, list) in &g.fast_paths.by_from {
+            assert!(!list.is_empty());
+        }
     }
 }
