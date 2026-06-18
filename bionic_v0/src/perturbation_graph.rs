@@ -111,6 +111,121 @@ const PG_IDLE_DECAY_US: f64 = 60_000_000.0;
 /// Id 0 is the "no-node" sentinel — never assigned by `add_node`.
 pub type NodeId = u32;
 
+/// Stable per-session group identifier. Mirrors NodeId conventions: id 0 is the
+/// "no-group" sentinel and never assigned.
+pub type GroupId = u32;
+
+// ── Phase A1: NodeGroup + soft membership (the "neuron-as-perturbation-group" layer)
+//
+// Per the v2 design doc: a "neuron" is not a single perturbation patch — it is
+// a region-local GROUP of patches, with membership being SOFT (each member has
+// a weight in [0,1] derived from its sig distance to the group centroid). The
+// group is what gets pointed at by relations and bound to by language.
+//
+// Phase A1 wires the group substrate; persistence + cross-lineage merge land
+// in Phase A9. Groups are runtime-only this commit (regenerated each session
+// by vision_tier0's group-formation pass in Phase A2).
+
+/// Soft cap on lifetime groups. With ~3-5 members average per group at scale
+/// the worst-case overhead is bounded; 1024 gives months of headroom in the
+/// 5-minute visitor data range (260 nodes typically collapse into ~20-50
+/// non-trivial groups across spatial+temporal+cooccur regions).
+pub const PG_GROUP_CAP: usize = 1024;
+
+/// Sig-distance threshold for "this node is close enough to this group's
+/// centroid to be admitted". Tighter than the node-level TIER0_SIG_MATCH_DIST
+/// (0.30) — groups are a coarser semantic level, members should be tightly
+/// clustered around the centroid.
+pub const GROUP_FORM_DIST: f64 = 0.20;
+
+/// Minimum number of co-active nodes in a region needed to spawn a new group.
+/// One or two patches don't make a group; three is the smallest cohort that
+/// can sustain a centroid without trivially being moved by any one member.
+pub const GROUP_FORM_MIN_NODES: usize = 3;
+
+/// Gaussian σ for the distance-to-centroid → membership weight transform.
+/// At d = σ the weight is e^(-0.5) ≈ 0.61; at 2σ ≈ 0.135. So GROUP_FORM_DIST
+/// (0.20) being just over σ (0.15) means a node at admission distance has
+/// weight ~0.41 — soft but real.
+pub const GROUP_MEMBERSHIP_SIGMA: f64 = 0.15;
+
+/// EMA rate for a member's weight update each refresh. 0.20 ≈ 5-tick time
+/// constant; new evidence dominates after ~5 frames.
+const GROUP_ALPHA_WEIGHT: f64 = 0.20;
+
+/// EMA rate for the group centroid drifting toward the refreshing member's
+/// sig. Damped by member.weight so loose members barely move the centroid.
+/// 0.10 base × weight gives a tight-member effective alpha of ~0.10 and a
+/// loose-member alpha of ~0.01 — centroid drifts but doesn't follow noise.
+const GROUP_ALPHA_CENTROID: f64 = 0.10;
+
+/// After this much idle time, member weights decay by GROUP_WEIGHT_DECAY_FACTOR
+/// per call to decay_group_members. 30 s ≈ "this object left the scene".
+pub const GROUP_MEMBER_DECAY_US: u64 = 30_000_000;
+
+/// Multiplicative decay applied to idle member weights.
+const GROUP_WEIGHT_DECAY_FACTOR: f64 = 0.95;
+
+/// Members with weight below this are pruned. Just above floating-point noise
+/// to avoid the membership list growing unboundedly with ghost members.
+const GROUP_MEMBER_PRUNE_TH: f64 = 0.05;
+
+/// Region operator (the "区域" in the design doc). A group is always tied to
+/// a region — spatial bucket, time window, nest subtree, or cooccur cluster.
+/// The same node may belong to multiple groups in different regions (spatially
+/// close + temporally co-present + nested under a parent), with different
+/// weights in each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RegionKey {
+    /// Visual-space coarse bucket. 16 spatial buckets in each dimension
+    /// (pos_x/pos_y ∈ [0,1] split into 16 strips → 256 distinct spatial cells).
+    Spatial(u8, u8),
+    /// Bucketed time window — `now_us / window_us`. Co-present nodes within
+    /// the same temporal bucket share this region key.
+    TemporalWindow(u64),
+    /// Subtree of a Nest edge — a parent node's containment hierarchy.
+    NestSubtree(NodeId),
+    /// On-line discovered co-occurrence cluster (the streaming union-find /
+    /// LSH result over Cooccur edges). Cluster ids are assigned by a future
+    /// Phase A2 helper; the field is reserved for now.
+    CoOccurCluster(u32),
+}
+
+/// A single member of a group, with soft weight and refresh timestamp.
+/// Weight ∈ [0,1] is an EMA of gaussian(sig_distance(node.sig, centroid)).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupMember {
+    pub node_id: NodeId,
+    pub weight: f64,
+    pub last_refreshed_t_us: u64,
+}
+
+/// A perturbation-element GROUP — the user's "neuron-as-perturbation-group".
+/// Members are soft (weighted), centroid is EMA-updated by refreshes, region
+/// pins the spatial/temporal/relational context the group lives in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeGroup {
+    pub id: GroupId,
+    pub centroid_sig: [f64; PG_NODE_SIG_DIM],
+    pub members: Vec<GroupMember>,
+    pub region: RegionKey,
+    /// Aggregated bind_strength: weighted mean of member bind_strengths.
+    /// Recomputed lazily by decay_group_members; consumers call
+    /// `most_bound_group()` which doesn't recompute on read.
+    pub bind_strength: f64,
+    pub formed_t_us: u64,
+    pub last_active_t_us: u64,
+}
+
+/// Gaussian distance → membership-weight transform. Pure utility.
+fn gaussian_weight(d: f64, sigma: f64) -> f64 {
+    if sigma <= 0.0 {
+        return if d <= 0.0 { 1.0 } else { 0.0 };
+    }
+    let x = d / sigma;
+    (-(x * x) * 0.5).exp()
+}
+
 /// Edge kinds. Discriminants are stable for persistence.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,9 +307,14 @@ pub struct PerturbationEdge {
 pub struct PerturbationGraph {
     pub nodes: Vec<PerturbationNode>,
     pub edges: Vec<PerturbationEdge>,
+    /// Phase A1: NodeGroups — "neurons as perturbation-element groups".
+    /// Runtime-only this commit; persistence lands in Phase A9.
+    pub groups: Vec<NodeGroup>,
     /// Next id to hand out — never resets to 0 (the sentinel) and never reuses
     /// an evicted node's id within the same session.
     pub next_id: u32,
+    /// Next group id to hand out. Same sentinel/no-reuse convention as next_id.
+    pub next_group_id: u32,
 }
 
 impl Default for PerturbationGraph {
@@ -202,7 +322,9 @@ impl Default for PerturbationGraph {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
+            groups: Vec::new(),
             next_id: 1, // 0 reserved as the "no-node" sentinel
+            next_group_id: 1, // 0 reserved as the "no-group" sentinel
         }
     }
 }
@@ -375,6 +497,236 @@ impl PerturbationGraph {
         // Drop edges referencing the evicted node — otherwise they would
         // silently point at a non-existent id and inflate edge count.
         self.edges.retain(|e| e.from != evicted_id && e.to != evicted_id);
+        // Drop group memberships referencing the evicted node so its weight
+        // doesn't keep skewing group centroid drift / bind_strength.
+        for g in self.groups.iter_mut() {
+            g.members.retain(|m| m.node_id != evicted_id);
+        }
+    }
+
+    // ── Group ops (Phase A1) ─────────────────────────────────────────────────
+
+    fn alloc_group_id(&mut self) -> GroupId {
+        let id = self.next_group_id;
+        self.next_group_id = self.next_group_id.wrapping_add(1);
+        if self.next_group_id == 0 {
+            self.next_group_id = 1;
+        }
+        id
+    }
+
+    /// Spawn a NodeGroup from a seed cohort of node ids within a region. The
+    /// centroid is initialised as the unweighted mean of seed-member sigs;
+    /// each seed's weight is gaussian(sig_distance(node.sig, centroid)).
+    /// Returns None if no seed id resolves to a live node.
+    pub fn add_group(
+        &mut self,
+        now_us: u64,
+        region: RegionKey,
+        seed_members: &[NodeId],
+    ) -> Option<GroupId> {
+        if seed_members.is_empty() {
+            return None;
+        }
+        // First pass: build centroid as the mean of resolved seed sigs.
+        let mut centroid_sig = [0.0f64; PG_NODE_SIG_DIM];
+        let mut count = 0usize;
+        for &nid in seed_members {
+            if let Some(n) = self.node(nid) {
+                for i in 0..PG_NODE_SIG_DIM {
+                    centroid_sig[i] += n.sig[i];
+                }
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        let denom = count as f64;
+        for v in centroid_sig.iter_mut() {
+            *v /= denom;
+        }
+        // Capacity check (after the seed sigs have been read so the borrow on
+        // self is released by the time we mutate).
+        if self.groups.len() >= PG_GROUP_CAP {
+            self.evict_weakest_group(now_us);
+        }
+        let id = self.alloc_group_id();
+        // Second pass: stamp members with distance-derived weights.
+        let mut members: Vec<GroupMember> = Vec::with_capacity(count);
+        for &nid in seed_members {
+            if let Some(n) = self.node(nid) {
+                let d = sig_distance(&n.sig, &centroid_sig);
+                members.push(GroupMember {
+                    node_id: nid,
+                    weight: gaussian_weight(d, GROUP_MEMBERSHIP_SIGMA),
+                    last_refreshed_t_us: now_us,
+                });
+            }
+        }
+        let bind_strength = Self::compute_group_bind_strength(&members, &self.nodes);
+        self.groups.push(NodeGroup {
+            id,
+            centroid_sig,
+            members,
+            region,
+            bind_strength,
+            formed_t_us: now_us,
+            last_active_t_us: now_us,
+        });
+        Some(id)
+    }
+
+    /// Soft-admit / refresh a node's membership in a group. If the node is
+    /// already a member, its weight EMAs toward the new gaussian(distance);
+    /// otherwise it joins with the initial gaussian-weighted weight. The group
+    /// centroid drifts toward the node's sig in proportion to the resulting
+    /// member weight (loose members barely move the centroid).
+    pub fn refresh_group(
+        &mut self,
+        group_id: GroupId,
+        node_id: NodeId,
+        now_us: u64,
+    ) {
+        // Resolve node sig first so the immutable borrow ends before we
+        // grab a mutable group reference.
+        let node_sig = match self.node(node_id) {
+            Some(n) => n.sig,
+            None => return,
+        };
+        let g_idx = match self.groups.iter().position(|g| g.id == group_id) {
+            Some(i) => i,
+            None => return,
+        };
+        let g = &mut self.groups[g_idx];
+        let d = sig_distance(&node_sig, &g.centroid_sig);
+        let target_w = gaussian_weight(d, GROUP_MEMBERSHIP_SIGMA);
+        let effective_w = if let Some(m) =
+            g.members.iter_mut().find(|m| m.node_id == node_id)
+        {
+            m.weight = (1.0 - GROUP_ALPHA_WEIGHT) * m.weight
+                + GROUP_ALPHA_WEIGHT * target_w;
+            m.last_refreshed_t_us = now_us;
+            m.weight
+        } else {
+            g.members.push(GroupMember {
+                node_id,
+                weight: target_w,
+                last_refreshed_t_us: now_us,
+            });
+            target_w
+        };
+        // Drift the centroid toward the refreshing node, damped by member
+        // weight: tight members pull the centroid hard, loose ones barely.
+        let alpha = GROUP_ALPHA_CENTROID * effective_w;
+        for i in 0..PG_NODE_SIG_DIM {
+            g.centroid_sig[i] =
+                (1.0 - alpha) * g.centroid_sig[i] + alpha * node_sig[i];
+        }
+        g.last_active_t_us = now_us;
+    }
+
+    /// Find the group whose centroid is closest to `sig` AND whose region
+    /// matches `region`. Region equality is exact — a node looking for its
+    /// spatial group only sees Spatial(_, _) groups, never temporal ones.
+    pub fn nearest_group(
+        &self,
+        region: RegionKey,
+        sig: &[f64; PG_NODE_SIG_DIM],
+        max_dist: f64,
+    ) -> Option<(GroupId, f64)> {
+        let mut best: Option<(GroupId, f64)> = None;
+        for g in &self.groups {
+            if g.region != region {
+                continue;
+            }
+            let d = sig_distance(&g.centroid_sig, sig);
+            if d <= max_dist && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                best = Some((g.id, d));
+            }
+        }
+        best
+    }
+
+    pub fn group(&self, id: GroupId) -> Option<&NodeGroup> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    pub fn has_group(&self, id: GroupId) -> bool {
+        self.groups.iter().any(|g| g.id == id)
+    }
+
+    /// The group with the highest aggregated bind_strength — the closest
+    /// "neuron-level" analog of `most_bound`. Returns None on an empty graph.
+    pub fn most_bound_group(&self) -> Option<&NodeGroup> {
+        self.groups
+            .iter()
+            .max_by(|a, b| a.bind_strength.partial_cmp(&b.bind_strength).unwrap())
+    }
+
+    /// Iterator over groups whose last_active_t_us is within the active window.
+    pub fn active_groups<'a>(&'a self, now_us: u64) -> impl Iterator<Item = &'a NodeGroup> + 'a {
+        self.groups
+            .iter()
+            .filter(move |g| now_us.saturating_sub(g.last_active_t_us) <= PG_ACTIVE_WINDOW_US)
+    }
+
+    /// Idempotent maintenance: decay member weights that have not been
+    /// refreshed for GROUP_MEMBER_DECAY_US, prune the ones that fall below
+    /// the floor, and recompute each group's bind_strength. Safe to call
+    /// every tick.
+    pub fn decay_group_members(&mut self, now_us: u64) {
+        let nodes_snapshot = &self.nodes; // immutable borrow for compute
+        for g in self.groups.iter_mut() {
+            for m in g.members.iter_mut() {
+                let idle = now_us.saturating_sub(m.last_refreshed_t_us);
+                if idle > GROUP_MEMBER_DECAY_US {
+                    m.weight *= GROUP_WEIGHT_DECAY_FACTOR;
+                }
+            }
+            g.members.retain(|m| m.weight > GROUP_MEMBER_PRUNE_TH);
+            g.bind_strength = Self::compute_group_bind_strength(&g.members, nodes_snapshot);
+        }
+    }
+
+    /// Weighted mean of member bind_strengths, weighted by membership weight.
+    fn compute_group_bind_strength(
+        members: &[GroupMember],
+        nodes: &[PerturbationNode],
+    ) -> f64 {
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for m in members {
+            if let Some(n) = nodes.iter().find(|n| n.id == m.node_id) {
+                num += m.weight * n.bind_strength;
+                den += m.weight;
+            }
+        }
+        if den < 1e-9 {
+            0.0
+        } else {
+            (num / den).clamp(0.0, 1.0)
+        }
+    }
+
+    fn evict_weakest_group(&mut self, now_us: u64) {
+        if self.groups.is_empty() {
+            return;
+        }
+        let mut weakest_idx = 0usize;
+        let mut weakest_def = f64::INFINITY;
+        for (i, g) in self.groups.iter().enumerate() {
+            let age = now_us.saturating_sub(g.formed_t_us) as f64;
+            let age_bonus = (age / PG_AGE_PROTECT_US).min(1.0) * PG_AGE_PROTECT_MAX_BONUS;
+            let idle = now_us.saturating_sub(g.last_active_t_us) as f64;
+            let recency_penalty = 1.0 - (-idle / PG_IDLE_DECAY_US).exp();
+            let defence = g.bind_strength + age_bonus - 0.1 * recency_penalty;
+            if defence < weakest_def {
+                weakest_def = defence;
+                weakest_idx = i;
+            }
+        }
+        self.groups.swap_remove(weakest_idx);
     }
 
     // ── Edge ops ─────────────────────────────────────────────────────────────
@@ -771,10 +1123,16 @@ impl PerturbationGraph {
                 last_t_us,
             });
         }
+        // Phase A1: groups are NOT persisted in v1 — they regenerate from
+        // active nodes via vision_tier0's group-formation pass each session.
+        // next_group_id resets to 1 across boots; group ids are not stable
+        // identifiers between sessions (only NodeIds are, via the next_id field).
         Some(PerturbationGraph {
             nodes,
             edges,
+            groups: Vec::new(),
             next_id,
+            next_group_id: 1,
         })
     }
 }
@@ -1076,5 +1434,271 @@ mod tests {
         // 4 + 8*24 + 8*8 + 8*6 + 8*4 + 8 + 8 + 8 = 4 + 192 + 64 + 48 + 32 + 24 = 364
         assert_eq!(PerturbationGraph::NODE_BYTES, 364);
         assert_eq!(PerturbationGraph::EDGE_BYTES, 33);
+    }
+
+    // ── Phase A1 tests: NodeGroup + soft membership ─────────────────────────
+
+    fn spatial_region(x: u8, y: u8) -> RegionKey {
+        RegionKey::Spatial(x, y)
+    }
+
+    #[test]
+    fn gaussian_weight_drops_off_with_distance() {
+        // At d=0 the weight is 1.0; at d=σ ≈ 0.61; at d=3σ ≈ 0.011. Smooth
+        // monotonic decay is the whole point of the soft-membership transform.
+        assert!((gaussian_weight(0.0, 0.15) - 1.0).abs() < 1e-9);
+        let one_sigma = gaussian_weight(0.15, 0.15);
+        assert!((one_sigma - 0.6065).abs() < 0.01);
+        let three_sigma = gaussian_weight(0.45, 0.15);
+        assert!(three_sigma < 0.05);
+        // Pathological σ=0 collapses to an indicator at d=0.
+        assert_eq!(gaussian_weight(0.0, 0.0), 1.0);
+        assert_eq!(gaussian_weight(0.1, 0.0), 0.0);
+    }
+
+    #[test]
+    fn add_group_with_no_resolvable_seeds_returns_none() {
+        let mut g = PerturbationGraph::default();
+        // Seed list points at unknown node ids → no group can be formed.
+        let r = g.add_group(0, spatial_region(0, 0), &[42, 99]);
+        assert!(r.is_none());
+        assert_eq!(g.groups.len(), 0);
+    }
+
+    #[test]
+    fn add_group_returns_unique_ids_starting_above_sentinel() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let c = g.add_node(0, sig_at(0.12));
+        let id1 = g.add_group(1000, spatial_region(0, 0), &[a, b, c]).unwrap();
+        let id2 = g.add_group(1000, spatial_region(0, 0), &[a, b, c]).unwrap();
+        assert!(id1 >= 1, "id 0 reserved as no-group sentinel");
+        assert_ne!(id1, id2);
+        assert_eq!(g.groups.len(), 2);
+    }
+
+    #[test]
+    fn refresh_group_updates_member_weight_toward_target() {
+        // A node at the centroid gets weight ≈ 1.0; pulling it away with a
+        // new sig should EMA its weight downward over several refresh ticks.
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.20));
+        let n2 = g.add_node(0, sig_at(0.20));
+        let gid = g.add_group(1000, spatial_region(0, 0), &[n1, n2]).unwrap();
+        let initial_w = g
+            .group(gid)
+            .unwrap()
+            .members
+            .iter()
+            .find(|m| m.node_id == n1)
+            .unwrap()
+            .weight;
+        assert!(initial_w > 0.9, "tight initial weight, got {initial_w}");
+        // Move n1's sig far from the centroid and refresh several times.
+        g.refresh_node(n1, 2000, &sig_at(0.90), 1.0); // collapse to far sig
+        for t in 0..10 {
+            g.refresh_group(gid, n1, 3000 + t * 100);
+        }
+        let drifted_w = g
+            .group(gid)
+            .unwrap()
+            .members
+            .iter()
+            .find(|m| m.node_id == n1)
+            .unwrap()
+            .weight;
+        assert!(
+            drifted_w < initial_w * 0.5,
+            "weight must drop after sustained distance: initial={initial_w}, drifted={drifted_w}"
+        );
+    }
+
+    #[test]
+    fn refresh_group_admits_new_member_when_close_enough() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.10));
+        let gid = g.add_group(1000, spatial_region(0, 0), &[n1, n2]).unwrap();
+        let n3 = g.add_node(0, sig_at(0.105)); // close to centroid
+        assert!(g
+            .group(gid)
+            .unwrap()
+            .members
+            .iter()
+            .all(|m| m.node_id != n3));
+        g.refresh_group(gid, n3, 2000);
+        let m3 = g
+            .group(gid)
+            .unwrap()
+            .members
+            .iter()
+            .find(|m| m.node_id == n3);
+        assert!(m3.is_some(), "close node must be soft-admitted");
+        assert!(m3.unwrap().weight > 0.5);
+    }
+
+    #[test]
+    fn centroid_drifts_toward_refreshing_members() {
+        // A group of tight members has its centroid pulled toward whichever
+        // member keeps refreshing — this is the "live neuron" property at
+        // the group level. After many refreshes from one specific member,
+        // the centroid sig should be closer to that member than to the
+        // original mean.
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.00));
+        let n2 = g.add_node(0, sig_at(0.20));
+        let gid = g.add_group(1000, spatial_region(0, 0), &[n1, n2]).unwrap();
+        let initial_centroid = g.group(gid).unwrap().centroid_sig;
+        // n1's sig hasn't changed; but if only n1 keeps refreshing the group,
+        // the centroid should drift toward n1.
+        for t in 0..100 {
+            g.refresh_group(gid, n1, 2000 + t * 100);
+        }
+        let drifted = g.group(gid).unwrap().centroid_sig;
+        let d_initial_to_n1 = sig_distance(&initial_centroid, &sig_at(0.00));
+        let d_drifted_to_n1 = sig_distance(&drifted, &sig_at(0.00));
+        assert!(
+            d_drifted_to_n1 < d_initial_to_n1,
+            "centroid must drift toward repeatedly-refreshed member: initial_d={d_initial_to_n1}, drifted_d={d_drifted_to_n1}"
+        );
+    }
+
+    #[test]
+    fn nearest_group_only_matches_same_region() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let c = g.add_node(0, sig_at(0.12));
+        let g_spatial = g
+            .add_group(1000, RegionKey::Spatial(0, 0), &[a, b, c])
+            .unwrap();
+        let _g_temporal = g
+            .add_group(1000, RegionKey::TemporalWindow(42), &[a, b, c])
+            .unwrap();
+        // Querying with Spatial should ONLY return the spatial group.
+        let (hit_id, _) = g
+            .nearest_group(RegionKey::Spatial(0, 0), &sig_at(0.105), 0.10)
+            .expect("close-sig spatial group");
+        assert_eq!(hit_id, g_spatial);
+        // Querying with TemporalWindow should not return the spatial group.
+        let other_hit = g.nearest_group(RegionKey::TemporalWindow(42), &sig_at(0.105), 0.10);
+        assert!(other_hit.is_some());
+        assert_ne!(other_hit.unwrap().0, g_spatial);
+    }
+
+    #[test]
+    fn most_bound_group_picks_highest_bind_strength() {
+        let mut g = PerturbationGraph::default();
+        // Group A: nodes never refreshed → seed bind_strength only.
+        let a1 = g.add_node(0, sig_at(0.10));
+        let a2 = g.add_node(0, sig_at(0.11));
+        let _ga = g.add_group(1000, RegionKey::Spatial(0, 0), &[a1, a2]).unwrap();
+        // Group B: nodes refreshed many times → high bind_strength members.
+        let b1 = g.add_node(0, sig_at(0.50));
+        let b2 = g.add_node(0, sig_at(0.51));
+        let gb = g.add_group(1000, RegionKey::Spatial(5, 5), &[b1, b2]).unwrap();
+        for t in 0..40 {
+            g.refresh_node(b1, 1000 + t * 100, &sig_at(0.50), 0.3);
+            g.refresh_node(b2, 1000 + t * 100, &sig_at(0.51), 0.3);
+        }
+        // Group B's aggregated bind_strength is now much higher than A's.
+        g.decay_group_members(5_000);
+        let top = g.most_bound_group().expect("at least one group");
+        assert_eq!(top.id, gb);
+    }
+
+    #[test]
+    fn decay_group_members_prunes_dormant_members() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let c = g.add_node(0, sig_at(0.12));
+        let gid = g.add_group(1000, RegionKey::Spatial(0, 0), &[a, b, c]).unwrap();
+        assert_eq!(g.group(gid).unwrap().members.len(), 3);
+        // Jump time well past GROUP_MEMBER_DECAY_US for ALL members.
+        let now = 1000 + GROUP_MEMBER_DECAY_US + 1_000;
+        // One decay step → all weights × 0.95 → still above floor.
+        g.decay_group_members(now);
+        assert_eq!(g.group(gid).unwrap().members.len(), 3);
+        // Many decay steps → eventually members get pruned.
+        for k in 0..120 {
+            g.decay_group_members(now + (k + 1) * GROUP_MEMBER_DECAY_US);
+        }
+        assert_eq!(
+            g.group(gid).unwrap().members.len(),
+            0,
+            "all members should have been pruned after sustained idleness"
+        );
+    }
+
+    #[test]
+    fn evicting_a_node_drops_group_membership() {
+        // The whole-graph invariant: when a node is evicted, no surviving
+        // group should still list it as a member. Otherwise group bind_strength
+        // and centroid drift silently keep referencing a ghost.
+        let mut g = PerturbationGraph::default();
+        let weak = g.add_node(0, sig_at(0.10));
+        let stronger_a = g.add_node(0, sig_at(0.50));
+        let stronger_b = g.add_node(0, sig_at(0.51));
+        let gid = g
+            .add_group(1000, RegionKey::Spatial(0, 0), &[weak, stronger_a, stronger_b])
+            .unwrap();
+        // Raise bind on the two stronger nodes so eviction targets `weak`.
+        for t in 0..30 {
+            g.refresh_node(stronger_a, 1000 + t * 100, &sig_at(0.50), 0.3);
+            g.refresh_node(stronger_b, 1000 + t * 100, &sig_at(0.51), 0.3);
+        }
+        let now = 5_000;
+        g.evict_weakest_node(now);
+        assert!(!g.has_node(weak));
+        let members = &g.group(gid).unwrap().members;
+        assert!(
+            members.iter().all(|m| m.node_id != weak),
+            "evicted node must not remain as a group member"
+        );
+    }
+
+    #[test]
+    fn evict_weakest_group_protects_higher_bind_strength() {
+        let mut g = PerturbationGraph::default();
+        // Group A: low-bind seeds, no refresh → weak.
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let weak_g = g.add_group(0, RegionKey::Spatial(0, 0), &[a, b]).unwrap();
+        // Group B: refreshed many times → strong.
+        let c = g.add_node(0, sig_at(0.50));
+        let d = g.add_node(0, sig_at(0.51));
+        let strong_g = g.add_group(0, RegionKey::Spatial(5, 5), &[c, d]).unwrap();
+        for t in 0..40 {
+            g.refresh_node(c, 100 * t, &sig_at(0.50), 0.3);
+            g.refresh_node(d, 100 * t, &sig_at(0.51), 0.3);
+            g.refresh_group(strong_g, c, 100 * t);
+            g.refresh_group(strong_g, d, 100 * t);
+        }
+        g.decay_group_members(5_000);
+        let now = 100_000;
+        g.evict_weakest_group(now);
+        assert!(g.has_group(strong_g));
+        assert!(!g.has_group(weak_g));
+    }
+
+    #[test]
+    fn active_groups_filters_dormant() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let live = g
+            .add_group(0, RegionKey::Spatial(0, 0), &[a, b])
+            .unwrap();
+        let dormant = g
+            .add_group(0, RegionKey::Spatial(5, 5), &[a, b])
+            .unwrap();
+        let now = PG_ACTIVE_WINDOW_US * 2;
+        // Touch `live` recently.
+        g.refresh_group(live, a, now);
+        let active_ids: Vec<GroupId> = g.active_groups(now).map(|g| g.id).collect();
+        assert!(active_ids.contains(&live));
+        assert!(!active_ids.contains(&dormant));
     }
 }
