@@ -1933,6 +1933,14 @@ fn write_binding_target(buf: &mut Vec<u8>, target: BindingTargetRef) {
             buf.extend_from_slice(&start_t_us.to_le_bytes());
             buf.extend_from_slice(&end_t_us.to_le_bytes());
         }
+        BindingTargetRef::PerturbationNode { node_id } => {
+            // tag 3: Phase 3 cutover step 9 — symbol grounding against a
+            // perturbation_graph node. node_id is u32 so it fits inside the
+            // existing 8-byte field; the second 8-byte slot is reserved.
+            buf.push(3);
+            buf.extend_from_slice(&(node_id as u64).to_le_bytes());
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
     }
 }
 
@@ -1954,6 +1962,9 @@ fn read_binding_target(bytes: &[u8], cur: &mut usize) -> BindingTargetRef {
         2 => BindingTargetRef::TimeWindow {
             start_t_us: a,
             end_t_us: b,
+        },
+        3 => BindingTargetRef::PerturbationNode {
+            node_id: a as u32,
         },
         _ => BindingTargetRef::ObjectSlot { slot_id: a as u8 },
     }

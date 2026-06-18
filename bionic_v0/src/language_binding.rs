@@ -13,11 +13,20 @@ pub enum PatternKind {
 }
 
 /// Binding target reference. Numeric index.
+///
+/// Phase 3 cutover (step 9): `PerturbationNode { node_id }` is the new
+/// substrate for symbol grounding — it points at a tier-0 perturbation graph
+/// node (perturbation_graph.rs) instead of at a categorical slot. Once
+/// vision_tier0 produces stable node IDs across long-running sessions, the
+/// `ObjectSlot` variant can be retired. For now both variants coexist:
+/// cross-modal binding writes `PerturbationNode` when a candidate visual node
+/// is identifiable, otherwise falls back to `ObjectSlot`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingTargetRef {
     ObjectSlot { slot_id: u8 },
     RelationEdge { edge_index: u16 },
     TimeWindow { start_t_us: u64, end_t_us: u64 },
+    PerturbationNode { node_id: u32 },
 }
 
 /// Binding strength [0, 1].
@@ -373,12 +382,30 @@ impl crate::viewport::Viewport {
     ///     so a sustained stimulus cannot inflate one event into a per-tick
     ///     runaway of fabricated reinforcements.
     pub fn tick_form_binding_from_cooccurrence(&self, now_us: u64) -> bool {
-        // Seen object: a fresh, active PHOT slot.
-        let Some(phot_slot) = self.find_active_slot_for(crate::MOD_PHOT, now_us) else {
-            return false;
+        // Seen object — Phase 3 cutover step 9 prefers a perturbation_graph
+        // node target: when the live graph has a most-bound active node, the
+        // symbol grounds against THAT (a stable cross-session id) instead of
+        // the legacy slot index (per-session and recycled). The slot path
+        // remains as a fallback for the cold-start case where the graph has
+        // not yet produced a stable node.
+        let target = {
+            let graph = self.perturbation_graph.read().unwrap();
+            graph.most_bound().and_then(|n| {
+                if graph.is_active(n.id, now_us) && n.bind_strength > 0.3 {
+                    Some(BindingTargetRef::PerturbationNode { node_id: n.id })
+                } else {
+                    None
+                }
+            })
         };
-        let target = BindingTargetRef::ObjectSlot {
-            slot_id: phot_slot as u8,
+        let target = match target {
+            Some(t) => t,
+            None => {
+                let Some(phot_slot) = self.find_active_slot_for(crate::MOD_PHOT, now_us) else {
+                    return false;
+                };
+                BindingTargetRef::ObjectSlot { slot_id: phot_slot as u8 }
+            }
         };
 
         // Heard sound: a fresh, active VIB slot carrying real band evidence. The
@@ -529,9 +556,19 @@ impl crate::viewport::Viewport {
         let Some((slot_id, _vib_hash, phot_hash)) = chosen else {
             return false;
         };
-        let target = BindingTargetRef::ObjectSlot {
-            slot_id: slot_id as u8,
-        };
+        // Phase 3 cutover step 9: prefer perturbation_graph node target when
+        // available (same as tick_form_binding_from_cooccurrence above).
+        let target = {
+            let graph = self.perturbation_graph.read().unwrap();
+            graph.most_bound().and_then(|n| {
+                if graph.is_active(n.id, now_us) && n.bind_strength > 0.3 {
+                    Some(BindingTargetRef::PerturbationNode { node_id: n.id })
+                } else {
+                    None
+                }
+            })
+        }
+        .unwrap_or(BindingTargetRef::ObjectSlot { slot_id: slot_id as u8 });
 
         // Earned, contemporaneous evidence: latest Paired pair within the temporal
         // window. Identical gate to tick_form_binding_from_cooccurrence so the two
@@ -589,6 +626,15 @@ impl crate::viewport::Viewport {
                 start_t_us,
                 end_t_us,
             } => start_t_us < end_t_us,
+            BindingTargetRef::PerturbationNode { node_id } => {
+                // Live = the node exists AND its most-recent refresh is within
+                // the active window. Mirrors PerturbationGraph::is_active.
+                let now = crate::clock::now_us();
+                self.perturbation_graph
+                    .read()
+                    .unwrap()
+                    .is_active(node_id, now)
+            }
         }
     }
 

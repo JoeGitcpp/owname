@@ -144,6 +144,7 @@ fn binding_target_label(target: BindingTargetRef) -> String {
             start_t_us,
             end_t_us,
         } => format!("t{}-{}", start_t_us, end_t_us),
+        BindingTargetRef::PerturbationNode { node_id } => format!("pg{}", node_id),
     }
 }
 

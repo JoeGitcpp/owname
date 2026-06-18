@@ -163,6 +163,10 @@ fn mark_binding_target_is_live(vp: &Viewport, target: BindingTargetRef) -> bool 
             start_t_us,
             end_t_us,
         } => start_t_us < end_t_us,
+        BindingTargetRef::PerturbationNode { node_id } => {
+            let now = crate::clock::now_us();
+            vp.perturbation_graph.read().unwrap().is_active(node_id, now)
+        }
     }
 }
 

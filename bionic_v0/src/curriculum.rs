@@ -2916,9 +2916,9 @@ pub fn run_cross_channel_disturbance_coupling_curriculum(
     for (idx, target) in shared_targets.iter().copied().enumerate() {
         let slot = match target {
             BindingTargetRef::ObjectSlot { slot_id } => slot_id as usize,
-            BindingTargetRef::RelationEdge { .. } | BindingTargetRef::TimeWindow { .. } => {
-                primary_slot
-            }
+            BindingTargetRef::RelationEdge { .. }
+            | BindingTargetRef::TimeWindow { .. }
+            | BindingTargetRef::PerturbationNode { .. } => primary_slot,
         };
         let vib_hash = carrier_pattern_hash(text_hashes[idx], target, 0x51);
         let phot_hash = carrier_pattern_hash(text_hashes[idx], target, 0x97);
@@ -4625,20 +4625,25 @@ fn binding_target_ref_code(target: BindingTargetRef) -> u64 {
             start_t_us,
             end_t_us,
         } => 0x3000 ^ start_t_us.rotate_left(13) ^ end_t_us.rotate_left(37),
+        BindingTargetRef::PerturbationNode { node_id } => 0x4000 | node_id as u64,
     }
 }
 
 fn object_slot_id(target: BindingTargetRef) -> usize {
     match target {
         BindingTargetRef::ObjectSlot { slot_id } => slot_id as usize,
-        BindingTargetRef::RelationEdge { .. } | BindingTargetRef::TimeWindow { .. } => 0,
+        BindingTargetRef::RelationEdge { .. }
+        | BindingTargetRef::TimeWindow { .. }
+        | BindingTargetRef::PerturbationNode { .. } => 0,
     }
 }
 
 fn target_focus_edge_id(target: BindingTargetRef) -> i16 {
     match target {
         BindingTargetRef::RelationEdge { edge_index } => edge_index as i16,
-        BindingTargetRef::ObjectSlot { .. } | BindingTargetRef::TimeWindow { .. } => -1,
+        BindingTargetRef::ObjectSlot { .. }
+        | BindingTargetRef::TimeWindow { .. }
+        | BindingTargetRef::PerturbationNode { .. } => -1,
     }
 }
 
