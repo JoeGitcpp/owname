@@ -115,6 +115,96 @@ pub type NodeId = u32;
 /// "no-group" sentinel and never assigned.
 pub type GroupId = u32;
 
+/// Stable per-session relation identifier. Mirrors NodeId / GroupId conventions:
+/// id 0 is the "no-relation" sentinel and never assigned.
+pub type RelId = u32;
+
+// ── Phase A3: Endpoint + Relation as first-class citizens
+//
+// Per the v2 design doc: relations are FIRST-CLASS — they can be pointed at by
+// other relations, can bear a bind_strength of their own, and have a stable
+// id that survives across cycles of the graph. An edge in the old sense was
+// always Node → Node; a Relation can have Node, Group, or Relation endpoints,
+// recursive without depth cap (cycle protection via visited sets in traversal).
+//
+// The user's reframing (2026-06-18 conversation): a relation is NOT a "preference"
+// — it IS a relation, described by the tier-0 axes that align between the
+// endpoints. Strength × expressivity drives credit; expressivity is the count of
+// tier-0 axes where the two endpoints' sigs are close.
+//
+// Phase A3 wires the data structures + APIs. Use sites (vision_tier0 cooccur
+// edges, vocal_sequence transitions, language_binding) migrate in later steps;
+// for now PerturbationEdge keeps powering them so this commit is additive.
+
+/// A relation endpoint. Recursive: a relation can point at a node, a group, or
+/// another relation. Cycle protection lives in traversal (not the type), so a
+/// Relation(rel_id) endpoint that loops back to itself is structurally legal —
+/// only depth-bounded walkers consume the graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Endpoint {
+    Node(NodeId),
+    Group(GroupId),
+    Relation(RelId),
+}
+
+/// First-class relation between two perturbations. Unlike PerturbationEdge
+/// (Node→Node only) a Relation can connect any Endpoint pair — including
+/// Group→Group ("the keyboard cluster is part of the computer cluster") and
+/// Relation→Node ("the fact that A causes B is associated with C").
+///
+/// Fields beyond what PerturbationEdge had:
+/// - `id`: stable per-session, so other relations can refer to this one.
+/// - `expressivity`: tier-0 axis count engaged at last observation. Drives
+///   credit weighting in inference passes. EMA over time.
+/// - `last_axes_engaged`: u8 — raw count at last observation, for telemetry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Relation {
+    pub id: RelId,
+    pub from: Endpoint,
+    pub to: Endpoint,
+    /// EdgeKind discriminant (use EdgeKind::from_u8); shares the kind ID space
+    /// with PerturbationEdge during the transition. Phase A4 introduces
+    /// dynamically-discovered RelationKind on top of this.
+    pub kind_byte: u8,
+    /// EMA of "this relation has been observed" in [0,1].
+    pub strength: f64,
+    /// EMA of tier-0 axis engagement ratio in [0,1]. 1.0 = all 24 axes aligned
+    /// at last observation; 0.0 = no axes aligned. Multiplies strength when
+    /// downstream inference picks the next hop.
+    pub expressivity: f64,
+    pub elig: f64,
+    pub last_t_us: u64,
+    pub last_axes_engaged: u8,
+}
+
+/// Maximum traversal depth for relation walks. Cycle-protected by a visited
+/// set; depth cap kicks in for non-cyclic but deep chains (a → b → c → d ...
+/// where each step is a distinct Endpoint). Per the design doc Q-G default.
+pub const RELATION_TRAVERSAL_MAX_DEPTH: usize = 8;
+
+/// Maximum traversal depth allowed during cross-lineage merge. Wider than the
+/// inference cap because merge needs to chase the entire structure of an
+/// imported branch, not just the locally-useful inference horizon.
+pub const RELATION_MERGE_MAX_DEPTH: usize = 32;
+
+/// Tier-0 axis similarity threshold above which the axis is "engaged" in a
+/// relation's expressivity calculation. 0.5 = the two endpoint sigs differ by
+/// less than 0.5 on that axis. With 24 axes total, fully-aligned endpoints
+/// give expressivity = 1.0.
+pub const RELATION_EXPRESSIVITY_AXIS_TH: f64 = 0.5;
+
+/// Soft cap on first-class relations.
+/// PG_REL_CAP = 131072 per the v2 design doc (Q-F default, ~6 MB inline).
+pub const PG_REL_CAP: usize = 131_072;
+
+/// EMA seed for a brand-new relation (mirrors PG_EDGE_SEED for the existing
+/// edges system; keep the convention identical so the bootstrap-deadlock
+/// guard works the same way).
+const PG_REL_SEED: f64 = 0.2;
+
+/// EMA alpha for the strength + expressivity updates on an observed relation.
+const PG_REL_ALPHA: f64 = 0.20;
+
 // ── Phase A1: NodeGroup + soft membership (the "neuron-as-perturbation-group" layer)
 //
 // Per the v2 design doc: a "neuron" is not a single perturbation patch — it is
@@ -310,11 +400,19 @@ pub struct PerturbationGraph {
     /// Phase A1: NodeGroups — "neurons as perturbation-element groups".
     /// Runtime-only this commit; persistence lands in Phase A9.
     pub groups: Vec<NodeGroup>,
+    /// Phase A3: first-class Relations. Distinct from `edges` (which stays as
+    /// the low-level Node→Node primitive). Relations can connect any Endpoint
+    /// pair (Node / Group / Relation) and carry their own id, so other
+    /// relations can point at THEM. Runtime-only this commit; persistence
+    /// lands in Phase A9.
+    pub relations: Vec<Relation>,
     /// Next id to hand out — never resets to 0 (the sentinel) and never reuses
     /// an evicted node's id within the same session.
     pub next_id: u32,
     /// Next group id to hand out. Same sentinel/no-reuse convention as next_id.
     pub next_group_id: u32,
+    /// Next relation id to hand out. Same sentinel/no-reuse convention.
+    pub next_rel_id: u32,
 }
 
 impl Default for PerturbationGraph {
@@ -323,8 +421,10 @@ impl Default for PerturbationGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
             groups: Vec::new(),
+            relations: Vec::new(),
             next_id: 1, // 0 reserved as the "no-node" sentinel
             next_group_id: 1, // 0 reserved as the "no-group" sentinel
+            next_rel_id: 1, // 0 reserved as the "no-relation" sentinel
         }
     }
 }
@@ -729,6 +829,191 @@ impl PerturbationGraph {
         self.groups.swap_remove(weakest_idx);
     }
 
+    // ── Relation ops (Phase A3) ─────────────────────────────────────────────
+
+    fn alloc_rel_id(&mut self) -> RelId {
+        let id = self.next_rel_id;
+        self.next_rel_id = self.next_rel_id.wrapping_add(1);
+        if self.next_rel_id == 0 {
+            self.next_rel_id = 1;
+        }
+        id
+    }
+
+    /// Resolve an Endpoint to its representative tier-0 signature, used for
+    /// `expressivity` computation. Returns None when the endpoint does not
+    /// resolve (evicted node / group, dangling relation id). For Relation
+    /// endpoints, the signature is the source's resolved sig — i.e. follow
+    /// the "from" chain once, so meta-relations inherit the topic they relate.
+    pub fn endpoint_sig(&self, ep: Endpoint) -> Option<[f64; PG_NODE_SIG_DIM]> {
+        match ep {
+            Endpoint::Node(id) => self.node(id).map(|n| n.sig),
+            Endpoint::Group(id) => self.group(id).map(|g| g.centroid_sig),
+            Endpoint::Relation(id) => {
+                // Single-hop indirection only. Recursive resolution would need
+                // cycle protection; consumers that want full traversal should
+                // use traverse_relations_from().
+                let from = self.relation(id).map(|r| r.from)?;
+                match from {
+                    Endpoint::Relation(_) => None, // refuse deeper recursion
+                    other => self.endpoint_sig(other),
+                }
+            }
+        }
+    }
+
+    /// True iff the endpoint resolves to a live entity in this graph.
+    pub fn endpoint_exists(&self, ep: Endpoint) -> bool {
+        match ep {
+            Endpoint::Node(id) => id != 0 && self.has_node(id),
+            Endpoint::Group(id) => id != 0 && self.has_group(id),
+            Endpoint::Relation(id) => id != 0 && self.has_relation(id),
+        }
+    }
+
+    pub fn relation(&self, id: RelId) -> Option<&Relation> {
+        self.relations.iter().find(|r| r.id == id)
+    }
+
+    pub fn has_relation(&self, id: RelId) -> bool {
+        self.relations.iter().any(|r| r.id == id)
+    }
+
+    /// Observe a relation between two endpoints. Behaviour mirrors
+    /// `observe_edge` but at the Relation level:
+    /// - Refuses self-loops, sentinel ids, and dangling endpoints.
+    /// - Merges (from, to, kind) duplicates via strength EMA + elig reset.
+    /// - Recomputes `expressivity` from the count of tier-0 axes where the
+    ///   two endpoints' signatures are within RELATION_EXPRESSIVITY_AXIS_TH.
+    /// - Allocates a fresh RelId on first creation; evicts the weakest
+    ///   relation when the cap is hit.
+    ///
+    /// Returns the RelId of the (created or refreshed) relation, or None when
+    /// the observation was rejected.
+    pub fn observe_relation(
+        &mut self,
+        now_us: u64,
+        from: Endpoint,
+        to: Endpoint,
+        kind: EdgeKind,
+    ) -> Option<RelId> {
+        if from == to {
+            return None;
+        }
+        if !self.endpoint_exists(from) || !self.endpoint_exists(to) {
+            return None;
+        }
+        // Compute axis engagement now, before any mutable borrow.
+        let (expr, engaged) = match (self.endpoint_sig(from), self.endpoint_sig(to)) {
+            (Some(a), Some(b)) => relation_expressivity(&a, &b),
+            _ => (0.0, 0u8),
+        };
+        let k = kind.as_u8();
+        if let Some(r) = self
+            .relations
+            .iter_mut()
+            .find(|r| r.from == from && r.to == to && r.kind_byte == k)
+        {
+            r.strength = (r.strength + PG_REL_ALPHA * (1.0 - r.strength)).clamp(0.0, 1.0);
+            r.expressivity =
+                (1.0 - PG_REL_ALPHA) * r.expressivity + PG_REL_ALPHA * expr;
+            r.elig = 1.0;
+            r.last_t_us = now_us;
+            r.last_axes_engaged = engaged;
+            return Some(r.id);
+        }
+        if self.relations.len() >= PG_REL_CAP {
+            self.evict_weakest_relation();
+        }
+        let id = self.alloc_rel_id();
+        self.relations.push(Relation {
+            id,
+            from,
+            to,
+            kind_byte: k,
+            strength: PG_REL_SEED,
+            expressivity: expr,
+            elig: 1.0,
+            last_t_us: now_us,
+            last_axes_engaged: engaged,
+        });
+        Some(id)
+    }
+
+    fn evict_weakest_relation(&mut self) {
+        if let Some((idx, _)) = self
+            .relations
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let ad = a.strength * a.expressivity;
+                let bd = b.strength * b.expressivity;
+                ad.partial_cmp(&bd).unwrap()
+            })
+        {
+            self.relations.swap_remove(idx);
+        }
+    }
+
+    /// Decay every relation's eligibility trace by elapsed time. Idempotent.
+    pub fn decay_relation_eligibility(&mut self, now_us: u64) {
+        for r in self.relations.iter_mut() {
+            let dt = now_us.saturating_sub(r.last_t_us) as f64;
+            r.elig = (-dt / PG_ELIG_TAU_US).exp();
+        }
+    }
+
+    /// Traverse forward from an endpoint, calling `visit(endpoint, depth)` for
+    /// each unique reachable endpoint up to `max_depth`. Cycle-protected via
+    /// a `HashSet<Endpoint>` of seen endpoints — a relation that points back
+    /// to its ancestor is visited once and not followed again.
+    pub fn traverse_relations_from(
+        &self,
+        start: Endpoint,
+        max_depth: usize,
+        mut visit: impl FnMut(Endpoint, usize),
+    ) {
+        if max_depth == 0 || !self.endpoint_exists(start) {
+            return;
+        }
+        let mut stack: Vec<(Endpoint, usize)> = vec![(start, 0)];
+        let mut visited: std::collections::HashSet<Endpoint> =
+            std::collections::HashSet::new();
+        while let Some((ep, d)) = stack.pop() {
+            if !visited.insert(ep) || d > max_depth {
+                continue;
+            }
+            visit(ep, d);
+            if d == max_depth {
+                continue;
+            }
+            // Push outgoing relations as next frames.
+            for r in self.relations.iter().filter(|r| r.from == ep) {
+                if !visited.contains(&r.to) {
+                    stack.push((r.to, d + 1));
+                }
+            }
+        }
+    }
+
+    /// Iterate outgoing relations from a given endpoint.
+    pub fn out_relations<'a>(
+        &'a self,
+        from: Endpoint,
+    ) -> impl Iterator<Item = &'a Relation> + 'a {
+        self.relations.iter().filter(move |r| r.from == from)
+    }
+
+    /// Strongest outgoing relation (by strength × expressivity, the
+    /// credit-weighted form the design doc specifies for inference).
+    pub fn strongest_out_relation(&self, from: Endpoint) -> Option<&Relation> {
+        self.out_relations(from).max_by(|a, b| {
+            let av = a.strength * a.expressivity;
+            let bv = b.strength * b.expressivity;
+            av.partial_cmp(&bv).unwrap()
+        })
+    }
+
     // ── Edge ops ─────────────────────────────────────────────────────────────
 
     /// Bump the (from→to, kind) edge: create if missing, EMA the strength,
@@ -1123,16 +1408,17 @@ impl PerturbationGraph {
                 last_t_us,
             });
         }
-        // Phase A1: groups are NOT persisted in v1 — they regenerate from
-        // active nodes via vision_tier0's group-formation pass each session.
-        // next_group_id resets to 1 across boots; group ids are not stable
-        // identifiers between sessions (only NodeIds are, via the next_id field).
+        // Phase A1/A3: groups + relations are NOT persisted in v1 — they
+        // regenerate from active nodes each session. next_group_id and
+        // next_rel_id reset to 1 across boots; only NodeIds are stable.
         Some(PerturbationGraph {
             nodes,
             edges,
             groups: Vec::new(),
+            relations: Vec::new(),
             next_id,
             next_group_id: 1,
+            next_rel_id: 1,
         })
     }
 }
@@ -1148,6 +1434,27 @@ pub fn sig_distance(
         s += d * d;
     }
     s.sqrt()
+}
+
+/// Tier-0 axis-engagement score between two endpoint signatures. Counts the
+/// number of axes where the per-axis absolute difference is below
+/// `RELATION_EXPRESSIVITY_AXIS_TH` (so the axes are "aligned"). Returns
+/// `(ratio_in_0_1, raw_count)`. The user's design-doc reframing: a relation's
+/// expressivity = how many tier-0 axes describe the link, not just whether
+/// it has been observed.
+pub fn relation_expressivity(
+    a: &[f64; PG_NODE_SIG_DIM],
+    b: &[f64; PG_NODE_SIG_DIM],
+) -> (f64, u8) {
+    let mut engaged = 0u8;
+    for i in 0..PG_NODE_SIG_DIM {
+        let diff = (a[i] - b[i]).abs();
+        if diff < RELATION_EXPRESSIVITY_AXIS_TH {
+            engaged = engaged.saturating_add(1);
+        }
+    }
+    let ratio = engaged as f64 / PG_NODE_SIG_DIM as f64;
+    (ratio.clamp(0.0, 1.0), engaged)
 }
 
 #[cfg(test)]
@@ -1700,5 +2007,191 @@ mod tests {
         let active_ids: Vec<GroupId> = g.active_groups(now).map(|g| g.id).collect();
         assert!(active_ids.contains(&live));
         assert!(!active_ids.contains(&dormant));
+    }
+
+    // ── Phase A3 tests: first-class Relations + Endpoint enum ──────────────
+
+    #[test]
+    fn relation_expressivity_counts_aligned_axes() {
+        // Two identical sigs → expressivity 1.0 (all 24 axes aligned).
+        let s = sig_at(0.5);
+        let (ratio, count) = relation_expressivity(&s, &s);
+        assert_eq!(count, PG_NODE_SIG_DIM as u8);
+        assert!((ratio - 1.0).abs() < 1e-9);
+        // Two wildly different sigs → expressivity 0.0 (no axis below the th).
+        let a = [0.0; PG_NODE_SIG_DIM];
+        let b = [1.0; PG_NODE_SIG_DIM];
+        let (ratio, count) = relation_expressivity(&a, &b);
+        assert_eq!(count, 0);
+        assert!(ratio.abs() < 1e-9);
+        // Half-aligned: first 12 axes equal, last 12 differ by 1.0 → 12 engaged.
+        let mut c = [0.0; PG_NODE_SIG_DIM];
+        for i in 12..PG_NODE_SIG_DIM { c[i] = 1.0; }
+        let (ratio, count) = relation_expressivity(&a, &c);
+        assert_eq!(count, 12);
+        assert!((ratio - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn observe_relation_node_node_creates_and_strengthens() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let r1 = g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+        assert!(r1.is_some());
+        let id = r1.unwrap();
+        assert_eq!(g.relations.len(), 1);
+        let initial_strength = g.relation(id).unwrap().strength;
+        // Re-observe → same id, higher strength.
+        let r2 = g.observe_relation(2_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+        assert_eq!(r2, Some(id));
+        assert_eq!(g.relations.len(), 1);
+        let after = g.relation(id).unwrap().strength;
+        assert!(after > initial_strength, "strength must grow with repeat observation");
+    }
+
+    #[test]
+    fn observe_relation_distinguishes_kinds_and_rejects_self_loops() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.20));
+        g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+        g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Causal);
+        assert_eq!(g.relations.len(), 2, "different kinds yield distinct relations");
+        // Self-loop rejected.
+        let r = g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(a), EdgeKind::Cooccur);
+        assert!(r.is_none());
+        assert_eq!(g.relations.len(), 2);
+        // Sentinel endpoint rejected.
+        let r = g.observe_relation(1_000, Endpoint::Node(0), Endpoint::Node(a), EdgeKind::Cooccur);
+        assert!(r.is_none());
+        // Dangling endpoint rejected.
+        let r = g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(99999), EdgeKind::Cooccur);
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn observe_relation_group_to_node_works() {
+        let mut g = PerturbationGraph::default();
+        let m1 = g.add_node(0, sig_at(0.10));
+        let m2 = g.add_node(0, sig_at(0.11));
+        let m3 = g.add_node(0, sig_at(0.12));
+        let grp = g.add_group(1_000, RegionKey::Spatial(0, 0), &[m1, m2, m3]).unwrap();
+        let other = g.add_node(0, sig_at(0.80));
+        let r = g.observe_relation(2_000, Endpoint::Group(grp), Endpoint::Node(other), EdgeKind::Causal);
+        assert!(r.is_some());
+        let rel = g.relation(r.unwrap()).unwrap();
+        assert!(matches!(rel.from, Endpoint::Group(_)));
+        assert!(matches!(rel.to, Endpoint::Node(_)));
+        // Expressivity should be low (groups around 0.10, target at 0.80 → many axes disagree).
+        assert!(rel.expressivity < 0.5, "low expressivity, got {}", rel.expressivity);
+    }
+
+    #[test]
+    fn observe_relation_relation_to_node_is_first_class_meta() {
+        // The user's "关系指向另一段扰动元素": a relation can point AT another
+        // relation. Build (A → B), then (R_ab → C) — a meta-relation whose
+        // source IS the first relation.
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.12));
+        let c = g.add_node(0, sig_at(0.50));
+        let r_ab = g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Causal).unwrap();
+        // Now point a Relation at the existing relation.
+        let r_meta = g.observe_relation(2_000, Endpoint::Relation(r_ab), Endpoint::Node(c), EdgeKind::Cooccur);
+        assert!(r_meta.is_some());
+        let rel = g.relation(r_meta.unwrap()).unwrap();
+        assert!(matches!(rel.from, Endpoint::Relation(_)));
+    }
+
+    #[test]
+    fn traverse_relations_respects_cycle_and_depth_cap() {
+        // Build a 3-cycle A → B → C → A and traverse from A with depth 10.
+        // Cycle protection should visit each endpoint once.
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.20));
+        let c = g.add_node(0, sig_at(0.30));
+        g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Causal);
+        g.observe_relation(1_000, Endpoint::Node(b), Endpoint::Node(c), EdgeKind::Causal);
+        g.observe_relation(1_000, Endpoint::Node(c), Endpoint::Node(a), EdgeKind::Causal);
+        let mut visited: Vec<Endpoint> = Vec::new();
+        g.traverse_relations_from(Endpoint::Node(a), 10, |ep, _d| visited.push(ep));
+        assert_eq!(visited.len(), 3, "cycle visited each endpoint once");
+        // Depth cap = 1: only A and one neighbour.
+        let mut shallow: Vec<Endpoint> = Vec::new();
+        g.traverse_relations_from(Endpoint::Node(a), 1, |ep, _d| shallow.push(ep));
+        assert_eq!(shallow.len(), 2, "depth=1 visits start + one neighbour");
+    }
+
+    #[test]
+    fn strongest_out_relation_weighs_strength_times_expressivity() {
+        let mut g = PerturbationGraph::default();
+        let from = g.add_node(0, sig_at(0.10));
+        // Target A is sig-aligned with `from` (high expressivity).
+        let to_a = g.add_node(0, sig_at(0.105));
+        // Target B is sig-far (low expressivity).
+        let to_b = g.add_node(0, sig_at(0.99));
+        // Observe both 5× each so strength is similar.
+        for t in 0..5 {
+            g.observe_relation(t * 100, Endpoint::Node(from), Endpoint::Node(to_a), EdgeKind::Cooccur);
+            g.observe_relation(t * 100, Endpoint::Node(from), Endpoint::Node(to_b), EdgeKind::Cooccur);
+        }
+        let top = g.strongest_out_relation(Endpoint::Node(from)).expect("at least one");
+        // The well-aligned target should win on expressivity tie-break.
+        assert_eq!(top.to, Endpoint::Node(to_a));
+    }
+
+    #[test]
+    fn decay_relation_eligibility_drops_over_tau() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let r_id = g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur).unwrap();
+        assert!((g.relation(r_id).unwrap().elig - 1.0).abs() < 1e-9);
+        g.decay_relation_eligibility(1_000 + (PG_ELIG_TAU_US as u64) * 10);
+        assert!(g.relation(r_id).unwrap().elig < 0.01);
+    }
+
+    #[test]
+    fn endpoint_sig_resolves_node_group_and_single_hop_relation() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.11));
+        let n3 = g.add_node(0, sig_at(0.12));
+        let grp = g.add_group(0, RegionKey::Spatial(0, 0), &[n1, n2, n3]).unwrap();
+        // Node endpoint resolves to its sig.
+        let s = g.endpoint_sig(Endpoint::Node(n1)).unwrap();
+        assert!((s[0] - 0.10).abs() < 0.01);
+        // Group endpoint resolves to centroid sig.
+        let cs = g.endpoint_sig(Endpoint::Group(grp)).unwrap();
+        assert!((cs[0] - 0.11).abs() < 0.05); // centroid ≈ mean of [0.10, 0.11, 0.12]
+        // Relation endpoint: a 1-hop indirection.
+        let r_id = g.observe_relation(0, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur).unwrap();
+        let rs = g.endpoint_sig(Endpoint::Relation(r_id)).unwrap();
+        // Resolves to the FROM-node's sig (n1).
+        assert!((rs[0] - 0.10).abs() < 0.01);
+        // Dangling endpoints return None.
+        assert!(g.endpoint_sig(Endpoint::Node(99999)).is_none());
+        assert!(g.endpoint_sig(Endpoint::Group(99999)).is_none());
+        assert!(g.endpoint_sig(Endpoint::Relation(99999)).is_none());
+    }
+
+    #[test]
+    fn evict_weakest_relation_prefers_low_strength_times_expressivity() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.11)); // close → high expressivity
+        let n3 = g.add_node(0, sig_at(0.99)); // far → low expressivity
+        // Both observed once → similar strength, but expressivity differs.
+        let r_keep = g.observe_relation(0, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur).unwrap();
+        let r_evict = g.observe_relation(0, Endpoint::Node(n1), Endpoint::Node(n3), EdgeKind::Cooccur).unwrap();
+        // Strengthen the keeper several more times so it's clearly higher.
+        for _ in 0..5 {
+            g.observe_relation(0, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur);
+        }
+        g.evict_weakest_relation();
+        assert!(g.has_relation(r_keep));
+        assert!(!g.has_relation(r_evict));
     }
 }
