@@ -320,6 +320,74 @@ pub enum ResponseOutcome {
     NeedsDeliberation,
 }
 
+// ── Phase A7: MarkRef + Mark + channel ownership (the "指向 / 标记" operator)
+//
+// The user's design-doc reframing: marking is the explicit "I am pointing at
+// this right now" operator. A MarkRef points at a Node, a Group, or a
+// Relation — i.e. anything in the graph that can be addressed. Each named
+// CHANNEL owns at most one active Mark at a time, so curriculum / attention /
+// dual_drive / intention each get a clean slot to write into without
+// clobbering each other.
+
+/// Polymorphic pointer into the graph. The thing a Mark points at. The user's
+/// "指向/标记" is the verb; this is the noun the verb refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MarkRef {
+    Node(NodeId),
+    Group(GroupId),
+    Relation(RelId),
+}
+
+/// Mark-owning channels. Each channel can hold at most one active Mark at a
+/// time (the most recent stamp wins). Modelled as a small enum so callers
+/// can't invent random channels — exactly four owners per the design doc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MarkChannel {
+    /// The attention system says "this is what's getting weighted right now".
+    Attention,
+    /// The curriculum scaffolding says "this is what the lesson is about".
+    Curriculum,
+    /// dual_drive says "this is the bond / threat we're balancing".
+    DualDrive,
+    /// IntentionState (Phase C) says "this is what I'm trying to predict".
+    Intention,
+}
+
+impl MarkChannel {
+    /// Stable u8 discriminant for persistence.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            MarkChannel::Attention => 0,
+            MarkChannel::Curriculum => 1,
+            MarkChannel::DualDrive => 2,
+            MarkChannel::Intention => 3,
+        }
+    }
+    pub fn from_u8(b: u8) -> Self {
+        match b {
+            1 => MarkChannel::Curriculum,
+            2 => MarkChannel::DualDrive,
+            3 => MarkChannel::Intention,
+            _ => MarkChannel::Attention,
+        }
+    }
+}
+
+/// A single Mark — a channel's current pointer into the graph. Stamped by the
+/// channel at a given time with a given strength; decays after MARK_DECAY_US
+/// of idleness back to "no mark on this channel".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mark {
+    pub target: MarkRef,
+    pub stamped_by: MarkChannel,
+    pub strength: f64,
+    pub stamped_t_us: u64,
+}
+
+/// After this much idle time (no re-stamp on the same channel), a Mark is
+/// considered stale and cleared. Q-C default in the design doc.
+pub const MARK_DECAY_US: u64 = 30_000_000;
+
 /// Maximum traversal depth for relation walks. Cycle-protected by a visited
 /// set; depth cap kicks in for non-cyclic but deep chains (a → b → c → d ...
 /// where each step is a distinct Endpoint). Per the design doc Q-G default.
@@ -561,6 +629,11 @@ pub struct PerturbationGraph {
     /// behaviour flows through FastPath; the slow path is the exception.
     /// Runtime-only this commit; persistence lands in Phase A9.
     pub fast_paths: FastPathIndex,
+    /// Phase A7: per-channel active Marks. The "指向 / 标记" operator. At most
+    /// one Mark per MarkChannel at any time; new stamps replace older marks
+    /// on the same channel. Decay to empty after MARK_DECAY_US of idleness.
+    /// Stored as a small Vec<Mark>; lookups are linear over ≤ 4 entries.
+    pub marks: Vec<Mark>,
     /// Next id to hand out — never resets to 0 (the sentinel) and never reuses
     /// an evicted node's id within the same session.
     pub next_id: u32,
@@ -595,6 +668,7 @@ impl Default for PerturbationGraph {
             relations: Vec::new(),
             kinds,
             fast_paths: FastPathIndex::default(),
+            marks: Vec::new(),
             next_id: 1,
             next_group_id: 1,
             next_rel_id: 1,
@@ -1511,6 +1585,71 @@ impl PerturbationGraph {
         correct
     }
 
+    // ── Mark ops (Phase A7: the "指向/标记" operator) ───────────────────────
+
+    /// Returns true if the MarkRef target still resolves to a live entity.
+    pub fn mark_target_exists(&self, t: MarkRef) -> bool {
+        match t {
+            MarkRef::Node(id) => id != 0 && self.has_node(id),
+            MarkRef::Group(id) => id != 0 && self.has_group(id),
+            MarkRef::Relation(id) => id != 0 && self.has_relation(id),
+        }
+    }
+
+    /// Stamp a Mark from `channel` onto `target` with `strength`. Replaces any
+    /// previous Mark on the same channel (one active Mark per channel — the
+    /// design-doc ownership rule). No-op if the target doesn't exist.
+    pub fn stamp_mark(
+        &mut self,
+        channel: MarkChannel,
+        target: MarkRef,
+        strength: f64,
+        now_us: u64,
+    ) {
+        if !self.mark_target_exists(target) {
+            return;
+        }
+        let s = strength.clamp(0.0, 1.0);
+        if let Some(m) = self.marks.iter_mut().find(|m| m.stamped_by == channel) {
+            m.target = target;
+            m.strength = s;
+            m.stamped_t_us = now_us;
+        } else {
+            self.marks.push(Mark {
+                target,
+                stamped_by: channel,
+                strength: s,
+                stamped_t_us: now_us,
+            });
+        }
+    }
+
+    /// Read the current Mark on a channel, if any. Caller should still check
+    /// staleness via Mark.stamped_t_us; a recently-decayed Mark is dropped by
+    /// `decay_marks`, but a caller might want a stricter freshness rule.
+    pub fn get_mark(&self, channel: MarkChannel) -> Option<&Mark> {
+        self.marks.iter().find(|m| m.stamped_by == channel)
+    }
+
+    /// Drop Marks whose last stamp is older than MARK_DECAY_US. Idempotent;
+    /// safe to call every tick.
+    pub fn decay_marks(&mut self, now_us: u64) {
+        self.marks
+            .retain(|m| now_us.saturating_sub(m.stamped_t_us) <= MARK_DECAY_US);
+    }
+
+    /// Clear a single channel's mark explicitly (callers can release a Mark
+    /// before it decays naturally, e.g. when intent is satisfied).
+    pub fn clear_mark(&mut self, channel: MarkChannel) {
+        self.marks.retain(|m| m.stamped_by != channel);
+    }
+
+    /// All marks currently active (after any pending decay). Convenience for
+    /// observers and dashboards.
+    pub fn active_marks<'a>(&'a self) -> impl Iterator<Item = &'a Mark> + 'a {
+        self.marks.iter()
+    }
+
     // ── Edge ops ─────────────────────────────────────────────────────────────
 
     /// Bump the (from→to, kind) edge: create if missing, EMA the strength,
@@ -1926,6 +2065,7 @@ impl PerturbationGraph {
             relations: Vec::new(),
             kinds,
             fast_paths: FastPathIndex::default(),
+            marks: Vec::new(),
             next_id,
             next_group_id: 1,
             next_rel_id: 1,
@@ -3012,6 +3152,111 @@ mod tests {
         let after = *g.fast_paths.by_endpoints.get(&key).unwrap();
         assert_eq!(after.usage_count, before.usage_count + 1);
         assert_eq!(after.last_fired_t_us, 999_999);
+    }
+
+    // ── Phase A7 tests: MarkRef + Mark + channel ownership ───────────────
+
+    #[test]
+    fn stamp_mark_writes_first_mark_on_channel() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        g.stamp_mark(MarkChannel::Attention, MarkRef::Node(a), 0.5, 1_000);
+        let m = g.get_mark(MarkChannel::Attention).expect("mark exists");
+        assert_eq!(m.target, MarkRef::Node(a));
+        assert_eq!(m.stamped_by, MarkChannel::Attention);
+        assert!((m.strength - 0.5).abs() < 1e-9);
+        assert_eq!(m.stamped_t_us, 1_000);
+    }
+
+    #[test]
+    fn second_stamp_on_same_channel_replaces() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.20));
+        g.stamp_mark(MarkChannel::Attention, MarkRef::Node(a), 0.3, 1_000);
+        g.stamp_mark(MarkChannel::Attention, MarkRef::Node(b), 0.9, 2_000);
+        let m = g.get_mark(MarkChannel::Attention).unwrap();
+        assert_eq!(m.target, MarkRef::Node(b));
+        assert!((m.strength - 0.9).abs() < 1e-9);
+        // Only one mark per channel — should not have duplicated.
+        let count: usize = g.active_marks().filter(|m| m.stamped_by == MarkChannel::Attention).count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn distinct_channels_hold_independent_marks() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.20));
+        g.stamp_mark(MarkChannel::Attention, MarkRef::Node(a), 0.5, 1_000);
+        g.stamp_mark(MarkChannel::Curriculum, MarkRef::Node(b), 0.7, 1_000);
+        assert!(g.get_mark(MarkChannel::Attention).is_some());
+        assert!(g.get_mark(MarkChannel::Curriculum).is_some());
+        assert!(g.get_mark(MarkChannel::DualDrive).is_none());
+        assert!(g.get_mark(MarkChannel::Intention).is_none());
+    }
+
+    #[test]
+    fn stamp_mark_rejects_dangling_target() {
+        let mut g = PerturbationGraph::default();
+        // No nodes added — Node(99) is dangling.
+        g.stamp_mark(MarkChannel::Attention, MarkRef::Node(99), 0.5, 1_000);
+        assert!(g.get_mark(MarkChannel::Attention).is_none());
+        // Sentinel id also rejected.
+        g.stamp_mark(MarkChannel::Attention, MarkRef::Node(0), 0.5, 1_000);
+        assert!(g.get_mark(MarkChannel::Attention).is_none());
+    }
+
+    #[test]
+    fn decay_marks_drops_stale_marks() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        g.stamp_mark(MarkChannel::Attention, MarkRef::Node(a), 0.5, 1_000);
+        // Within the decay window: mark survives.
+        g.decay_marks(1_000 + MARK_DECAY_US / 2);
+        assert!(g.get_mark(MarkChannel::Attention).is_some());
+        // Past the decay window: mark dropped.
+        g.decay_marks(1_000 + MARK_DECAY_US + 1);
+        assert!(g.get_mark(MarkChannel::Attention).is_none());
+    }
+
+    #[test]
+    fn clear_mark_releases_one_channel() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        g.stamp_mark(MarkChannel::Attention, MarkRef::Node(a), 0.5, 1_000);
+        g.stamp_mark(MarkChannel::Intention, MarkRef::Node(a), 0.8, 1_000);
+        g.clear_mark(MarkChannel::Attention);
+        assert!(g.get_mark(MarkChannel::Attention).is_none());
+        assert!(g.get_mark(MarkChannel::Intention).is_some());
+    }
+
+    #[test]
+    fn mark_can_target_group_and_relation() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let c = g.add_node(0, sig_at(0.12));
+        let grp = g.add_group(0, RegionKey::Spatial(0, 0), &[a, b, c]).unwrap();
+        let rid = g.observe_relation(0, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Causal).unwrap();
+        g.stamp_mark(MarkChannel::DualDrive, MarkRef::Group(grp), 0.6, 1_000);
+        g.stamp_mark(MarkChannel::Intention, MarkRef::Relation(rid), 0.7, 1_000);
+        assert_eq!(g.get_mark(MarkChannel::DualDrive).unwrap().target, MarkRef::Group(grp));
+        assert_eq!(g.get_mark(MarkChannel::Intention).unwrap().target, MarkRef::Relation(rid));
+    }
+
+    #[test]
+    fn mark_channel_enum_roundtrip() {
+        for ch in [
+            MarkChannel::Attention,
+            MarkChannel::Curriculum,
+            MarkChannel::DualDrive,
+            MarkChannel::Intention,
+        ] {
+            assert_eq!(MarkChannel::from_u8(ch.as_u8()), ch);
+        }
+        // Unknown bytes fall back to Attention.
+        assert_eq!(MarkChannel::from_u8(255), MarkChannel::Attention);
     }
 
     #[test]
