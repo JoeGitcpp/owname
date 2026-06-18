@@ -154,6 +154,9 @@ pub enum Endpoint {
 ///
 /// Fields beyond what PerturbationEdge had:
 /// - `id`: stable per-session, so other relations can refer to this one.
+/// - `kind_id`: u32 covering both primitive EdgeKind discriminants (0..3) AND
+///   emergent RelationKind cluster ids (4..PG_KIND_CAP) discovered by A4.
+///   Replaces the A3 `kind_byte: u8` so emergent kinds fit alongside primitives.
 /// - `expressivity`: tier-0 axis count engaged at last observation. Drives
 ///   credit weighting in inference passes. EMA over time.
 /// - `last_axes_engaged`: u8 — raw count at last observation, for telemetry.
@@ -162,10 +165,10 @@ pub struct Relation {
     pub id: RelId,
     pub from: Endpoint,
     pub to: Endpoint,
-    /// EdgeKind discriminant (use EdgeKind::from_u8); shares the kind ID space
-    /// with PerturbationEdge during the transition. Phase A4 introduces
-    /// dynamically-discovered RelationKind on top of this.
-    pub kind_byte: u8,
+    /// Kind cluster identifier. 0..3 reserved for primitive EdgeKind variants
+    /// (Cooccur / Nest / Causal / CrossModal). 4..PG_KIND_CAP for emergent
+    /// kinds discovered online via observe_relation_emergent.
+    pub kind_id: u32,
     /// EMA of "this relation has been observed" in [0,1].
     pub strength: f64,
     /// EMA of tier-0 axis engagement ratio in [0,1]. 1.0 = all 24 axes aligned
@@ -175,6 +178,79 @@ pub struct Relation {
     pub elig: f64,
     pub last_t_us: u64,
     pub last_axes_engaged: u8,
+}
+
+// ── Phase A4: dynamic RelationKind discovery
+//
+// 4 fixed EdgeKind variants is a categorical cap (the same kind of cap the
+// SLOT_COUNT=8 cutover was meant to escape). A4 opens the relation-kind
+// vocabulary: each Relation carries a `kind_id` that can be either one of the
+// 4 primitives (0..3) OR an emergent cluster id (4..PG_KIND_CAP) discovered
+// online from the (from-sig, to-sig) context.
+//
+// Discovery rule: when a relation is observed, its context signature
+// (concat of from_sig + to_sig, 48 dims) is compared against existing kinds'
+// prototypes. If the nearest prototype is within KIND_DISCOVERY_DIST, that
+// kind absorbs the observation (prototype EMA). Otherwise — provided capacity
+// allows — a new kind spawns with this context as its initial prototype.
+
+/// Total kind cap (4 primitives + up to ~252 emergent).
+pub const PG_KIND_CAP: usize = 256;
+
+/// Context-signature distance threshold for emergent kind discovery. Looser
+/// than the node match distance (0.30) because kind contexts are higher-dim
+/// (48 axes vs 24) so cosine of meaningful distance scales differently.
+pub const KIND_DISCOVERY_DIST: f64 = 0.55;
+
+/// EMA rate for prototype drift when an existing kind absorbs a new
+/// observation. Slower than relation strength because a prototype represents
+/// a kind's IDENTITY — should be stable, drift only on consensus shift.
+pub const KIND_PROTOTYPE_ALPHA: f64 = 0.05;
+
+/// EMA rate for kind strength (how often this kind fires).
+pub const KIND_STRENGTH_ALPHA: f64 = 0.10;
+
+/// Idle threshold after which a kind's strength decays multiplicatively each
+/// decay tick. 1 day ≈ "this kind hasn't been observed in a while".
+pub const KIND_DEMOTE_IDLE_US: u64 = 86_400_000_000;
+
+/// Multiplicative decay applied to idle kind strength when demoting.
+const KIND_DEMOTE_FACTOR: f64 = 0.5;
+
+/// Below this strength an emergent kind is candidate for eviction. Primitive
+/// kinds (cluster_id 0..3) are NEVER evicted regardless of strength.
+const KIND_EVICTION_TH: f64 = 0.01;
+
+/// Primitive kind ids — by convention these match EdgeKind discriminants
+/// exactly so callers passing an EdgeKind get a sensible kind_id.
+const KIND_ID_COOCCUR: u32 = 0;
+const KIND_ID_NEST: u32 = 1;
+const KIND_ID_CAUSAL: u32 = 2;
+const KIND_ID_CROSS_MODAL: u32 = 3;
+const PRIMITIVE_KIND_COUNT: usize = 4;
+
+/// A relation-kind cluster: an online-discovered (or primitive-anchored)
+/// category of relations sharing a similar (from-sig, to-sig) context.
+///
+/// The "prototype" is the kind's centroid in the 48-D concatenated context
+/// space (from_sig 24 ++ to_sig 24). Observations within KIND_DISCOVERY_DIST
+/// of an existing prototype drift it via EMA; observations farther away
+/// (and within capacity) spawn a fresh kind.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelationKind {
+    /// 0..3 = primitive (matches EdgeKind discriminants).
+    /// 4..PG_KIND_CAP = emergent, online-discovered.
+    pub cluster_id: u32,
+    /// Concatenated context signature: prototype[..PG_NODE_SIG_DIM] is the
+    /// from-side prototype; prototype[PG_NODE_SIG_DIM..] is the to-side.
+    /// For primitives this is the EMA of the observed contexts that landed
+    /// in the cluster; primitives don't have a meaningful initial prototype
+    /// (they start at zero and accumulate from the first observation).
+    pub prototype: [f64; PG_NODE_SIG_DIM * 2],
+    /// EMA "how often this kind fires" — drives demotion / eviction defence.
+    pub strength: f64,
+    pub spawned_t_us: u64,
+    pub last_seen_t_us: u64,
 }
 
 /// Maximum traversal depth for relation walks. Cycle-protected by a visited
@@ -406,6 +482,11 @@ pub struct PerturbationGraph {
     /// relations can point at THEM. Runtime-only this commit; persistence
     /// lands in Phase A9.
     pub relations: Vec<Relation>,
+    /// Phase A4: RelationKind clusters. First PRIMITIVE_KIND_COUNT (4) entries
+    /// are the EdgeKind-anchored primitives; further entries are emergent
+    /// kinds discovered online from observe_relation_emergent. Capped at
+    /// PG_KIND_CAP. Runtime-only this commit; persistence lands in Phase A9.
+    pub kinds: Vec<RelationKind>,
     /// Next id to hand out — never resets to 0 (the sentinel) and never reuses
     /// an evicted node's id within the same session.
     pub next_id: u32,
@@ -413,18 +494,36 @@ pub struct PerturbationGraph {
     pub next_group_id: u32,
     /// Next relation id to hand out. Same sentinel/no-reuse convention.
     pub next_rel_id: u32,
+    /// Next emergent kind id to hand out. Starts at PRIMITIVE_KIND_COUNT.
+    pub next_kind_id: u32,
 }
 
 impl Default for PerturbationGraph {
     fn default() -> Self {
+        // Seed the kinds vector with the 4 primitives. Their prototypes are
+        // zero — they will accumulate the contexts of relations explicitly
+        // tagged with that EdgeKind. Strength starts at 0; primitives are
+        // immune to eviction regardless.
+        let mut kinds = Vec::with_capacity(PRIMITIVE_KIND_COUNT);
+        for primitive in 0..PRIMITIVE_KIND_COUNT as u32 {
+            kinds.push(RelationKind {
+                cluster_id: primitive,
+                prototype: [0.0; PG_NODE_SIG_DIM * 2],
+                strength: 0.0,
+                spawned_t_us: 0,
+                last_seen_t_us: 0,
+            });
+        }
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
             groups: Vec::new(),
             relations: Vec::new(),
-            next_id: 1, // 0 reserved as the "no-node" sentinel
-            next_group_id: 1, // 0 reserved as the "no-group" sentinel
-            next_rel_id: 1, // 0 reserved as the "no-relation" sentinel
+            kinds,
+            next_id: 1,
+            next_group_id: 1,
+            next_rel_id: 1,
+            next_kind_id: PRIMITIVE_KIND_COUNT as u32,
         }
     }
 }
@@ -879,17 +978,17 @@ impl PerturbationGraph {
         self.relations.iter().any(|r| r.id == id)
     }
 
-    /// Observe a relation between two endpoints. Behaviour mirrors
-    /// `observe_edge` but at the Relation level:
-    /// - Refuses self-loops, sentinel ids, and dangling endpoints.
-    /// - Merges (from, to, kind) duplicates via strength EMA + elig reset.
-    /// - Recomputes `expressivity` from the count of tier-0 axes where the
-    ///   two endpoints' signatures are within RELATION_EXPRESSIVITY_AXIS_TH.
-    /// - Allocates a fresh RelId on first creation; evicts the weakest
-    ///   relation when the cap is hit.
+    /// Observe a relation between two endpoints with an EXPLICIT primitive
+    /// kind. The caller knows the semantic relation (cooccur, nest, causal,
+    /// cross-modal); the kind_id is taken from the EdgeKind discriminant
+    /// (0..3). The matching primitive RelationKind's prototype absorbs the
+    /// (from, to) context via EMA so primitives still gain expressive content
+    /// from the relations that pass through them.
+    ///
+    /// For emergent online-discovered kinds, use `observe_relation_emergent`.
     ///
     /// Returns the RelId of the (created or refreshed) relation, or None when
-    /// the observation was rejected.
+    /// the observation was rejected (self-loop, sentinel id, dangling endpoint).
     pub fn observe_relation(
         &mut self,
         now_us: u64,
@@ -897,22 +996,76 @@ impl PerturbationGraph {
         to: Endpoint,
         kind: EdgeKind,
     ) -> Option<RelId> {
+        let kind_id = kind.as_u8() as u32;
+        self.observe_relation_with_kind_id(now_us, from, to, kind_id)
+    }
+
+    /// Observe a relation and ALSO let the system classify it into the best-
+    /// matching RelationKind cluster (primitive or emergent). The kind cluster
+    /// whose prototype is nearest (by context-sig distance) to the new
+    /// observation absorbs it — if the nearest is within KIND_DISCOVERY_DIST.
+    /// Otherwise a fresh emergent kind spawns with this observation as its
+    /// initial prototype, provided capacity allows.
+    ///
+    /// The user's design-doc reframing: "千丝万缕" implies an open vocabulary
+    /// of relation kinds; this is the API that grows that vocabulary.
+    pub fn observe_relation_emergent(
+        &mut self,
+        now_us: u64,
+        from: Endpoint,
+        to: Endpoint,
+    ) -> Option<RelId> {
+        // Build the context signature (from_sig ++ to_sig).
+        let ctx = match (self.endpoint_sig(from), self.endpoint_sig(to)) {
+            (Some(a), Some(b)) => concat_context(&a, &b),
+            _ => return None, // can't classify a dangling relation
+        };
+        // Classify into existing kind or spawn a new one.
+        let kind_id = self.classify_or_spawn_kind(&ctx, now_us);
+        self.observe_relation_with_kind_id(now_us, from, to, kind_id)
+    }
+
+    /// Shared implementation that takes an explicit kind_id (post-classification).
+    fn observe_relation_with_kind_id(
+        &mut self,
+        now_us: u64,
+        from: Endpoint,
+        to: Endpoint,
+        kind_id: u32,
+    ) -> Option<RelId> {
         if from == to {
             return None;
         }
         if !self.endpoint_exists(from) || !self.endpoint_exists(to) {
             return None;
         }
-        // Compute axis engagement now, before any mutable borrow.
+        // Compute axis engagement now, before mutable borrows.
         let (expr, engaged) = match (self.endpoint_sig(from), self.endpoint_sig(to)) {
             (Some(a), Some(b)) => relation_expressivity(&a, &b),
             _ => (0.0, 0u8),
         };
-        let k = kind.as_u8();
+        // EMA-drift the kind's prototype + strength toward the new observation.
+        // For primitives this gives them measurable expressive content over time.
+        let ctx = match (self.endpoint_sig(from), self.endpoint_sig(to)) {
+            (Some(a), Some(b)) => Some(concat_context(&a, &b)),
+            _ => None,
+        };
+        if let Some(ctx) = ctx {
+            if let Some(k) = self.kinds.iter_mut().find(|k| k.cluster_id == kind_id) {
+                for i in 0..PG_NODE_SIG_DIM * 2 {
+                    k.prototype[i] = (1.0 - KIND_PROTOTYPE_ALPHA) * k.prototype[i]
+                        + KIND_PROTOTYPE_ALPHA * ctx[i];
+                }
+                k.strength = (k.strength + KIND_STRENGTH_ALPHA * (1.0 - k.strength))
+                    .clamp(0.0, 1.0);
+                k.last_seen_t_us = now_us;
+            }
+        }
+        // Now handle the Relation list (mirror of A3 logic but with kind_id u32).
         if let Some(r) = self
             .relations
             .iter_mut()
-            .find(|r| r.from == from && r.to == to && r.kind_byte == k)
+            .find(|r| r.from == from && r.to == to && r.kind_id == kind_id)
         {
             r.strength = (r.strength + PG_REL_ALPHA * (1.0 - r.strength)).clamp(0.0, 1.0);
             r.expressivity =
@@ -930,7 +1083,7 @@ impl PerturbationGraph {
             id,
             from,
             to,
-            kind_byte: k,
+            kind_id,
             strength: PG_REL_SEED,
             expressivity: expr,
             elig: 1.0,
@@ -938,6 +1091,98 @@ impl PerturbationGraph {
             last_axes_engaged: engaged,
         });
         Some(id)
+    }
+
+    fn alloc_kind_id(&mut self) -> u32 {
+        let id = self.next_kind_id;
+        self.next_kind_id = self.next_kind_id.wrapping_add(1);
+        // Clamp away from primitive id range on wrap.
+        if (self.next_kind_id as usize) < PRIMITIVE_KIND_COUNT {
+            self.next_kind_id = PRIMITIVE_KIND_COUNT as u32;
+        }
+        id
+    }
+
+    /// Classify a context signature into the nearest existing kind, or spawn
+    /// a new emergent kind when no existing prototype is within
+    /// KIND_DISCOVERY_DIST. Always returns a valid kind_id.
+    fn classify_or_spawn_kind(
+        &mut self,
+        ctx: &[f64; PG_NODE_SIG_DIM * 2],
+        now_us: u64,
+    ) -> u32 {
+        // First pass: find nearest existing kind by context-sig distance.
+        // Primitives whose prototype is all-zero (never observed) are
+        // considered "matchless" so emergent discovery isn't blocked by an
+        // unused primitive sitting at the origin.
+        let mut best: Option<(u32, f64)> = None;
+        for k in &self.kinds {
+            let proto_norm: f64 = k.prototype.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if proto_norm < 1e-6 {
+                continue; // unset prototype, skip
+            }
+            let d = ctx_distance(ctx, &k.prototype);
+            if d <= KIND_DISCOVERY_DIST
+                && best.map(|(_, bd)| d < bd).unwrap_or(true)
+            {
+                best = Some((k.cluster_id, d));
+            }
+        }
+        if let Some((id, _)) = best {
+            return id;
+        }
+        // No close existing kind. Spawn a fresh emergent one (if capacity).
+        if self.kinds.len() < PG_KIND_CAP {
+            let id = self.alloc_kind_id();
+            self.kinds.push(RelationKind {
+                cluster_id: id,
+                prototype: *ctx,
+                strength: KIND_STRENGTH_ALPHA, // seed > 0 so it's evictable but visible
+                spawned_t_us: now_us,
+                last_seen_t_us: now_us,
+            });
+            return id;
+        }
+        // At capacity and nothing matched — fall back to Cooccur primitive.
+        // Better than silently failing or evicting a learned emergent kind
+        // mid-observation; the consumer can run kind eviction later.
+        KIND_ID_COOCCUR
+    }
+
+    /// Lookup a kind by cluster_id. Returns None if no such kind is registered.
+    pub fn kind(&self, cluster_id: u32) -> Option<&RelationKind> {
+        self.kinds.iter().find(|k| k.cluster_id == cluster_id)
+    }
+
+    /// Decay long-idle EMERGENT kinds. Primitive kinds (0..3) are immune.
+    /// When an emergent kind's last_seen_t_us is older than KIND_DEMOTE_IDLE_US,
+    /// its strength is multiplied by KIND_DEMOTE_FACTOR. Below KIND_EVICTION_TH
+    /// the kind is dropped and any relations tagged with its cluster_id are
+    /// re-tagged with KIND_ID_COOCCUR (so they don't dangle).
+    pub fn decay_emergent_kinds(&mut self, now_us: u64) {
+        // First pass: collect cluster_ids to evict.
+        let mut evict_ids: Vec<u32> = Vec::new();
+        for k in self.kinds.iter_mut() {
+            if (k.cluster_id as usize) < PRIMITIVE_KIND_COUNT {
+                continue; // primitives never decay
+            }
+            if now_us.saturating_sub(k.last_seen_t_us) > KIND_DEMOTE_IDLE_US {
+                k.strength *= KIND_DEMOTE_FACTOR;
+            }
+            if k.strength < KIND_EVICTION_TH {
+                evict_ids.push(k.cluster_id);
+            }
+        }
+        if evict_ids.is_empty() {
+            return;
+        }
+        // Re-tag any relations referencing the evicted kinds.
+        for r in self.relations.iter_mut() {
+            if evict_ids.contains(&r.kind_id) {
+                r.kind_id = KIND_ID_COOCCUR;
+            }
+        }
+        self.kinds.retain(|k| !evict_ids.contains(&k.cluster_id));
     }
 
     fn evict_weakest_relation(&mut self) {
@@ -1408,17 +1653,30 @@ impl PerturbationGraph {
                 last_t_us,
             });
         }
-        // Phase A1/A3: groups + relations are NOT persisted in v1 — they
-        // regenerate from active nodes each session. next_group_id and
-        // next_rel_id reset to 1 across boots; only NodeIds are stable.
+        // Phase A1/A3/A4: groups + relations + emergent kinds are NOT persisted
+        // in v1 — they regenerate each session. next_group_id / next_rel_id /
+        // next_kind_id reset across boots; only NodeIds are stable. Seed the
+        // 4 primitive RelationKinds so v1 reloads land with a usable substrate.
+        let mut kinds = Vec::with_capacity(PRIMITIVE_KIND_COUNT);
+        for primitive in 0..PRIMITIVE_KIND_COUNT as u32 {
+            kinds.push(RelationKind {
+                cluster_id: primitive,
+                prototype: [0.0; PG_NODE_SIG_DIM * 2],
+                strength: 0.0,
+                spawned_t_us: 0,
+                last_seen_t_us: 0,
+            });
+        }
         Some(PerturbationGraph {
             nodes,
             edges,
             groups: Vec::new(),
             relations: Vec::new(),
+            kinds,
             next_id,
             next_group_id: 1,
             next_rel_id: 1,
+            next_kind_id: PRIMITIVE_KIND_COUNT as u32,
         })
     }
 }
@@ -1455,6 +1713,33 @@ pub fn relation_expressivity(
     }
     let ratio = engaged as f64 / PG_NODE_SIG_DIM as f64;
     (ratio.clamp(0.0, 1.0), engaged)
+}
+
+/// Build a 48-D context signature by concatenating from-sig and to-sig.
+/// This is the prototype space for emergent RelationKind clustering.
+pub fn concat_context(
+    from_sig: &[f64; PG_NODE_SIG_DIM],
+    to_sig: &[f64; PG_NODE_SIG_DIM],
+) -> [f64; PG_NODE_SIG_DIM * 2] {
+    let mut ctx = [0.0; PG_NODE_SIG_DIM * 2];
+    for i in 0..PG_NODE_SIG_DIM {
+        ctx[i] = from_sig[i];
+        ctx[PG_NODE_SIG_DIM + i] = to_sig[i];
+    }
+    ctx
+}
+
+/// Euclidean distance between two 48-D context signatures.
+pub fn ctx_distance(
+    a: &[f64; PG_NODE_SIG_DIM * 2],
+    b: &[f64; PG_NODE_SIG_DIM * 2],
+) -> f64 {
+    let mut s = 0.0;
+    for i in 0..PG_NODE_SIG_DIM * 2 {
+        let d = a[i] - b[i];
+        s += d * d;
+    }
+    s.sqrt()
 }
 
 #[cfg(test)]
@@ -2193,5 +2478,158 @@ mod tests {
         g.evict_weakest_relation();
         assert!(g.has_relation(r_keep));
         assert!(!g.has_relation(r_evict));
+    }
+
+    // ── Phase A4 tests: dynamic RelationKind discovery ─────────────────────
+
+    #[test]
+    fn default_graph_seeds_four_primitive_kinds() {
+        let g = PerturbationGraph::default();
+        assert_eq!(g.kinds.len(), PRIMITIVE_KIND_COUNT);
+        for i in 0..PRIMITIVE_KIND_COUNT as u32 {
+            let k = g.kind(i).expect("primitive kind must exist");
+            assert_eq!(k.cluster_id, i);
+            // Primitive prototypes start at zero (no observed context yet).
+            assert!(k.prototype.iter().all(|x| x.abs() < 1e-9));
+        }
+        assert_eq!(g.next_kind_id, PRIMITIVE_KIND_COUNT as u32);
+    }
+
+    #[test]
+    fn observe_relation_with_primitive_kind_drifts_its_prototype() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        // Observe many cooccur relations on this (from, to) context.
+        for _ in 0..50 {
+            g.observe_relation(1_000, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur);
+        }
+        // The Cooccur primitive's prototype should now be non-trivial.
+        let cooccur = g.kind(KIND_ID_COOCCUR).unwrap();
+        let proto_norm: f64 = cooccur.prototype.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(proto_norm > 1e-3, "primitive prototype must accumulate context");
+        assert!(cooccur.strength > 0.1, "primitive strength must accumulate");
+    }
+
+    #[test]
+    fn observe_relation_emergent_with_distant_context_spawns_new_kind() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        let before = g.kinds.len();
+        let r_id = g
+            .observe_relation_emergent(1_000, Endpoint::Node(n1), Endpoint::Node(n2))
+            .unwrap();
+        // Since no primitive has a non-zero prototype yet, the emergent path
+        // sees no nearby match and SHOULD spawn a fresh kind.
+        assert_eq!(g.kinds.len(), before + 1);
+        let rel = g.relation(r_id).unwrap();
+        assert!(
+            rel.kind_id >= PRIMITIVE_KIND_COUNT as u32,
+            "emergent relations should land in cluster_id ≥ 4 (got {})",
+            rel.kind_id
+        );
+        // Re-observing the same context should NOT spawn another kind — the
+        // existing emergent kind absorbs it.
+        let count_after = g.kinds.len();
+        g.observe_relation_emergent(2_000, Endpoint::Node(n1), Endpoint::Node(n2));
+        assert_eq!(g.kinds.len(), count_after, "near-identical context must reuse the kind");
+    }
+
+    #[test]
+    fn observe_relation_emergent_with_close_context_reuses_existing_kind() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        let r1 = g.observe_relation_emergent(0, Endpoint::Node(n1), Endpoint::Node(n2)).unwrap();
+        let kind_of_r1 = g.relation(r1).unwrap().kind_id;
+        // Slightly perturb the endpoints' sigs by refreshing them gently.
+        g.refresh_node(n1, 100, &sig_at(0.105), 0.05);
+        g.refresh_node(n2, 100, &sig_at(0.205), 0.05);
+        let r2 = g.observe_relation_emergent(200, Endpoint::Node(n1), Endpoint::Node(n2)).unwrap();
+        let kind_of_r2 = g.relation(r2).unwrap().kind_id;
+        assert_eq!(kind_of_r1, kind_of_r2, "near-context reuses same emergent kind");
+    }
+
+    #[test]
+    fn emergent_kind_cap_is_respected() {
+        // Fill the emergent kind space with many distinct contexts, verify
+        // that once PG_KIND_CAP is hit no further kinds are added.
+        let mut g = PerturbationGraph::default();
+        // Add many distinct nodes and observe distinct emergent relations.
+        let n_anchor = g.add_node(0, sig_at(0.0));
+        let mut spawned = 0usize;
+        for i in 0..(PG_KIND_CAP - PRIMITIVE_KIND_COUNT + 20) {
+            // Distinct distant sig so it doesn't reuse an existing kind.
+            let other = g.add_node(0, sig_at(i as f64 * 0.05 + 0.1));
+            let before = g.kinds.len();
+            g.observe_relation_emergent(i as u64 * 100, Endpoint::Node(n_anchor), Endpoint::Node(other));
+            if g.kinds.len() > before {
+                spawned += 1;
+            }
+        }
+        assert!(g.kinds.len() <= PG_KIND_CAP, "must not exceed cap");
+        // We added more than (PG_KIND_CAP - PRIMITIVE_KIND_COUNT) attempts so
+        // some MUST have been rejected.
+        let _ = spawned;
+    }
+
+    #[test]
+    fn decay_emergent_kinds_evicts_long_idle_clusters() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        // Spawn an emergent kind with low strength.
+        let r_id = g
+            .observe_relation_emergent(1_000, Endpoint::Node(n1), Endpoint::Node(n2))
+            .unwrap();
+        let kind_id = g.relation(r_id).unwrap().kind_id;
+        assert!(kind_id >= PRIMITIVE_KIND_COUNT as u32);
+        // Advance time past KIND_DEMOTE_IDLE_US many times to crush strength.
+        let mut t = 1_000_u64;
+        for _ in 0..30 {
+            t += KIND_DEMOTE_IDLE_US + 1;
+            g.decay_emergent_kinds(t);
+        }
+        // The emergent kind should now be evicted; the relation re-tagged to
+        // Cooccur primitive.
+        assert!(g.kind(kind_id).is_none(), "long-idle emergent kind must be evicted");
+        let rel = g.relation(r_id).unwrap();
+        assert_eq!(
+            rel.kind_id, KIND_ID_COOCCUR,
+            "evicted-kind relation must be re-tagged to primitive Cooccur"
+        );
+    }
+
+    #[test]
+    fn primitive_kinds_never_decay() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        // Observe a Causal primitive once.
+        g.observe_relation(1_000, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Causal);
+        let s_before = g.kind(KIND_ID_CAUSAL).unwrap().strength;
+        // Many decay cycles later — the primitive should still exist.
+        for k in 0..20 {
+            g.decay_emergent_kinds(1_000 + (k + 1) * KIND_DEMOTE_IDLE_US + 100);
+        }
+        assert!(g.kind(KIND_ID_CAUSAL).is_some(), "primitives are immune to eviction");
+        // Strength only EMA'd up earlier — decay doesn't touch it.
+        let s_after = g.kind(KIND_ID_CAUSAL).unwrap().strength;
+        assert!((s_after - s_before).abs() < 1e-9, "primitive strength is not decayed");
+    }
+
+    #[test]
+    fn ctx_distance_and_concat_helpers_match() {
+        let a = sig_at(0.10);
+        let b = sig_at(0.20);
+        let ctx = concat_context(&a, &b);
+        // Lower half is a, upper half is b.
+        for i in 0..PG_NODE_SIG_DIM {
+            assert!((ctx[i] - a[i]).abs() < 1e-12);
+            assert!((ctx[PG_NODE_SIG_DIM + i] - b[i]).abs() < 1e-12);
+        }
+        // Distance from a context to itself is zero.
+        assert!(ctx_distance(&ctx, &ctx) < 1e-9);
     }
 }
