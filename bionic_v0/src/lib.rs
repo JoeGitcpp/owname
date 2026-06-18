@@ -550,7 +550,15 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 /// Older snapshot files at v60 are rejected (the per-slot high_layer 1-byte
 /// `present` flag and the v50/v51 cross-layer blocks no longer exist in the
 /// format). Independent sidecars (perturbation_graph, vocal_sequence) survive.
-pub const SNAPSHOT_VERSION: u64 = 61;
+/// v62: Phase A1–A9 (groups, first-class relations, kind discovery, FastPath,
+/// marks, vocal profile mirror, persistence v2). The snapshot.bin format
+/// itself is unchanged — but the perturbation_graph.bin sidecar moved from
+/// PGRA v1 to v2 in the same release, and the development-clock implications
+/// of the new cognitive substrate (FastPath promotion timing especially) make
+/// a fresh lineage maturity reset the cleanest path forward. Existing
+/// snapshot.bin v61 files are rejected; perturbation_graph.bin v1 files keep
+/// loading under the v2 codepath (groups / relations re-seed empty).
+pub const SNAPSHOT_VERSION: u64 = 62;
 
 /// Precision-war guard rule 2: hard ceiling on any prior magnitude written
 /// into the per-axis prior channel ("prior 精度上限 ≈ 100"). A diverged or
