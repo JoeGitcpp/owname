@@ -234,7 +234,8 @@ const KIND_ID_COOCCUR: u32 = 0;
 const KIND_ID_NEST: u32 = 1;
 const KIND_ID_CAUSAL: u32 = 2;
 const KIND_ID_CROSS_MODAL: u32 = 3;
-const PRIMITIVE_KIND_COUNT: usize = 4;
+const KIND_ID_SEQUENCE: u32 = 4;
+const PRIMITIVE_KIND_COUNT: usize = 5;
 
 /// A relation-kind cluster: an online-discovered (or primitive-anchored)
 /// category of relations sharing a similar (from-sig, to-sig) context.
@@ -581,6 +582,11 @@ pub enum EdgeKind {
     Causal = 2,
     /// Co-active across modalities (visual patch ↔ vocal signature).
     CrossModal = 3,
+    /// Phase A8: temporal transition — A reliably preceded B as part of a
+    /// learned sequence (vocal utterance, motor habit, etc.). Distinct from
+    /// Causal because Sequence carries the LEARNED ORDER of a chain, not
+    /// just a "first-then-other" co-occurrence.
+    Sequence = 4,
 }
 
 impl EdgeKind {
@@ -589,6 +595,7 @@ impl EdgeKind {
             1 => EdgeKind::Nest,
             2 => EdgeKind::Causal,
             3 => EdgeKind::CrossModal,
+            4 => EdgeKind::Sequence,
             // Defensive: unknown bytes fall back to the most generic relation.
             _ => EdgeKind::Cooccur,
         }
@@ -3027,7 +3034,7 @@ mod tests {
     // ── Phase A4 tests: dynamic RelationKind discovery ─────────────────────
 
     #[test]
-    fn default_graph_seeds_four_primitive_kinds() {
+    fn default_graph_seeds_five_primitive_kinds() {
         let g = PerturbationGraph::default();
         assert_eq!(g.kinds.len(), PRIMITIVE_KIND_COUNT);
         for i in 0..PRIMITIVE_KIND_COUNT as u32 {
@@ -3475,6 +3482,36 @@ mod tests {
         g.nodes.retain(|n| n.id != nid);
         g.prune_orphan_vocal_profiles();
         assert!(g.vocal_profile(nid).is_none());
+    }
+
+    // ── Phase A8 tests: Sequence as 5th primitive RelationKind ─────────────
+
+    #[test]
+    fn sequence_kind_is_5th_primitive() {
+        let g = PerturbationGraph::default();
+        assert_eq!(g.kinds.len(), PRIMITIVE_KIND_COUNT);
+        assert_eq!(PRIMITIVE_KIND_COUNT, 5);
+        let k = g.kind(KIND_ID_SEQUENCE).expect("Sequence primitive exists");
+        assert_eq!(k.cluster_id, KIND_ID_SEQUENCE);
+        // EdgeKind::Sequence maps to discriminant 4.
+        assert_eq!(EdgeKind::Sequence.as_u8(), 4);
+        assert_eq!(EdgeKind::from_u8(4), EdgeKind::Sequence);
+    }
+
+    #[test]
+    fn observe_relation_with_sequence_kind_distinguishes_from_causal() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.20));
+        let causal = g
+            .observe_relation(0, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Causal)
+            .unwrap();
+        let seq = g
+            .observe_relation(0, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Sequence)
+            .unwrap();
+        assert_ne!(causal, seq, "different kinds → distinct relation ids");
+        assert_eq!(g.relation(causal).unwrap().kind_id, KIND_ID_CAUSAL);
+        assert_eq!(g.relation(seq).unwrap().kind_id, KIND_ID_SEQUENCE);
     }
 
     #[test]

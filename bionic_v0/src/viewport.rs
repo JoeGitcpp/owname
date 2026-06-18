@@ -4831,6 +4831,17 @@ impl Viewport {
             if self_voiced {
                 let cur_recall_idx = self.last_recall_idx.load(Ordering::Relaxed);
                 let (self_mel_now, _) = *self.self_vocal_mel64.read().unwrap();
+                // Phase A8: capture prev recall idx BEFORE observe_transition
+                // updates it. If we have a valid (prev → cur) transition that
+                // is genuinely a change between two recognised entries, mirror
+                // it into perturbation_graph as a Sequence relation between
+                // the corresponding vocal NodeIds (resolved via nearest_vocal_node
+                // on each entry's mel64). Additive — vocal_sequence still
+                // drives the DTW alignment path.
+                let prev_recall_idx = {
+                    let seq_ro = self.vocal_sequence.read().unwrap();
+                    seq_ro.last_voiced_idx
+                };
                 let mut seq = self.vocal_sequence.write().unwrap();
                 seq.observe_transition(now_us, cur_recall_idx);
                 if self_mel_now.iter().sum::<f64>() > 1e-6 {
@@ -4838,6 +4849,35 @@ impl Viewport {
                 }
                 if target.target_mel64.iter().sum::<f64>() > 1e-6 {
                     seq.push_target(&target.target_mel64);
+                }
+                drop(seq);
+                if prev_recall_idx >= 0
+                    && cur_recall_idx >= 0
+                    && prev_recall_idx as i64 != cur_recall_idx
+                {
+                    let recall = self.vocal_target_recall.read().unwrap();
+                    let prev_mel = recall
+                        .entries
+                        .get(prev_recall_idx as usize)
+                        .map(|e| e.target_mel64);
+                    let cur_mel = recall
+                        .entries
+                        .get(cur_recall_idx as usize)
+                        .map(|e| e.target_mel64);
+                    drop(recall);
+                    if let (Some(prev_mel), Some(cur_mel)) = (prev_mel, cur_mel) {
+                        let mut graph = self.perturbation_graph.write().unwrap();
+                        let prev_node = graph.nearest_vocal_node(&prev_mel).map(|(id, _)| id);
+                        let cur_node = graph.nearest_vocal_node(&cur_mel).map(|(id, _)| id);
+                        if let (Some(p), Some(c)) = (prev_node, cur_node) {
+                            graph.observe_relation(
+                                now_us,
+                                crate::perturbation_graph::Endpoint::Node(p),
+                                crate::perturbation_graph::Endpoint::Node(c),
+                                crate::perturbation_graph::EdgeKind::Sequence,
+                            );
+                        }
+                    }
                 }
             }
             // Phase 0: capture the live region-B learning path (invisible before
