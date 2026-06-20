@@ -1413,6 +1413,14 @@ pub struct Viewport {
     /// successful `tick_gaussian_field` by computing the active-set
     /// fingerprint and feeding it to `PhotSequence::observe_scene`.
     pub phot_sequence: RwLock<crate::phot_sequence::PhotSequence>,
+    /// Born-in looming detector state (2026-06-20): a slow EMA of the global
+    /// "visual mass" (mean region brightness + bright-footprint fraction). Each
+    /// vision frame, the rectified positive gap between the current mass and this
+    /// EMA = the looming/approach signal pushed onto VIS_LOOMING_AXIS and fed to
+    /// the innate defensive reflex. `None` until the first frame warms it (so the
+    /// cold-start frame doesn't read as a spurious approach). Transient — not
+    /// persisted; re-warms in a few frames after a restart.
+    pub looming_mass_ema: RwLock<Option<f64>>,
 
     // ── Developmental precision schedule (2026-06-06) ────────────────────────
     /// Developmental clock m∈[0,1]. 0 = naive newborn (loosest precision),
@@ -1422,8 +1430,17 @@ pub struct Viewport {
     pub developmental_maturity: RwLock<f64>,
     /// Rate-limit cursor for maturity advances (see MATURITY_ADVANCE_MIN_INTERVAL_US).
     /// Also shared with the familiarity throttle in observe_vocal_reflex_closure
-    /// so both tick at the same developmental pace.
+    /// so both tick at the same developmental pace. The pure-vision closure
+    /// (observe_visual_reflex_closure) shares this SAME cursor so vision and the
+    /// vocal path draw from one global ~1/s maturity budget — vision becomes a
+    /// legitimate maturity source without changing the tuned infant period.
     pub last_maturity_advance_us: AtomicU64,
+    /// Slow EMA of the Gaussian-field reconstruction MSE — the baseline the
+    /// pure-vision maturity closure credits IMPROVEMENT against (crediting a
+    /// DROP, never the absolute value, avoids a cold-start 0×x trap). None until
+    /// the first observation. Runtime-only: re-converges after a restart and is
+    /// not serialized (like the efference copy).
+    pub visual_recon_mse_ema: RwLock<Option<f64>>,
     /// Dedupe cursor for the vocal_efficacy EMA step (last now_us it stepped on).
     /// The dense action-consequence pair path calls observe_vocal_reflex_closure K
     /// times per tick with the SAME now_us; an ungated EMA stepped K times while
@@ -1528,6 +1545,7 @@ impl Viewport {
             err_stream,
             prior_signal,
             predictors,
+            looming_mass_ema: RwLock::new(None),
             hl: RwLock::new(HighLevelState::default()),
             ambient: AmbientChannel::new(),
             slots,
@@ -1598,6 +1616,7 @@ impl Viewport {
             phot_sequence: RwLock::new(crate::phot_sequence::PhotSequence::default()),
             developmental_maturity: RwLock::new(0.0),
             last_maturity_advance_us: AtomicU64::new(0),
+            visual_recon_mse_ema: RwLock::new(None),
             last_efficacy_advance_us: AtomicU64::new(0),
             last_binding_pair_consumed: AtomicU64::new(u64::MAX),
             last_av_action_pair_consumed: AtomicU64::new(u64::MAX),
@@ -4499,6 +4518,69 @@ impl Viewport {
         }
     }
 
+    /// Pure-vision developmental closure — the visual sibling of
+    /// `observe_vocal_reflex_closure`. It lets the body earn maturity from
+    /// SEEING alone (prediction-error reduction on its Gaussian reconstruction),
+    /// not only from audio-visual co-occurrence. Called every live visual frame
+    /// from `tick_gaussian_field` / `tick_gaussian_field_from_net` with that
+    /// tick's reconstruction `mse` and field `active_frac`.
+    ///
+    /// Design (route-A, anti-deadlock):
+    ///   * Evidence gate: `active_frac > VIS_CLOSURE_ACTIVE_FRAC_MIN` and a
+    ///     finite mse — i.e. real structure is present. An empty/near-empty field
+    ///     carries no evidence and credits nothing (no fabricated maturity).
+    ///   * c = recon-MSE *reduction* (`fit`) relative to a slow EMA, NOT the
+    ///     absolute MSE. Crediting the drop ("the body got better at
+    ///     reconstructing what it sees") is the visual analog of (1 − shape_dist)
+    ///     and sidesteps the cold-start 0×x trap (an empty field reports a large,
+    ///     uninformative MSE; a trivially-blank scene a tiny one — neither is
+    ///     competence). `active_frac` is the evidence GATE (structure present),
+    ///     not the magnitude — keeping vision at parity with the vocal path.
+    ///   * Shares the global 1/s maturity throttle with the vocal path, so the
+    ///     developmental pace / infant period is unchanged.
+    /// coarse→fine is handled by `advance_maturity`'s built-in (1−m) term — no
+    /// extra anneal, exactly like the vocal path.
+    pub fn observe_visual_reflex_closure(&self, now_us: u64, mse: f64, active_frac: f64) {
+        if !mse.is_finite() || active_frac <= crate::VIS_CLOSURE_ACTIVE_FRAC_MIN {
+            return;
+        }
+        // Update the slow recon-MSE baseline and read the improvement-based fit.
+        let fit = {
+            let mut ema = self.visual_recon_mse_ema.write().unwrap();
+            match *ema {
+                None => {
+                    // First observation: set the baseline, credit nothing yet
+                    // (no prior to measure improvement against).
+                    *ema = Some(mse);
+                    return;
+                }
+                Some(prev) => {
+                    let f = if prev > 1e-9 {
+                        ((prev - mse) / prev).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    *ema = Some(
+                        (1.0 - crate::VIS_RECON_MSE_EMA_BETA) * prev
+                            + crate::VIS_RECON_MSE_EMA_BETA * mse,
+                    );
+                    f
+                }
+            }
+        };
+        let c = fit;
+        if c <= 0.0 {
+            // No improvement this frame → no credit, and do NOT consume the
+            // shared throttle slot (leave it for a frame that earned something).
+            return;
+        }
+        let last = self.last_maturity_advance_us.load(Ordering::Relaxed);
+        if now_us.saturating_sub(last) >= crate::MATURITY_ADVANCE_MIN_INTERVAL_US {
+            self.last_maturity_advance_us.store(now_us, Ordering::Relaxed);
+            self.advance_maturity(c);
+        }
+    }
+
     pub fn tick_vocal_reflex_from_pressure(&self, now_us: u64) {
         let field = self.read_prediction_pressure_field();
         let field_pressure = field
@@ -5847,6 +5929,12 @@ impl Viewport {
             .observe_scene(now_us, scene_fp);
         self.push_observation(crate::GAUSS_RECON_MSE_AXIS,   now_us, mse.clamp(0.0, 1.0));
         self.push_observation(crate::GAUSS_ACTIVE_FRAC_AXIS, now_us, active_frac.clamp(0.0, 1.0));
+        // Pure-vision developmental closure: earn maturity from prediction-error
+        // reduction on what the body sees (evidence-gated on real structure).
+        self.observe_visual_reflex_closure(now_us, mse, active_frac);
+        // Born-in looming/approach detector + innate defensive reflex (runs on the
+        // region brightness axes region_perception just pushed for this frame).
+        self.tick_looming(now_us);
     }
 
     /// Read a snapshot clone of the Gaussian field state (for observers / tests).
@@ -5907,6 +5995,150 @@ impl Viewport {
             .observe_scene(now_us, scene_fp);
         self.push_observation(crate::GAUSS_RECON_MSE_AXIS,   now_us, mse.clamp(0.0, 1.0));
         self.push_observation(crate::GAUSS_ACTIVE_FRAC_AXIS, now_us, active_frac.clamp(0.0, 1.0));
+        // Pure-vision developmental closure (same hook as the real-camera path):
+        // earn maturity from prediction-error reduction on what the body sees.
+        self.observe_visual_reflex_closure(now_us, mse, active_frac);
+        // Born-in looming/approach detector + innate defensive reflex (production
+        // headless path; net_adapter pushed the region vis axes before this call).
+        self.tick_looming(now_us);
+    }
+
+    /// Born-in LOOMING / APPROACH detector + innate defensive reflex.
+    ///
+    /// Computes a coarse global "visual mass" from the per-region BRIGHTNESS axes
+    /// (mean brightness + bright-footprint fraction — the same proxy validated by
+    /// `bin/sense_probe`'s looming test), tracks its slow EMA, and emits the
+    /// rectified positive GROWTH as VIS_LOOMING_AXIS: high when something is
+    /// approaching / expanding, ~0 for a stable or receding scene.
+    ///
+    /// This is a born-in FEATURE detector (sensitive to approach, NOT to identity
+    /// — no face/predator template; route-A compliant). It then fires the innate
+    /// UNCONDITIONED defensive reflex (`apply_perceptual_threat` → raises
+    /// vital_anxiety), giving perception its first path into the negative-valence
+    /// value system. The matching LEARNED ("prepared") leg is the VPC predictor
+    /// that learns VIS_LOOMING_AXIS predicts INTERO_VITAL_ANXIETY.
+    ///
+    /// Called from both vision ingresses (`tick_gaussian_field` real camera +
+    /// `tick_gaussian_field_from_net` headless) after the region axes are pushed.
+    pub fn tick_looming(&self, now_us: u64) -> f64 {
+        // Growth gain: per-frame visual-mass deltas are small, so amplify the
+        // mass-vs-EMA gap into a usable [0,1] approach signal.
+        const LOOMING_GROWTH_GAIN: f64 = 6.0;
+        // EMA follow rate for the mass baseline. Slow enough that a sustained
+        // approach keeps reading positive; fast enough that a settled scene
+        // relaxes the signal back to ~0 within a second or so.
+        const LOOMING_EMA_ALPHA: f64 = 0.10;
+        // Per-region brightness above this counts toward the bright footprint
+        // (mirrors sense_probe::bright_footprint's 0.10 threshold).
+        const BRIGHT_THRESH: f64 = 0.10;
+
+        // Global visual mass = mean region brightness blended with the fraction of
+        // regions that are "lit". A blob that approaches grows both.
+        let mut sum = 0.0;
+        let mut lit = 0.0;
+        for r in 0..crate::VIS_REGIONS {
+            let b = self
+                .latest_observation(crate::vis_axis(r, crate::vis_sub::BRIGHTNESS))
+                .map(|o| o.value)
+                .unwrap_or(0.0);
+            sum += b;
+            if b > BRIGHT_THRESH {
+                lit += 1.0;
+            }
+        }
+        let regions = crate::VIS_REGIONS as f64;
+        let mass = sum / regions; // [0,1]
+        let footprint = lit / regions; // [0,1]
+        let combined = 0.5 * mass + 0.5 * footprint;
+
+        // Rectified growth vs the slow baseline = the looming signal.
+        let looming = {
+            let mut ema = self.looming_mass_ema.write().unwrap();
+            match *ema {
+                None => {
+                    // First frame: seed the baseline, emit no approach.
+                    *ema = Some(combined);
+                    0.0
+                }
+                Some(prev) => {
+                    let l = ((combined - prev) * LOOMING_GROWTH_GAIN).clamp(0.0, 1.0);
+                    *ema = Some(prev + LOOMING_EMA_ALPHA * (combined - prev));
+                    l
+                }
+            }
+        };
+
+        // Mirror onto the shared substrate (predicted / err / VPC source / relations).
+        self.push_observation(crate::VIS_LOOMING_AXIS, now_us, looming);
+
+        // Innate defensive reflex: a looming stimulus raises dread directly.
+        if looming > 0.0 {
+            self.vital_core.write().unwrap().apply_perceptual_threat(looming);
+        }
+        looming
+    }
+
+    /// Compute this tick's emergent gaze command — the visual sibling of the
+    /// vocal drive field. Returns `(bias, floor_frac)`:
+    ///   * `bias` ∈ [-1,1]: the EMERGENT "where to look" — the err-weighted
+    ///     lateral centroid of per-region visual PREDICTION ERROR (curiosity:
+    ///     look where the body fails to predict), arbitrated with the looming
+    ///     source through `GazeDriveField::combine`, then survival-gated. No
+    ///     labels, no scripted scan path.
+    ///   * `floor_frac` ∈ [0,1]: the endogenous wobble amplitude — the anti-0×x
+    ///     bootstrap floor, maturity-annealed coarse→fine. NOT survival-gated:
+    ///     the always-on micro-wobble must survive even a metabolic crisis so the
+    ///     no-motion→no-depth→no-error→no-drive loop can never form.
+    /// The neck adds them: cam_x = bias·NECK_BIAS_MAX + floor·NECK_AMP_MAX·sin(…).
+    pub fn compute_gaze_drive(&self, _now_us: u64) -> (f64, f64) {
+        use crate::{vis_axis, vis_sub, VIS_GRID_COLS, VIS_REGIONS};
+        // Per-region curiosity = how much the body fails to predict that region's
+        // visual signal (AR-predictor err summed over the structural sub-axes) —
+        // genuine prediction pressure, not raw motion.
+        const CURIO_SUBS: [usize; 3] =
+            [vis_sub::BRIGHTNESS, vis_sub::MOTION, vis_sub::EDGE_ENERGY];
+        let half = (VIS_GRID_COLS as f64 - 1.0) / 2.0; // column-centre index
+        let mut total = 0.0;
+        let mut signed = 0.0;
+        for r in 0..VIS_REGIONS {
+            let mut curio = 0.0;
+            for &sub in &CURIO_SUBS {
+                curio += self.latest_err(vis_axis(r, sub)).unwrap_or(0.0).abs();
+            }
+            let gc = (r % VIS_GRID_COLS) as f64;
+            let col_sign = if half > 0.0 { (gc - half) / half } else { 0.0 }; // [-1,1]
+            total += curio;
+            signed += curio * col_sign;
+        }
+        let direction = if total > 1e-9 { (signed / total).clamp(-1.0, 1.0) } else { 0.0 };
+        // Normalize total err into an urge in [0,1] (a very surprising scene caps).
+        let curio_intensity = (total / VIS_REGIONS as f64).clamp(0.0, 1.0);
+        // Looming (approach) is a second source that raises the urge to look
+        // toward the same curious centroid.
+        let looming = self
+            .latest_observation(crate::VIS_LOOMING_AXIS)
+            .map(|o| o.value)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let field = crate::gaze_drive_field::GazeDriveField::combine(&[
+            crate::gaze_drive_field::GazeDriveContribution {
+                intensity: curio_intensity,
+                direction,
+            },
+            crate::gaze_drive_field::GazeDriveContribution {
+                intensity: looming,
+                direction,
+            },
+        ]);
+        // Survival gate (dual-drive self-preservation): a starving body stops the
+        // energy-spending DIRECTED gaze — same metabolic guard voicing uses. The
+        // floor below is deliberately left ungated (see doc) to preserve the
+        // anti-deadlock guarantee even mid-crisis.
+        let sp = self.read_vital_core().self_preservation_pressure();
+        let gain = (1.0 - sp.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let bias = (field.bias() * gain).clamp(-1.0, 1.0);
+        let floor = crate::gaze_babble_floor(self.developmental_maturity()).clamp(0.0, 1.0);
+        (bias, floor)
     }
 
     /// Phase 3 Stage 3: read the body's current cross-modal + vital state so

@@ -36,6 +36,9 @@ fn near_object_displaced_more_than_far() {
         tick_count: 0,
         wobble_period: NECK_WOBBLE_PERIOD,
         focal_px: NECK_FOCAL_PX,
+        cam_x_prev: 0.0,
+        commanded_bias: 0.0,
+        commanded_floor: bionic_v0::GAZE_FLOOR_NEWBORN,
     };
 
     let (px0_near, _) = neck.project(0.0, 0.0, z_near, 0.0);

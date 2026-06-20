@@ -483,6 +483,9 @@ pub struct RealPhotAdapter {
     /// unified visual perception (region_perception). [0.0; VIS_REGIONS] until
     /// the first frame.
     prev_region_brightness: [f64; crate::VIS_REGIONS],
+    /// Previous frame's per-region motion, for the temporal_flux sub-axis
+    /// (flux = |motion − prev motion|). [0.0; VIS_REGIONS] until the first frame.
+    prev_region_motion: [f64; crate::VIS_REGIONS],
 }
 
 impl RealPhotAdapter {
@@ -508,6 +511,7 @@ impl RealPhotAdapter {
             _tick_hz: 30,
             consequence_window_id: 0,
             prev_region_brightness: [0.0; crate::VIS_REGIONS],
+            prev_region_motion: [0.0; crate::VIS_REGIONS],
         }
     }
 
@@ -585,12 +589,16 @@ impl ModalityAdapter for RealPhotAdapter {
         // feeding the SAME abstraction engine and memory. Vision is no longer a
         // per-slot shadow. No use is presumed here; shape/identity emerge later.
         {
-            let (vis_axes, new_brightness) =
-                crate::phot_camera::region_perception(&frame, &self.prev_region_brightness);
+            let (vis_axes, new_brightness, new_motion) = crate::phot_camera::region_perception(
+                &frame,
+                &self.prev_region_brightness,
+                &self.prev_region_motion,
+            );
             for (i, &v) in vis_axes.iter().enumerate() {
                 vp.push_observation(crate::AXIS_VIS_BASE + i, now_us, v);
             }
             self.prev_region_brightness = new_brightness;
+            self.prev_region_motion = new_motion;
         }
 
         // Phase 1 (keystone ①): drive the Gaussian visual field from this same

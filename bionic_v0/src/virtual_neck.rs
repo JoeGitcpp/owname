@@ -14,9 +14,14 @@
 //   screen_y = y_world · focal_px / z_world
 //   px = CAM_W/2 + screen_x,  py = CAM_H/2 + screen_y
 //
-// Curriculum: amplitude grows from NECK_AMP_INIT to NECK_AMP_MAX over
-// NECK_PHASE_TICKS ticks per stage.  Starts imperceptibly small so the
-// predictor can warm up on a near-static world before seeing motion.
+// Gaze drive (2026-06-20): the camera position is no longer a scripted sine.
+// Each tick the body COMMANDS a gaze via `command_gaze(bias, floor_frac)`:
+//   cam_x = bias·NECK_BIAS_MAX  +  floor_frac·NECK_AMP_MAX·sin(2π·n/period)
+// The bias is the EMERGENT "where to look" (from visual prediction error, via
+// the gaze_drive_field); the sine term is the endogenous exploratory WOBBLE
+// FLOOR (anti-0×x: always some parallax-producing motion even at zero error),
+// its amplitude maturity-annealed coarse→fine. NeckCurriculum is retained only
+// as a vestigial test fixture; it no longer drives motion.
 //
 // Integration with Viewport:
 //   1. Call tick() to get (frame, ec).
@@ -41,8 +46,11 @@ use crate::viewport::Viewport;
 pub const NECK_AMP_INIT: f64 = 0.002;
 /// Amplitude increment per curriculum phase.
 pub const NECK_AMP_STEP: f64 = 0.003;
-/// Maximum amplitude.
+/// Maximum amplitude (also the base scale for the endogenous gaze wobble).
 pub const NECK_AMP_MAX: f64 = 0.10;
+/// Max lateral offset the EMERGENT gaze bias can command (world units), added on
+/// top of the endogenous exploratory wobble. Same scale as the wobble amplitude.
+pub const NECK_BIAS_MAX: f64 = 0.10;
 /// How many ticks each curriculum phase lasts before amplitude steps up.
 pub const NECK_PHASE_TICKS: u32 = 200;
 /// Number of ticks per full sine-wave wobble cycle.
@@ -116,13 +124,23 @@ impl NeckCurriculum {
 /// Virtual neck: a laterally-translating camera in a 3D scene.
 pub struct VirtualNeck {
     pub scene: Vec<SceneObject>,
+    /// Vestigial test fixture — no longer drives motion (see module header).
     pub curriculum: NeckCurriculum,
-    /// Monotonic tick counter (used to derive sine-wave phase).
+    /// Monotonic tick counter (used to derive the endogenous wobble phase).
     pub tick_count: u64,
     /// Wobble period in ticks.
     pub wobble_period: f64,
     /// Focal length in pixels.
     pub focal_px: f64,
+    /// Previous absolute camera X — the per-tick efference is `cam_x − prev`.
+    pub cam_x_prev: f64,
+    /// Emergent gaze bias commanded for this tick (signed [-1,1], scaled by
+    /// NECK_BIAS_MAX). Set by `command_gaze` from the gaze drive field.
+    pub commanded_bias: f64,
+    /// Endogenous wobble amplitude fraction commanded for this tick ([0,1],
+    /// scaled by NECK_AMP_MAX). Defaults to the newborn floor so a neck driven
+    /// without an external commander still produces parallax (anti-deadlock).
+    pub commanded_floor: f64,
 }
 
 impl VirtualNeck {
@@ -177,6 +195,9 @@ impl VirtualNeck {
             tick_count: 0,
             wobble_period: NECK_WOBBLE_PERIOD,
             focal_px: NECK_FOCAL_PX,
+            cam_x_prev: 0.0,
+            commanded_bias: 0.0,
+            commanded_floor: crate::GAZE_FLOOR_NEWBORN,
         }
     }
 
@@ -188,33 +209,38 @@ impl VirtualNeck {
             tick_count: 0,
             wobble_period: NECK_WOBBLE_PERIOD,
             focal_px: NECK_FOCAL_PX,
+            cam_x_prev: 0.0,
+            commanded_bias: 0.0,
+            commanded_floor: crate::GAZE_FLOOR_NEWBORN,
         }
     }
 
-    /// Advance one tick.  Returns the rendered `CameraFrame` and the
-    /// `EfferenceCopy` (the translation commanded THIS tick = Δtx).
+    /// Command this tick's gaze: the EMERGENT signed bias (where to look, from
+    /// the gaze drive field, [-1,1]) and the endogenous wobble FLOOR fraction
+    /// (maturity-annealed anti-deadlock exploration, [0,1]). Pure setter.
+    pub fn command_gaze(&mut self, bias: f64, floor_frac: f64) {
+        self.commanded_bias = bias.clamp(-1.0, 1.0);
+        self.commanded_floor = floor_frac.clamp(0.0, 1.0);
+    }
+
+    /// Advance one tick. Returns the rendered `CameraFrame` and the
+    /// `EfferenceCopy` (the lateral translation commanded THIS tick = Δtx).
     ///
-    /// Camera position follows a sine wave:
-    ///   cam_x(n) = amplitude · sin(2π · n / T)
-    ///
-    /// The efference copy carries the DELTA tx from tick n-1 to tick n, which
-    /// is what drives parallax-based depth estimation (not the absolute position).
+    /// Camera position is the body's COMMANDED gaze, not a scripted sine:
+    ///   cam_x(n) = bias·NECK_BIAS_MAX  +  floor·NECK_AMP_MAX·sin(2π·n/T)
+    /// where `bias` (emergent, from visual prediction error) is where the body
+    /// chose to look and the sine term is the endogenous exploratory WOBBLE FLOOR
+    /// (always-on micro-motion so parallax — and thus depth error, and thus the
+    /// gaze drive itself — can never collapse to a 0×x dead loop). The efference
+    /// copy carries Δtx (n-1→n), which is what drives parallax depth.
     pub fn tick(&mut self, t_us: u64) -> (CameraFrame, EfferenceCopy) {
-        let amplitude = self.curriculum.tick();
-        let period = self.wobble_period;
-
-        let phase_now = 2.0 * PI * self.tick_count as f64 / period;
-        let phase_prev = if self.tick_count == 0 {
-            0.0
-        } else {
-            2.0 * PI * (self.tick_count - 1) as f64 / period
-        };
-
-        let cam_x_now = amplitude * phase_now.sin();
-        let cam_x_prev = amplitude * phase_prev.sin();
-        let delta_tx = cam_x_now - cam_x_prev;
-
         self.tick_count = self.tick_count.saturating_add(1);
+
+        let phase = 2.0 * PI * self.tick_count as f64 / self.wobble_period;
+        let wobble = self.commanded_floor * NECK_AMP_MAX * phase.sin();
+        let cam_x_now = self.commanded_bias * NECK_BIAS_MAX + wobble;
+        let delta_tx = cam_x_now - self.cam_x_prev;
+        self.cam_x_prev = cam_x_now;
 
         let frame = self.render_frame(t_us, cam_x_now);
         let ec = EfferenceCopy {
@@ -349,13 +375,14 @@ pub fn tick_virtual_neck_into_viewport(
     vp: &Arc<Viewport>,
     neck: &mut VirtualNeck,
     prev_brightness: &[f64; crate::VIS_REGIONS],
+    prev_motion: &[f64; crate::VIS_REGIONS],
     t_us: u64,
-) -> [f64; crate::VIS_REGIONS] {
+) -> ([f64; crate::VIS_REGIONS], [f64; crate::VIS_REGIONS]) {
     let (frame, ec) = neck.tick(t_us);
     vp.push_efference_copy(ec);
     vp.inject_efference_motion_priors();
-    let (vis_axes, new_brightness) =
-        crate::phot_camera::region_perception(&frame, prev_brightness);
+    let (vis_axes, new_brightness, new_motion) =
+        crate::phot_camera::region_perception(&frame, prev_brightness, prev_motion);
     for (i, &v) in vis_axes.iter().enumerate() {
         vp.push_observation(crate::AXIS_VIS_BASE + i, t_us, v);
     }
@@ -363,14 +390,14 @@ pub fn tick_virtual_neck_into_viewport(
     // Phase 3 Stage 2: tier-0 visual frontend, parallel to slot path.
     vp.tick_vision_tier0_from_frame(&frame, t_us);
     write_neck_translation_event(vp, ec.tx, t_us);
-    new_brightness
+    (new_brightness, new_motion)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::phot_camera::region_perception;
-    use crate::{VIS_REGIONS, VIS_SUB_BRIGHTNESS, VIS_SUB_MOTION};
+    use crate::{VIS_AXES_PER_REGION, VIS_REGIONS, VIS_SUB_BRIGHTNESS, VIS_SUB_MOTION};
 
     // ── Parallax sign tests ──────────────────────────────────────────────────
 
@@ -386,6 +413,9 @@ mod tests {
             tick_count: 0,
             wobble_period: NECK_WOBBLE_PERIOD,
             focal_px: NECK_FOCAL_PX,
+            cam_x_prev: 0.0,
+            commanded_bias: 0.0,
+            commanded_floor: crate::GAZE_FLOOR_NEWBORN,
         };
 
         let tx = 0.05;
@@ -470,10 +500,10 @@ mod tests {
             }
             n.tick(0)
         };
-        let (axes, _) = region_perception(&frame, &prev);
+        let (axes, _, _) = region_perception(&frame, &prev, &[0.0; VIS_REGIONS]);
         // At least two regions should have above-background brightness.
         let bright_regions = (0..VIS_REGIONS)
-            .filter(|&r| axes[r * 5 + VIS_SUB_BRIGHTNESS] > NECK_BG + 0.05)
+            .filter(|&r| axes[r * VIS_AXES_PER_REGION + VIS_SUB_BRIGHTNESS] > NECK_BG + 0.05)
             .count();
         assert!(
             bright_regions >= 2,
@@ -491,14 +521,15 @@ mod tests {
             neck.curriculum.tick();
         }
         let (frame0, _) = neck.tick(0);
-        let (_, prev_brightness) = region_perception(&frame0, &[0.0; VIS_REGIONS]);
+        let (_, prev_brightness, prev_motion) =
+            region_perception(&frame0, &[0.0; VIS_REGIONS], &[0.0; VIS_REGIONS]);
         let (frame1, ec) = neck.tick(33_000);
-        let (axes1, _) = region_perception(&frame1, &prev_brightness);
+        let (axes1, _, _) = region_perception(&frame1, &prev_brightness, &prev_motion);
 
         // Only check motion if there was actually a translation this tick.
         if ec.translation_term().is_some() {
             let max_motion = (0..VIS_REGIONS)
-                .map(|r| axes1[r * 5 + VIS_SUB_MOTION])
+                .map(|r| axes1[r * VIS_AXES_PER_REGION + VIS_SUB_MOTION])
                 .fold(0.0_f64, f64::max);
             assert!(
                 max_motion > 0.0,

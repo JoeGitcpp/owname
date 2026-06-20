@@ -394,7 +394,7 @@ fn main() {
 
     // AR-2 predictors for ALL active axes (hearing + vision + interoception +
     // code + gauss summaries), 100 Hz. Originally only VIB_BANDS were covered;
-    // covering all AXIS_COUNT (161) axes means every tier-0 axis is predicted —
+    // covering all AXIS_COUNT (162) axes means every tier-0 axis is predicted —
     // each produces err signals, feeds the relation graph, and enters the
     // abstraction tower. The predictors simply observe whatever each axis holds.
     let predictors: Arc<Mutex<Vec<Ar2Predictor>>> =
@@ -580,6 +580,49 @@ fn main() {
         })
     };
 
+    // Visual sensorimotor self-play ("neck crib"), 30 Hz. Closes the vision
+    // perception→action→observation loop that is otherwise permanently open:
+    // the body commands its OWN lateral eye-translation (a genuine efference
+    // copy), so per-Gaussian PARALLAX depth becomes observable. Without this,
+    // every live path reads translation_term()=None and per-Gaussian depth is a
+    // 0×x=0 dead signal (update_depth(None) skips forever) — the visual analog
+    // of the vocal self-hear loop the body already runs.
+    //
+    // Gated on the ABSENCE of live external vision (phot_health Fault/Stale): a
+    // camera-less or dead-camera body runs the crib and earns depth from its own
+    // motion; the instant a real camera/browser delivers frames (Ok/Quiet) the
+    // crib stands down, so it never fights the shared Gaussian field that the
+    // RealPhotAdapter / NetSensesAdapter own. (A deployed browser body — which
+    // can never supply real parallax — therefore relies on its real input and
+    // does not run the crib; giving it a SEPARATE synthetic depth field is a
+    // deliberate follow-up, not done here.)
+    let h_neck = {
+        let vp_neck = vp.clone();
+        let mut neck = bionic_v0::virtual_neck::VirtualNeck::new_default();
+        let mut prev_b = [0.0f64; bionic_v0::VIS_REGIONS];
+        let mut prev_m = [0.0f64; bionic_v0::VIS_REGIONS];
+        spawn_ticker(vp.clone(), 30, stop.clone(), move |_| {
+            use bionic_v0::viewport::HealthState;
+            if matches!(
+                vp_neck.read_phot_health(),
+                HealthState::Fault | HealthState::Stale
+            ) {
+                let t = now_us();
+                // Gaze as a first-class drive: the body chooses where to look from
+                // its own visual prediction error (curiosity), with an endogenous
+                // maturity-annealed exploratory floor. Command it, then drive the
+                // neck — replacing the old scripted sine wobble.
+                let (bias, floor) = vp_neck.compute_gaze_drive(t);
+                neck.command_gaze(bias, floor);
+                let (nb, nm) = bionic_v0::virtual_neck::tick_virtual_neck_into_viewport(
+                    &vp_neck, &mut neck, &prev_b, &prev_m, t,
+                );
+                prev_b = nb;
+                prev_m = nm;
+            }
+        })
+    };
+
     let h_learned_bias_checkpoint = {
         let vp_checkpoint = vp.clone();
         let paths_checkpoint = learned_bias_paths.clone();
@@ -751,8 +794,9 @@ fn main() {
     // thread-fault axis (no text, no restart in this stage) so the observer
     // sees a half-dead body instead of silence.
     {
-        let watch_handles: [&std::thread::JoinHandle<()>; 16] = [
+        let watch_handles: [&std::thread::JoinHandle<()>; 17] = [
             &h_surface,
+            &h_neck,
             &h_adapters,
             &h_pred,
             &h_hl,
@@ -769,8 +813,8 @@ fn main() {
             &h_live_byte_closure,
             &h_master,
         ];
-        let mut watch_reported = [false; 16];
-        let watchdog_sweep = |reported: &mut [bool; 16]| {
+        let mut watch_reported = [false; 17];
+        let watchdog_sweep = |reported: &mut [bool; 17]| {
             for (i, h) in watch_handles.iter().enumerate() {
                 if !reported[i] && h.is_finished() {
                     reported[i] = true;
@@ -801,6 +845,7 @@ fn main() {
     }
 
     let _ = h_surface.join();
+    let _ = h_neck.join();
     let _ = h_adapters.join();
     let _ = h_pred.join();
     let _ = h_hl.join();

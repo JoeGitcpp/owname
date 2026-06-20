@@ -45,10 +45,19 @@ fn body_driver_makes_depth_observable_under_self_motion() {
     neck.curriculum.amplitude = NECK_AMP_MAX;
 
     let mut prev = [0.0_f64; VIS_REGIONS];
+    let mut prev_motion = [0.0_f64; VIS_REGIONS];
     let mut motion_ticks = 0usize;
     let mut ever_observable = false;
     for step in 0..400u64 {
-        prev = tick_virtual_neck_into_viewport(&vp, &mut neck, &prev, 1_000_000 + step * 33_333);
+        let (nb, nm) = tick_virtual_neck_into_viewport(
+            &vp,
+            &mut neck,
+            &prev,
+            &prev_motion,
+            1_000_000 + step * 33_333,
+        );
+        prev = nb;
+        prev_motion = nm;
         if vp.read_efference_copy().translation_term().is_some() {
             motion_ticks += 1;
         }

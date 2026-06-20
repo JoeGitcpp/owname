@@ -40,6 +40,15 @@ const REVIVE_LEVEL: f64 = 0.25;
 /// consecutive low-reserve ticks before entering Standby (avoids flicker).
 const STANDBY_PATIENCE: u32 = 8;
 
+/// Innate defensive-reflex gain: how strongly a unit-magnitude external
+/// perceptual threat (e.g. a fully-looming / rapidly-approaching stimulus) is
+/// allowed to raise vital_anxiety in a single application. Bounded; the normal
+/// vital_anxiety EMA decays it back over subsequent ticks. This is the
+/// UNCONDITIONED leg of the perception→defense link — a born-in reflex, not a
+/// learned value (the learned/"prepared" leg lives in the VPC predictor that
+/// learns VIS_LOOMING_AXIS predicts this axis).
+const LOOMING_DEFENSE_GAIN: f64 = 0.5;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VitalCoreState {
     /// Survival reserve [0,1]. 1 = full; 0 = depleted.
@@ -158,6 +167,23 @@ impl VitalCoreState {
         // reserve=1.0 → ~0.01  reserve=0.5 → ~0.27  reserve=0.1 → ~0.76
         let reserve_pressure = (1.0 - self.reserve).powi(2);
         unit(reserve_pressure * 0.70 + self.vital_anxiety * 0.30)
+    }
+
+    /// Innate defensive reflex: an EXTERNAL perceptual threat raises vital_anxiety
+    /// directly — the unconditioned negative-valence response that gives
+    /// perception a way into the value system at all. Until this, vital_anxiety
+    /// (dread) could only be raised by the body's own metabolism (a worsening
+    /// reserve trajectory); nothing the senses saw could make the body afraid.
+    ///
+    /// `threat` ∈ [0,1] (clamped). Currently driven by the born-in looming /
+    /// approach detector (Viewport::tick_looming → VIS_LOOMING_AXIS). The bump is
+    /// additive and bounded; the existing vital_anxiety EMA in `tick` decays it
+    /// back, so a transient looming spikes dread and then it subsides — exactly a
+    /// startle/defense transient, not a permanent mood. 推论5 compliant: this is a
+    /// born-in reflex over a numeric approach signal, NOT a decoded "enemy".
+    pub fn apply_perceptual_threat(&mut self, threat: f64) {
+        let threat = unit(threat);
+        self.vital_anxiety = unit(self.vital_anxiety + LOOMING_DEFENSE_GAIN * threat);
     }
 }
 
@@ -375,6 +401,26 @@ mod tests {
             v.vital_anxiety > 0.0,
             "a worsening survival trajectory must raise vital_anxiety"
         );
+    }
+
+    #[test]
+    fn looming_threat_raises_then_decays_vital_anxiety() {
+        // A healthy body with a steady metabolism feels no dread on its own…
+        let mut v = VitalCoreState::default();
+        v.tick(1000, 1.0, 0.0); // supply = drain-free → no metabolic anxiety
+        assert!(v.vital_anxiety < 1e-6, "calm body has ~0 dread: {}", v.vital_anxiety);
+
+        // …but a looming/approaching stimulus (perceptual threat) makes it afraid.
+        v.apply_perceptual_threat(1.0);
+        let scared = v.vital_anxiety;
+        assert!(scared > 0.3, "a strong looming threat must spike dread: {scared}");
+
+        // It is a startle transient, not a permanent mood: a calm metabolism lets
+        // the vital_anxiety EMA decay it back down.
+        for k in 0..20 {
+            v.tick(2000 + k * 1000, 1.0, 0.0);
+        }
+        assert!(v.vital_anxiety < scared * 0.3, "dread must subside once the threat passes: {}", v.vital_anxiety);
     }
 
     #[test]

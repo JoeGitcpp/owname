@@ -160,6 +160,10 @@ pub struct NetSensesAdapter {
     smoothed_phot_surprise: f64,
     /// Whether we have processed at least one frame (for warmup Quiet state).
     phot_has_prev: bool,
+    /// Previous frame's per-region brightness, for the visual temporal_flux
+    /// sub-axis (flux = |brightness − prev brightness|). [0.0; VIS_REGIONS]
+    /// until the first frame.
+    phot_prev_region_brightness: [f64; crate::VIS_REGIONS],
 }
 
 impl NetSensesAdapter {
@@ -255,6 +259,7 @@ impl NetSensesAdapter {
             smoothed_phot_energy: 0.0,
             smoothed_phot_surprise: 0.0,
             phot_has_prev: false,
+            phot_prev_region_brightness: [0.0; crate::VIS_REGIONS],
         };
         (adapter, vocal_tx)
     }
@@ -350,10 +355,24 @@ impl ModalityAdapter for NetSensesAdapter {
         // Per region: brightness, R, G, B, saturation, motion, temporal_flux, edge_energy.
         let rw = GRID_W / 4;  // 40 pixels per region column
         let rh = GRID_H / 4;  // 30 pixels per region row
+
+        // Real per-pixel edge magnitude (Sobel) over the full grid luma, then
+        // averaged per region — replaces the historical `brightness*0.5` proxy
+        // (the "fake PHOT band" that vision_tier0's doc-comment calls out).
+        let mut grid_luma = vec![0.0f64; GRID_PIXELS];
+        for i in 0..GRID_PIXELS {
+            let r = frame.grid[i] as f64;
+            let g = frame.grid[GRID_PIXELS + i] as f64;
+            let b = frame.grid[2 * GRID_PIXELS + i] as f64;
+            grid_luma[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+        }
+        let grid_edge = crate::vision_tier0::sobel_magnitude(&grid_luma, GRID_W, GRID_H);
+
         for ry in 0..4usize {
             for rx in 0..4usize {
                 let region = ry * 4 + rx;
                 let mut sum_r = 0.0f32; let mut sum_g = 0.0f32; let mut sum_b = 0.0f32;
+                let mut sum_e = 0.0f64;
                 let count = (rw * rh) as f32;
                 for y in ry*rh..(ry+1)*rh {
                     for x in rx*rw..(rx+1)*rw {
@@ -361,6 +380,7 @@ impl ModalityAdapter for NetSensesAdapter {
                         sum_r += frame.grid[i];
                         sum_g += frame.grid[GRID_PIXELS + i];
                         sum_b += frame.grid[2 * GRID_PIXELS + i];
+                        sum_e += grid_edge[i];
                     }
                 }
                 let r = sum_r / count;
@@ -370,6 +390,16 @@ impl ModalityAdapter for NetSensesAdapter {
                 let max_rgb = r.max(g).max(b);
                 let min_rgb = r.min(g).min(b);
                 let saturation = if max_rgb > 0.01 { (max_rgb - min_rgb) / max_rgb } else { 0.0 };
+                let edge_energy = (sum_e / (rw * rh) as f64).clamp(0.0, 1.0);
+                // Real per-region VISUAL temporal flux = |Δ region brightness|
+                // across ticks. Replaces the bug where the AUDIO spectral-flux
+                // feature (frame.temporal_flux) was mis-routed into this VISUAL
+                // axis — feeding audio noise into vision. Distinct from the
+                // (browser-global) MOTION axis, so the cross-layer predictor that
+                // targets TEMPORAL_FLUX has a real, non-degenerate signal.
+                let prev_b = self.phot_prev_region_brightness[region];
+                let temporal_flux = ((brightness as f64) - prev_b).abs().clamp(0.0, 1.0);
+                self.phot_prev_region_brightness[region] = brightness as f64;
 
                 let base = crate::AXIS_VIS_BASE + region * crate::VIS_AXES_PER_REGION;
                 vp.push_observation(base + crate::vis_sub::BRIGHTNESS,    now_us, brightness as f64);
@@ -378,8 +408,8 @@ impl ModalityAdapter for NetSensesAdapter {
                 vp.push_observation(base + crate::vis_sub::B,             now_us, b as f64);
                 vp.push_observation(base + crate::vis_sub::SATURATION,    now_us, saturation as f64);
                 vp.push_observation(base + crate::vis_sub::MOTION,        now_us, frame.motion as f64);
-                vp.push_observation(base + crate::vis_sub::TEMPORAL_FLUX, now_us, frame.temporal_flux as f64);
-                vp.push_observation(base + crate::vis_sub::EDGE_ENERGY,   now_us, brightness as f64 * 0.5);
+                vp.push_observation(base + crate::vis_sub::TEMPORAL_FLUX, now_us, temporal_flux);
+                vp.push_observation(base + crate::vis_sub::EDGE_ENERGY,   now_us, edge_energy);
             }
         }
 

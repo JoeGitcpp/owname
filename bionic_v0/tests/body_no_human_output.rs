@@ -33,9 +33,8 @@ fn body_owned_sources_contain_no_human_readable_diagnostics() {
     // Body-owned sources = the body binary + every lib module that runs inside
     // the always-running body process (imported by `body.rs` or ticked from its
     // main loop). Observer/research tooling (observer*.rs, surface_*.rs,
-    // post_effect.rs, curriculum*.rs, capability_curriculum_governor.rs,
-    // five_phase_life.rs) is intentionally excluded — it is allowed to render
-    // human-readable output.
+    // post_effect.rs, curriculum*.rs, five_phase_life.rs) is intentionally
+    // excluded — it is allowed to render human-readable output.
     let sources = [
         // --- body binary ---
         "src/bin/body.rs",

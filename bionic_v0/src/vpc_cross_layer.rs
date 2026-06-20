@@ -104,7 +104,9 @@ pub struct AxisCrossLayerState {
 ///   - hearing: each VIB band's error predicted from its adjacent band(s);
 ///   - vision: per region, brightness error from the region's R/G/B, and
 ///     temporal-flux error from the region's motion/edge-energy;
-///   - interoception: three pairs whose dynamics are substrate-coupled.
+///   - interoception: three substrate-coupled groups — and one DELIBERATE
+///     cross-modal source (VIS_LOOMING_AXIS → INTERO_VITAL_ANXIETY) that lets the
+///     bank learn "approach predicts dread" on top of the innate reflex.
 pub fn axis_predictor_bank() -> Vec<CrossLayerPredictor> {
     let mut bank = Vec::new();
 
@@ -141,9 +143,16 @@ pub fn axis_predictor_bank() -> Vec<CrossLayerPredictor> {
     }
 
     // Interoception: a few substrate-coupled scalar pairs.
+    // Vital anxiety (dread) is predicted from the body's own metabolism
+    // (reserve, pain) AND — the prepared-learning leg of the perception→defense
+    // link — from the born-in looming/approach detector. If an approaching
+    // stimulus reliably co-occurs with rising dread (it does: tick_looming fires
+    // the innate reflex), VIS_LOOMING_AXIS's weight grows and a prior is written
+    // back; if not, LMS noise-rejection decays it to ~0. This is how "approach
+    // predicts danger" is LEARNED on top of the unconditioned reflex.
     bank.push(CrossLayerPredictor::new(
         crate::INTERO_VITAL_ANXIETY,
-        &[crate::INTERO_RESERVE, crate::INTERO_PAIN],
+        &[crate::INTERO_RESERVE, crate::INTERO_PAIN, crate::VIS_LOOMING_AXIS],
     ));
     bank.push(CrossLayerPredictor::new(
         crate::INTERO_GAP_PRESSURE,

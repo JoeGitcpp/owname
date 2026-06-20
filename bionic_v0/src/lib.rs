@@ -18,12 +18,12 @@ pub mod vital_env;
 pub mod self_model;
 pub mod dual_drive;
 pub mod vocal_drive_field;
+pub mod gaze_drive_field;
 pub mod allostatic_stability;
 pub mod auditory_visual;
 pub mod clock;
 pub mod code_ingress;
 pub mod code_ingress_adapter;
-pub mod capability_curriculum_governor;
 pub mod curriculum;
 pub mod curriculum_governor;
 pub mod curriculum_material;
@@ -201,7 +201,21 @@ pub const GAUSS_RECON_MSE_AXIS: usize  = AXIS_GAUSS_BASE + 0;
 pub const GAUSS_ACTIVE_FRAC_AXIS: usize = AXIS_GAUSS_BASE + 1;
 pub const GAUSS_SUMMARY_AXES: usize = 2;
 
-pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES + GAUSS_SUMMARY_AXES; // 161 = 16+128+10+5+2
+// --- Born-in perception→defense summary axis (2026-06-20) ---
+// A single global perceptual-summary scalar (sibling of the Gaussian summaries):
+// the rectified GROWTH of visual mass = a coarse "something is approaching /
+// expanding" signal. It is a born-in FEATURE detector (sensitive to APPROACH,
+// NOT to identity — no face/predator/enemy template; route-A compliant), mirrored
+// onto the shared substrate so it is predicted, produces err, and can serve as a
+// VPC source. It feeds the innate defensive reflex (raises INTERO_VITAL_ANXIETY)
+// — the NEGATIVE-valence perception→value entry point that the bonding path
+// (INTERO_ATTACHMENT/PRESENCE) already had on the positive side. See
+// Viewport::tick_looming + VitalCoreState::apply_perceptual_threat.
+pub const AXIS_DEFENSE_BASE: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES + GAUSS_SUMMARY_AXES; // 166
+pub const VIS_LOOMING_AXIS: usize = AXIS_DEFENSE_BASE + 0; // rectified growth of visual mass (approach)
+pub const DEFENSE_SUMMARY_AXES: usize = 1;
+
+pub const AXIS_COUNT: usize = VIB_BANDS + VIS_AXES + INTERO_AXES + CODE_AXES + GAUSS_SUMMARY_AXES + DEFENSE_SUMMARY_AXES; // 167 = 16+128+15+5+2+1
 
 pub const AXIS_VIB: usize = 0;
 pub const AXIS_SYNTH: usize = 0; // retained for backward compat
@@ -575,7 +589,12 @@ pub const SNAPSHOT_MAGIC: u64 = 0xB10B10_0000_0001;
 /// snapshot at v62 carries the wrong tower dimensionality and is rejected.
 /// The intention.rs state is persisted alongside the snapshot block; the
 /// IntentionState block is new and zeroed on first load.
-pub const SNAPSHOT_VERSION: u64 = 63;
+/// v64: born-in perception→defense axis. AXIS_COUNT 166→167 (+VIS_LOOMING_AXIS,
+/// the rectified visual-mass-growth / approach detector). The tower
+/// dimensionality shifts, so every prior snapshot at v63 is rejected. The new
+/// axis feeds the innate looming→vital_anxiety reflex and is added as a VPC
+/// source of INTERO_VITAL_ANXIETY (prepared learning of "approach predicts dread").
+pub const SNAPSHOT_VERSION: u64 = 64;
 
 /// Precision-war guard rule 2: hard ceiling on any prior magnitude written
 /// into the per-axis prior channel ("prior 精度上限 ≈ 100"). A diverged or
@@ -623,6 +642,25 @@ pub const MATURITY_GAIN: f64 = 0.01;
 /// 8× EMA anneal window long enough to matter. Applies at the call-site chokepoints
 /// in observe_vocal_reflex_closure and language_binding.
 pub const MATURITY_ADVANCE_MIN_INTERVAL_US: u64 = 1_000_000;
+
+/// Minimum Gaussian-field active fraction (active_count / GAUSS_CAP) for a
+/// pure-vision closure to carry evidence — i.e. there is real visual structure
+/// in the field to reconstruct. Below this the field is empty/near-empty
+/// ("scene absent / all died") and a visual closure there would fabricate
+/// maturity; this is the visual analog of the vocal self_bands>1e-6 /
+/// darkness→return honesty gate. ≈3/512 Gaussians — a small real object
+/// passes, an empty/dark field does not. It is a GATE only: the credited
+/// magnitude is the prediction-error-reduction `fit`, not active_frac (which is
+/// structurally small because GAUSS_CAP is large and rarely filled), so vision
+/// earns maturity at parity with the vocal path rather than ~100× weaker.
+pub const VIS_CLOSURE_ACTIVE_FRAC_MIN: f64 = 0.005;
+
+/// EMA smoothing for the visual reconstruction-MSE baseline that the pure-vision
+/// closure credits IMPROVEMENT against (~0.7–1 s at the visual tick rate).
+/// Crediting the MSE *reduction* relative to this slow baseline (not the
+/// absolute MSE) is what keeps the cold-start empty field — large but
+/// uninformative MSE — from being a 0×x=0 maturity trap.
+pub const VIS_RECON_MSE_EMA_BETA: f64 = 0.05;
 
 /// Minimum spacing between prediction_familiarity accumulation ticks. Mirrors
 /// MATURITY_ADVANCE_MIN_INTERVAL_US — prevents the dense pair path from pinning
@@ -777,6 +815,25 @@ pub fn suppression_damp_floor(maturity: f64) -> f64 {
     // Two-coefficient lerp so both endpoints are exact in f64 (the a+(b−a)·m
     // form lands at 0.44999999999999996 at m=1).
     (1.0 - m) * crate::vocal_reflex::SUPPRESSION_DAMP_FLOOR + m * SUPPRESSION_DAMP_FLOOR_MATURE
+}
+
+/// Endogenous gaze-wobble floor (fraction of the base gaze amplitude), the
+/// visual analog of `suppression_damp_floor` for the gaze drive. It is the
+/// amplitude of the body's always-on exploratory eye-wobble, which guarantees
+/// parallax even when the emergent (error-derived) gaze bias is momentarily
+/// still — so the no-motion→no-depth→no-error→no-drive 0×x=0 loop cannot form.
+///
+/// Coarse→fine: WIDE at birth (GAZE_FLOOR_NEWBORN, big undirected exploratory
+/// swings, the bootstrap escape) narrowing to GAZE_FLOOR_MATURE as the
+/// developmental clock advances, so the mature body's gaze is dominated by its
+/// precise, error-targeted bias instead of the babble wobble. BOTH endpoints are
+/// strictly > 0 — a zero mature floor would recreate the deadlock. Pure function
+/// over the developmental clock; a continuous local scalar, never a gate.
+pub const GAZE_FLOOR_NEWBORN: f64 = 1.0;
+pub const GAZE_FLOOR_MATURE: f64 = 0.15;
+pub fn gaze_babble_floor(maturity: f64) -> f64 {
+    let m = maturity.clamp(0.0, 1.0);
+    (1.0 - m) * GAZE_FLOOR_NEWBORN + m * GAZE_FLOOR_MATURE
 }
 
 // --- Endogenous Activity Laws (spec 2026-04-20) ---
