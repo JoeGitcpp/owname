@@ -39,8 +39,13 @@ fn voicing_closure_raises_efficacy() {
 
     // Repeated effective voicing whose heard-self matches the target → real
     // acoustic competence → efficacy EMA rises from 0.
+    // begin_voicing makes the organ Active so the D-fix freshness gate
+    // (vib_self_match_weight>0, voiced within 150ms) admits the heard-self as
+    // evidence — exactly the real nursery loop the docstring references. The
+    // pinned self_vocal_bands (written AFTER voicing) controls the matched shape.
     let mut t = 1_000_000u64;
     for k in 0..200u64 {
+        vp.begin_voicing(t, 0.8, 0.5, 0.5);
         *vp.self_vocal_bands.write().unwrap() = ({
             let mut s = [0.0f64; VIB_BANDS];
             s[0] = 1.0;
@@ -70,6 +75,7 @@ fn vocal_biases_survive_checkpoint_roundtrip() {
     pin_matching_self_and_target(&vp);
     let mut t = 1_000_000u64;
     for _ in 0..200 {
+        vp.begin_voicing(t, 0.8, 0.5, 0.5); // organ Active → D-fix freshness gate admits evidence
         *vp.self_vocal_bands.write().unwrap() = ({
             let mut s = [0.0f64; VIB_BANDS];
             s[0] = 1.0;

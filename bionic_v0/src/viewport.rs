@@ -1441,6 +1441,13 @@ pub struct Viewport {
     /// the first observation. Runtime-only: re-converges after a restart and is
     /// not serialized (like the efference copy).
     pub visual_recon_mse_ema: RwLock<Option<f64>>,
+    /// vocal_efficacy at the last maturity-throttle tick — the baseline the
+    /// developmental clock credits the IMPROVEMENT (rise) of competence against,
+    /// never the absolute level. Flat/declining efficacy ⇒ zero improvement ⇒ the
+    /// clock stops (kills the hallucinated-maturity ratchet that saturated m to
+    /// ~0.9955 while real skill was flat). None until the first throttle tick.
+    /// Runtime-only: re-converges after a restart, not serialized (like the EMA).
+    pub last_maturity_efficacy: RwLock<Option<f64>>,
     /// Dedupe cursor for the vocal_efficacy EMA step (last now_us it stepped on).
     /// The dense action-consequence pair path calls observe_vocal_reflex_closure K
     /// times per tick with the SAME now_us; an ungated EMA stepped K times while
@@ -1617,6 +1624,7 @@ impl Viewport {
             developmental_maturity: RwLock::new(0.0),
             last_maturity_advance_us: AtomicU64::new(0),
             visual_recon_mse_ema: RwLock::new(None),
+            last_maturity_efficacy: RwLock::new(None),
             last_efficacy_advance_us: AtomicU64::new(0),
             last_binding_pair_consumed: AtomicU64::new(u64::MAX),
             last_av_action_pair_consumed: AtomicU64::new(u64::MAX),
@@ -2381,6 +2389,25 @@ impl Viewport {
         }
         let mut m = self.developmental_maturity.write().unwrap();
         *m = (*m + c * crate::MATURITY_GAIN * (1.0 - *m)).clamp(0.0, 1.0);
+    }
+
+    /// Learning-progress developmental clock: advance maturity on the IMPROVEMENT
+    /// (rise) of competence, never the absolute level. `improvement` is the
+    /// positive per-throttle-tick rise of vocal_efficacy; a flat or declining
+    /// competence yields ≤0 and the clock holds — so maturity can no longer
+    /// ratchet to ~1.0 while real skill is flat/declining (the verified
+    /// hallucinated-maturity bug). Monotone-saturating (·(1−m)): maturity is a
+    /// competence high-water-mark — once mastered, consolidated; never advanced by
+    /// noise. Route-A: the signal is a prediction-error-derived competence rise
+    /// (Oudeyer IAC learning progress), no label, no reward. Sibling of the
+    /// vision path's improvement-credit (observe_visual_reflex_closure).
+    pub fn advance_maturity_by_progress(&self, improvement: f64) {
+        let imp = improvement.max(0.0);
+        if imp <= 0.0 {
+            return;
+        }
+        let mut m = self.developmental_maturity.write().unwrap();
+        *m = (*m + imp * crate::MATURITY_PROGRESS_GAIN * (1.0 - *m)).clamp(0.0, 1.0);
     }
 
     /// Restore the developmental clock from a checkpoint. Boot-only; clamps to
@@ -3954,7 +3981,12 @@ impl Viewport {
     /// Returns [0.0, 1.0]:
     ///   1.0 = VIB signal is entirely self-generated (echo)
     ///   0.0 = VIB signal is entirely external
-    fn compute_vib_self_match(&self, now_us: u64) -> f64 {
+    /// Pure efference-copy freshness/precision weight in [0,1]: 1 just after the
+    /// body voiced, decaying linearly to 0 at the 150ms DIVA self-feedback guard,
+    /// 0 when the organ is idle. "How fresh/trustworthy is this self-hearing as
+    /// evidence of the body's own just-produced sound." No side effects — safe to
+    /// call on the dense closure hot path (the diag-writing wrapper is separate).
+    fn vib_self_match_weight(&self, now_us: u64) -> f64 {
         let organ = self.read_vocal_organ();
         // Use the tick's now_us so the elapsed time since voicing is correct.
         let since_last_vocal = now_us.saturating_sub(organ.last_update_t_us);
@@ -3963,11 +3995,17 @@ impl Viewport {
         let active = organ.phase == crate::vocal_organ::VocalOrganPhase::Active
             && organ.breath_drive >= 0.01;
         // Simple time-based decay: shorter since vocal = more likely self.
-        let m = if !active || since_last_vocal > guard_us {
+        if !active || since_last_vocal > guard_us {
             0.0
         } else {
             (1.0 - (since_last_vocal as f64 / guard_us as f64)).clamp(0.0, 1.0)
-        };
+        }
+    }
+
+    fn compute_vib_self_match(&self, now_us: u64) -> f64 {
+        let organ = self.read_vocal_organ();
+        let since_last_vocal = now_us.saturating_sub(organ.last_update_t_us);
+        let m = self.vib_self_match_weight(now_us);
         // Phase 0 diagnosis: record the gate components so a stalled loop reveals
         // WHICH condition fails (phase idle? breath decayed? window missed?).
         {
@@ -4390,7 +4428,18 @@ impl Viewport {
         // convergence.) shape_dist is a prediction-error-derived neutral
         // quantity used as a continuous weight, NOT a reward and NOT a threshold
         // gate. None = no evidence, skip; Some(c) = acoustic-fit-weighted level.
-        let acoustic_competence: Option<f64> = if vocalized {
+        // D-fix: evidence requires FRESH efference-copy self-hearing (the body
+        // actually voiced within the 150ms DIVA self-feedback window), not merely
+        // a non-silent latched buffer. The old presence gate (self_bands.sum()>1e-6,
+        // a threshold ~6-7 orders of magnitude below the operating regime) passed
+        // ~100% of closures — including the dense action-consequence pair path
+        // firing during SILENT moments — so it rubber-stamped credit and flooded
+        // the developmental clock (closures == closures_with_evidence on every row
+        // of the 13-min call). vib_self_match_weight>0 ⟺ organ Active && voiced
+        // within 150ms. (Brown/Friston active inference: self-generated feedback is
+        // precision-weighted, never counted at full strength merely because present.)
+        let self_fresh = self.vib_self_match_weight(now_us);
+        let acoustic_competence: Option<f64> = if vocalized && self_fresh > 0.0 {
             let (self_bands, _) = self.read_self_vocal_bands();
             if self_bands.iter().sum::<f64>() > 1e-6 {
                 let target = self.read_vocal_target();
@@ -4432,7 +4481,18 @@ impl Viewport {
                 // change. The self_bands>1e-6 evidence gate above is untouched, so
                 // there is no evidence-less inflation (the old maturity=1.0 leak).
                 let seq_fit = self.vocal_sequence.read().unwrap().seq_fit().unwrap_or(0.0);
+                // F-fix lives in vocal_sequence::seq_fit (symmetric2 DTW so the
+                // (n+m) divisor is EXACT → seq_fit is a true average-per-step
+                // distance, no longer upward-biased). max() is then a fair "best of
+                // single-frame timbre vs temporal-order" view — it preserves the #8
+                // sequence-layer breakthrough (which broke the 0.23 timbre floor)
+                // without the old normalization inflating it.
                 let fit = per_frame_fit.max(seq_fit);
+                // self_fresh is the evidence GATE only (checked above), deliberately
+                // NOT folded into the magnitude: the self-play path's closure_support
+                // already carries self_match (= the same vib_self_match_weight), so
+                // multiplying here would SQUARE it and amplify the echo-domination F
+                // diagnosed. Credit = contingency × match-quality.
                 Some((closure_support.clamp(0.0, 1.0) * fit).clamp(0.0, 1.0))
             } else {
                 None
@@ -4469,8 +4529,22 @@ impl Viewport {
                 >= crate::FAMILIARITY_ADVANCE_MIN_INTERVAL_US
             {
                 bias.prediction_familiarity = (bias.prediction_familiarity + delta_fam).min(1.0);
+                // 可疑-2: predictedness-driven suppression (habituation). A
+                // well-predicted, evidence-bearing vocalization (high acoustic
+                // competence c) deposits suppression; a novel/poorly-predicted one
+                // deposits ~0 → passes through. This replaces the categorical
+                // vocalized?-label gate that left action_suppression pinned at 0 in
+                // an all-vocalized session. Shares the 1/s familiarity throttle so
+                // the dense pair path cannot ratchet the body mute (runaway self-
+                // silencing); decay_vocal_suppression (300s) gives recovery.
+                if let Some(c) = acoustic_competence {
+                    bias.action_suppression =
+                        (bias.action_suppression + c * crate::VOCAL_SUPPRESSION_GAIN).min(1.0);
+                }
                 bias.last_familiarity_advance_us = now_us;
             }
+            // Quiet-closure suppression floor (vocalized==false → silent self-
+            // regulation success), unchanged — a legitimate predictedness≈1 case.
             bias.action_suppression = (bias.action_suppression + delta_sup).min(1.0);
             // efficacy is an EMA of the acoustic-fit-weighted competence, updated
             // ONLY on closures that carry heard-self evidence. It converges toward
@@ -4505,15 +4579,33 @@ impl Viewport {
                 }
             }
         }
-        // Developmental clock: advances on earned acoustic competence only, and
-        // at most once per MATURITY_ADVANCE_MIN_INTERVAL_US. The nursery produces
-        // ~6 heard-self evidence closures/s; capping at 1/s stretches the infant
-        // period from ~3 min to ~25 min, making the 8× EMA anneal window matter.
-        if let Some(c) = acoustic_competence {
+        // Developmental clock: advances on the IMPROVEMENT of earned competence,
+        // not its absolute level, and at most once per MATURITY_ADVANCE_MIN_INTERVAL_US.
+        // The old law fed the absolute per-closure competence `c` into a monotone
+        // ratchet, so with the nursery's ~6 evidence-closures/s it saturated m to
+        // ~0.9955 in one 13-min call while real skill (shape_dist) was FLAT and
+        // efficacy was DECLINING — the verified hallucinated-maturity bug. Now the
+        // clock credits the per-tick RISE of vocal_efficacy (the evidence-gated
+        // competence EMA): a flat/declining competence earns ~0 → the clock holds.
+        // Maturity becomes a competence high-water-mark (Knudsen: close on achieved
+        // competence, not age; Oudeyer IAC: learning progress, not level). The 1/s
+        // throttle is preserved; the baseline (last_maturity_efficacy) tracks each
+        // throttle tick so the rise is measured per-second, not per-closure.
+        if acoustic_competence.is_some() {
             let last = self.last_maturity_advance_us.load(Ordering::Relaxed);
             if now_us.saturating_sub(last) >= crate::MATURITY_ADVANCE_MIN_INTERVAL_US {
                 self.last_maturity_advance_us.store(now_us, Ordering::Relaxed);
-                self.advance_maturity(c);
+                let eff_now = self.learned_bias.read().unwrap().vocal_efficacy;
+                let improvement = {
+                    let mut prev = self.last_maturity_efficacy.write().unwrap();
+                    let imp = match *prev {
+                        Some(p) => (eff_now - p).max(0.0),
+                        None => 0.0, // first throttle tick only sets the baseline
+                    };
+                    *prev = Some(eff_now);
+                    imp
+                };
+                self.advance_maturity_by_progress(improvement);
             }
         }
     }
@@ -4599,11 +4691,13 @@ impl Viewport {
         // developmental clock — continuous numeric modulation (wide at birth
         // for bootstrap escape, narrowing to the no-op 0.45 endpoint at m=1).
         let damp_floor = crate::suppression_damp_floor(self.developmental_maturity());
+        let babble_floor = crate::vocal_babble_floor(self.developmental_maturity());
         let baseline = VocalReflexState::endogenous_baseline(
             now_us,
             bias.prediction_familiarity,
             bias.action_suppression,
             damp_floor,
+            babble_floor,
         );
 
         // Quiet-history replay intensity: when the system has prior experience,
@@ -4676,11 +4770,13 @@ impl Viewport {
         // B2 enhancement: same developmental anneal of the damping floor as in
         // tick_vocal_reflex_from_pressure (single clock, single schedule).
         let damp_floor = crate::suppression_damp_floor(self.developmental_maturity());
+        let babble_floor = crate::vocal_babble_floor(self.developmental_maturity());
         let baseline = crate::vocal_reflex::VocalReflexState::endogenous_baseline(
             now_us,
             bias.prediction_familiarity,
             bias.action_suppression,
             damp_floor,
+            babble_floor,
         );
         let replay = self.global_attention.read().unwrap().replay_intensity;
         // P2: active surface aperture → vocal raw_urge.

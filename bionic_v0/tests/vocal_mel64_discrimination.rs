@@ -108,11 +108,17 @@ fn accumulate_efficacy(
     *vp.self_vocal_mel64.write().unwrap() = (self_mel, 1);
 
     // Repeatedly close with full support so the efficacy EMA settles toward fit.
+    // begin_voicing keeps the organ Active so the D-fix freshness gate admits the
+    // staged self fingerprints as evidence (since_last_vocal=0 → self_fresh=1.0 for
+    // ALL scenarios, so the match-vs-mismatch discrimination under test is intact).
     let mut t = 10u64;
     for _ in 0..400 {
+        vp.begin_voicing(t, 0.8, 0.5, 0.5);
+        // re-assert self fingerprints AFTER voicing (begin_voicing does not touch
+        // them, but be explicit so the closure compares the exact staged shapes).
+        *vp.self_vocal_bands.write().unwrap() = (self_vib, t);
+        *vp.self_vocal_mel64.write().unwrap() = (self_mel, t);
         vp.observe_vocal_reflex_closure(t, 1.0, true);
-        // re-assert self fingerprints (closure does not clear them, but the
-        // target decay tick is not run here so they persist anyway).
         t += 1_000;
     }
     vp.read_learned_bias().vocal_efficacy

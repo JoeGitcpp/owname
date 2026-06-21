@@ -171,6 +171,7 @@ fn worst_case_suppression_still_has_a_gate_crossing_phase() {
                 0.0,
                 suppression,
                 suppression_damp_floor(0.0),
+                0.0, // babble_floor OFF: this test isolates the reflex-gate crossing
             );
             // Quiescent reflex state (rising-edge encounter with the rhythm).
             let mut state = VocalReflexState::default();
@@ -310,18 +311,40 @@ fn restart_first_decay_resumes_without_spurious_wipe() {
 
 #[test]
 fn damping_floor_does_not_keep_experienced_baseline_above_zero() {
-    // familiarity → 1 ⇒ exploration_drive → 0 dominates multiplicatively; the
-    // suppression damping floor must not prop the baseline up — it is not a
-    // gate that forces experienced systems to vocalize.
+    // With the babble floor OFF (=0.0), familiarity → 1 ⇒ exploration_drive → 0
+    // dominates multiplicatively; the SUPPRESSION damping floor must not prop the
+    // baseline up — it is not a gate that forces experienced systems to vocalize.
+    // (The babble floor's deliberate non-zero prop is tested separately below.)
     let period_us: u64 = 5_000_000;
     for step in 0..200u64 {
         let now_us = 20_000_000 + step * (period_us / 200);
-        let b = VocalReflexState::endogenous_baseline(now_us, 1.0, 0.0, SUPPRESSION_DAMP_FLOOR);
+        let b = VocalReflexState::endogenous_baseline(now_us, 1.0, 0.0, SUPPRESSION_DAMP_FLOOR, 0.0);
         assert!(
             b.abs() < 1e-12,
             "experienced baseline should be zero at every phase, got {b}"
         );
     }
+}
+
+#[test]
+fn babble_floor_keeps_experienced_baseline_above_zero() {
+    // 可疑-1 fix: WITH a nonzero babble floor, a fully-familiar (experienced) body
+    // must NOT fall silent — the spontaneous babble outlet keeps an always-on
+    // exploratory floor (Warlaumont: rate stays constant). At familiarity=1 the
+    // (1−familiarity) term is 0, so exploration_drive = babble_floor > 0, and the
+    // baseline is positive at the rhythm's crest. Guards the bursts=0-all-call gap.
+    let floor = bionic_v0::vocal_babble_floor(0.0); // newborn floor, 0.42
+    let period_us: u64 = 5_000_000;
+    let mut max_b = 0.0_f64;
+    for step in 0..200u64 {
+        let now_us = 20_000_000 + step * (period_us / 200);
+        let b = VocalReflexState::endogenous_baseline(now_us, 1.0, 0.0, SUPPRESSION_DAMP_FLOOR, floor);
+        max_b = max_b.max(b);
+    }
+    assert!(
+        max_b > 0.0,
+        "with a babble floor, a fully-familiar body must still babble (got max {max_b})"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -370,10 +393,11 @@ fn mature_floor_is_mathematically_inert() {
                     familiarity,
                     suppression,
                     floor,
+                    0.0, // babble_floor OFF (cancels: same in both calls below)
                 );
                 // Un-floored original: baseline * (1 − 0.55·s). Reconstruct it
                 // from the s=0 evaluation (damping term = 1.0 there).
-                let raw = VocalReflexState::endogenous_baseline(now_us, familiarity, 0.0, floor)
+                let raw = VocalReflexState::endogenous_baseline(now_us, familiarity, 0.0, floor, 0.0)
                     * (1.0 - suppression * 0.55);
                 assert!(
                     (floored - raw).abs() < 1e-12,
@@ -394,9 +418,9 @@ fn newborn_schedule_matches_b2_constant_bit_for_bit() {
     for step in 0..200u64 {
         let now_us = 40_000_000 + step * (period_us / 200);
         for &s in &[0.0_f64, 0.0717, 0.155, 0.5, 1.0] {
-            let scheduled = VocalReflexState::endogenous_baseline(now_us, 0.0, s, floor);
+            let scheduled = VocalReflexState::endogenous_baseline(now_us, 0.0, s, floor, 0.0);
             let constant =
-                VocalReflexState::endogenous_baseline(now_us, 0.0, s, SUPPRESSION_DAMP_FLOOR);
+                VocalReflexState::endogenous_baseline(now_us, 0.0, s, SUPPRESSION_DAMP_FLOOR, 0.0);
             assert_eq!(scheduled, constant);
         }
     }

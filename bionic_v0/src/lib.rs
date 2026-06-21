@@ -636,6 +636,19 @@ pub const BINDING_PAIR_DEVIATE_MAX: f64 = 0.30;
 /// developmental timescale (hundreds of strong closures to mature).
 pub const MATURITY_GAIN: f64 = 0.01;
 
+/// How much earned competence IMPROVEMENT advances the developmental clock under
+/// the learning-progress law (`advance_maturity_by_progress`). The clock is fed
+/// the per-throttle-tick RISE of vocal_efficacy (Σ over the infant period ≈ the
+/// competence high-water-mark), NOT the absolute level — so a flat/declining
+/// competence earns ~0 and the clock stops, instead of ratcheting to ~1.0 while
+/// real skill is flat (the hallucinated-maturity bug). Calibrated against the
+/// saturating law m += imp·GAIN·(1−m): a strong learner whose efficacy peaks
+/// ~0.6 reaches m≈0.8, a weak one stays low — maturity becomes a competence
+/// high-water-mark (Knudsen: close on ACHIEVED competence, not age). Grounded in
+/// Oudeyer/Kaplan/Hafner 2007 IAC (learning progress = error-decrease, not level)
+/// and mirrors the in-repo vision sibling (observe_visual_reflex_closure).
+pub const MATURITY_PROGRESS_GAIN: f64 = 2.5;
+
 /// Minimum spacing between maturity-advancing closures. The nursery produces
 /// ~6 heard-self evidence closures per second; capping at 1/s stretches the
 /// infant period from ~3 minutes to ~25 minutes at nursery density, making the
@@ -713,6 +726,19 @@ pub const F2_SERVO_HZ: f64 = 1300.0;
 /// (≈22ms, ~1 tick at 50Hz) almost never coincided with an echo return, so
 /// solitary babble produced ~0 self-play closures and could not bootstrap.
 pub const VOCAL_SELF_PLAY_MATCH_MIN: f64 = 0.5;
+
+/// 可疑-2 fix: how much a well-predicted (high-fit, low-surprise) vocalized
+/// closure deposits into action_suppression per throttle tick (habituation of
+/// redundant self-excited babble). The old law deposited suppression ONLY on
+/// quiet (vocalized==false) closures, so a solitary all-vocalized session left
+/// action_suppression pinned at 0 (the diagnosed dead column). Now suppression
+/// scales with PREDICTEDNESS (the acoustic competence c = closure_support·fit),
+/// not a categorical label — Marsland/PNAS habituation as a continuous function
+/// of the act's own outcome, Bays/Wolpert sensory-attenuation by forward-model
+/// prediction. Small (≈0.01, the scale the bypass threshold 0.04 was tuned for)
+/// and rate-limited to 1/s so the dense pair path cannot ratchet the body mute;
+/// the existing 300s decay_vocal_suppression provides dishabituation/recovery.
+pub const VOCAL_SUPPRESSION_GAIN: f64 = 0.01;
 
 /// EMA smoothing for vocal_efficacy. Closures arrive at the orchestrator rate
 /// (tens of Hz via the action-consequence pair path), so vocal_efficacy is an
@@ -834,6 +860,25 @@ pub const GAZE_FLOOR_MATURE: f64 = 0.15;
 pub fn gaze_babble_floor(maturity: f64) -> f64 {
     let m = maturity.clamp(0.0, 1.0);
     (1.0 - m) * GAZE_FLOOR_NEWBORN + m * GAZE_FLOOR_MATURE
+}
+
+/// Endogenous vocal-babble floor — the audio analog of `gaze_babble_floor`. The
+/// spontaneous (region-A) babble outlet's drive was `(1−prediction_familiarity)
+/// ·0.60`; familiarity saturates to ~1 within a 13-min call (2-min half-life),
+/// so the only autonomous babble source decayed to ~0 and ALL voicing became
+/// externally pulled (the diagnosed "spontaneous babble never fired" — bursts=0
+/// all call). This floor keeps an always-on exploratory term so familiarity→1 can
+/// no longer zero the drive: an anti-detachment floor (Go-Explore: mastery makes a
+/// consumable drive vanish) and an anti-0×x guard (0 babble → 0 self-heard
+/// evidence → familiarity frozen — a degenerate fixed point). Warlaumont: the
+/// spontaneous RATE stays ~constant while only QUALITY improves. Coarse→fine: WIDE
+/// at birth, a thin-but-never-zero adult floor. Pure function over the
+/// developmental clock; a continuous local scalar, never a gate or reward.
+pub const VOCAL_BABBLE_FLOOR_NEWBORN: f64 = 0.42;
+pub const VOCAL_BABBLE_FLOOR_MATURE: f64 = 0.06;
+pub fn vocal_babble_floor(maturity: f64) -> f64 {
+    let m = maturity.clamp(0.0, 1.0);
+    (1.0 - m) * VOCAL_BABBLE_FLOOR_NEWBORN + m * VOCAL_BABBLE_FLOOR_MATURE
 }
 
 // --- Endogenous Activity Laws (spec 2026-04-20) ---

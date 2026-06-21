@@ -123,7 +123,11 @@ fn high_rate_unlike_closures_do_not_saturate_efficacy() {
     *vp.self_vocal_bands.write().unwrap() = (high, 1); // heard-self = unlike (high)
 
     // 5000 full-support closures (far more than saturate a ratchet in seconds).
+    // begin_voicing makes the heard-self FRESH (D-fix gate); the unlike shape then
+    // earns low fit (high shape_dist), so efficacy stays low — not zeroed by the
+    // gate (the body did voice), just bounded by the poor acoustic match.
     for k in 0..5000u64 {
+        vp.begin_voicing(1 + k, 0.8, 0.5, 0.5);
         *vp.self_vocal_bands.write().unwrap() = (high, 1 + k);
         vp.observe_vocal_reflex_closure(1 + k, 1.0, true);
     }
@@ -155,6 +159,7 @@ fn high_rate_unlike_closures_do_not_saturate_efficacy() {
     let vp2 = Arc::new(Viewport::new());
     vp2.observe_vocal_target_bands(1, 0.6, 0.4, 0.7, 0.6, low);
     for k in 0..5000u64 {
+        vp2.begin_voicing(1 + k, 0.8, 0.5, 0.5); // fresh heard-self (D-fix gate)
         *vp2.self_vocal_bands.write().unwrap() = (low, 1 + k); // heard == target
         vp2.observe_vocal_reflex_closure(1 + k, 1.0, true);
     }

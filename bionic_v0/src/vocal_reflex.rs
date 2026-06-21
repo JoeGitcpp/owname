@@ -133,6 +133,7 @@ impl VocalReflexState {
         prediction_familiarity: f64,
         action_suppression: f64,
         damp_floor: f64,
+        babble_floor: f64,
     ) -> f64 {
         // Slow oscillation: ~0.04 Hz (25-second period).
         // This is the "wave" — a substrate-level numerical rhythm that,
@@ -156,7 +157,13 @@ impl VocalReflexState {
         // 0.40 burst threshold with comfortable margin for a faint exploratory
         // vocalization (breath ≈ 0.26). Fully experienced systems (familiarity=1.0)
         // drop to zero.
-        let exploration_drive = (1.0 - prediction_familiarity) * 0.60;
+        // 可疑-1 fix: floor the exploratory drive so familiarity→1 can no longer
+        // zero spontaneous babble (the bursts=0-all-call gap). The (1−familiarity)
+        // term still QUIETS a mastered region (Moulin-Frier "redirect, don't go
+        // globally silent"); `.max(babble_floor)` installs the Warlaumont/SAC
+        // always-on floor under it. babble_floor is annealed by the developmental
+        // clock by the caller (wide at birth → thin adult floor), like damp_floor.
+        let exploration_drive = ((1.0 - prediction_familiarity) * 0.60).max(babble_floor);
 
         // Rhythm shaped by exploration drive.
         let baseline = rhythm * exploration_drive;

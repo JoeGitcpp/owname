@@ -50,6 +50,11 @@ pub const RECALL_STORE_MIN_FIT: f64 = 0.30;
 pub const RECALL_REANCHOR_MIN_FIT: f64 = 0.90;
 pub const RECALL_REANCHOR_DRIFT: f64 = 0.10;
 
+/// 可疑-4: minimum age (µs since birth) before an entry may be utility-evicted, so
+/// a freshly-inserted prototype is recalled/exercised at least once before it can
+/// be squeezed out (PER's "all experience seen at least once"). ~2s.
+pub const RECALL_EVICT_GRACE_US: u64 = 2_000_000;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecallEntry {
     pub target_mel64: [f64; BANDS],
@@ -58,6 +63,14 @@ pub struct RecallEntry {
     /// Best fit (1 - shape_dist) this correction has achieved for this target.
     pub fit: f64,
     pub last_update_t_us: u64,
+    /// 可疑-4: how many times this entry was recalled & refined (a PER-priority /
+    /// GWR-habituation utility signal). Runtime-only (not serialized yet); resets
+    /// to 0 on load until the sidecar version bump persists it.
+    pub refine_count: u32,
+    /// When this entry was first inserted (µs). Runtime-only. Powers the eviction
+    /// grace window so a fresh prototype is exercised ≥once before it can be
+    /// evicted (PER's "all experience seen at least once").
+    pub birth_t_us: u64,
 }
 
 impl Default for RecallEntry {
@@ -69,6 +82,8 @@ impl Default for RecallEntry {
             f2_off: 0.0,
             fit: 0.0,
             last_update_t_us: 0,
+            refine_count: 0,
+            birth_t_us: 0,
         }
     }
 }
@@ -76,6 +91,20 @@ impl Default for RecallEntry {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VocalTargetRecall {
     pub entries: Vec<RecallEntry>,
+    /// 可疑-4 growth telemetry (runtime-only): a constant `recall_entries`=CAP made
+    /// it impossible to tell "stored thousands of times" from "never stored". These
+    /// monotonic counters make accumulation vs churn-at-cap observable.
+    pub n_insert: u64,
+    pub n_refine: u64,
+    pub n_evict: u64,
+}
+
+/// 可疑-4 eviction utility: a high-fit, frequently-exercised prototype is worth
+/// keeping; a low-fit, never-recalled one is evicted first. fit ≥
+/// RECALL_STORE_MIN_FIT > 0 to have been stored at all, and the +1 floor keeps a
+/// brand-new (refine_count=0) entry's utility = fit·1 > 0 — never a 0×x auto-evict.
+fn recall_utility(e: &RecallEntry) -> f64 {
+    e.fit * (1.0 + (1.0 + e.refine_count as f64).ln())
 }
 
 impl VocalTargetRecall {
@@ -111,6 +140,10 @@ impl VocalTargetRecall {
             return;
         }
         if let Some((idx, _)) = self.recall(target) {
+            // A hit is a recall/refine event regardless of whether it improves the
+            // stored fit — the entry is live (exercised), which raises its utility.
+            self.entries[idx].refine_count = self.entries[idx].refine_count.saturating_add(1);
+            self.n_refine += 1;
             if fit >= self.entries[idx].fit {
                 let e = &mut self.entries[idx];
                 e.f1_off = f1_off;
@@ -125,14 +158,36 @@ impl VocalTargetRecall {
             return;
         }
         if self.entries.len() >= RECALL_CAP {
-            // Evict least-recently-updated.
-            if let Some((lru, _)) = self
+            // 可疑-4: utility eviction (PER) replacing pure age-LRU. Age-LRU
+            // silently discarded prototypes that are RARELY presented but RELIABLY
+            // useful (high fit, old last_update). Utility = fit · (1+ln(1+refine
+            // _count)): a prediction-error-derived value (fit) weighted by how often
+            // the slot was exercised. A grace window protects brand-new entries so
+            // a fresh prototype is recalled ≥once before it can be evicted; if every
+            // entry is still within grace, fall back to age-LRU.
+            let evictable: Vec<usize> = self
                 .entries
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, e)| e.last_update_t_us)
-            {
-                self.entries.swap_remove(lru);
+                .filter(|(_, e)| now_us.saturating_sub(e.birth_t_us) >= RECALL_EVICT_GRACE_US)
+                .map(|(i, _)| i)
+                .collect();
+            let victim = if !evictable.is_empty() {
+                evictable.into_iter().min_by(|&a, &b| {
+                    let ua = recall_utility(&self.entries[a]);
+                    let ub = recall_utility(&self.entries[b]);
+                    ua.partial_cmp(&ub).unwrap_or(std::cmp::Ordering::Equal)
+                })
+            } else {
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, e)| e.last_update_t_us)
+                    .map(|(i, _)| i)
+            };
+            if let Some(v) = victim {
+                self.entries.swap_remove(v);
+                self.n_evict += 1;
             }
         }
         self.entries.push(RecallEntry {
@@ -141,7 +196,17 @@ impl VocalTargetRecall {
             f2_off,
             fit,
             last_update_t_us: now_us,
+            refine_count: 0,
+            birth_t_us: now_us,
         });
+        self.n_insert += 1;
+    }
+
+    /// Growth telemetry (可疑-4): (inserts, refines, evicts) so an observer can
+    /// distinguish durable accumulation from churn-at-cap — the constant
+    /// `recall_entries`=CAP reading could not.
+    pub fn growth_counters(&self) -> (u64, u64, u64) {
+        (self.n_insert, self.n_refine, self.n_evict)
     }
 
     /// Distributed-training merge: fold another life's recall memory into this
@@ -217,9 +282,17 @@ impl VocalTargetRecall {
                 f2_off,
                 fit,
                 last_update_t_us,
+                // Not yet persisted (可疑-4 follow-up): seed birth from last_update so
+                // a loaded (old) entry is immediately past the grace window, and
+                // start refine_count fresh.
+                refine_count: 0,
+                birth_t_us: last_update_t_us,
             });
         }
-        Some(VocalTargetRecall { entries })
+        Some(VocalTargetRecall {
+            entries,
+            ..Default::default()
+        })
     }
 }
 
@@ -265,6 +338,70 @@ mod tests {
         let (ib, _) = mem.recall(&b).unwrap();
         assert!((mem.entries[ia].f2_off - 0.20).abs() < 1e-9);
         assert!((mem.entries[ib].f2_off + 0.30).abs() < 1e-9);
+    }
+
+    // One-hot targets are maximally distinct (TV distance ≈1 ≫ RECALL_MATCH_DIST),
+    // so they reliably fill the cap with non-colliding keys for eviction tests.
+    fn one_hot(idx: usize) -> [f64; BANDS] {
+        let mut m = [0.0; BANDS];
+        m[idx] = 1.0;
+        m
+    }
+
+    #[test]
+    fn utility_eviction_keeps_high_utility_and_counts_growth() {
+        // 可疑-4: at the cap, eviction picks the lowest-UTILITY entry (fit weighted
+        // by recall/refine frequency), not the least-recently-updated. A low-fit,
+        // never-recalled prototype is shed; a high-fit, frequently-exercised one
+        // survives even if it is older — the exact failure age-LRU caused.
+        let mut mem = VocalTargetRecall::default();
+        mem.store(1, &one_hot(0), 0.1, 0.1, 0.31); // WEAK: low fit, never refined
+        for i in 1..RECALL_CAP {
+            mem.store(1 + i as u64, &one_hot(i), 0.1, 0.1, 0.6);
+        }
+        assert_eq!(mem.entries.len(), RECALL_CAP, "16 one-hot targets fill the cap");
+
+        // Exercise entry 1 heavily → high refine_count → high utility.
+        for k in 0..20u64 {
+            mem.store(1000 + k, &one_hot(1), 0.1, 0.1, 0.6);
+        }
+
+        // Novel target, well past the grace window → evicts the MIN-utility entry.
+        mem.store(10 * RECALL_EVICT_GRACE_US, &one_hot(20), 0.1, 0.1, 0.6);
+
+        assert!(
+            mem.recall(&one_hot(0)).is_none(),
+            "the low-fit, never-recalled prototype must be evicted (lowest utility)"
+        );
+        assert!(
+            mem.recall(&one_hot(1)).is_some(),
+            "the high-fit, frequently-refined prototype must survive"
+        );
+        assert!(mem.recall(&one_hot(20)).is_some(), "the novel target was inserted");
+
+        let (ins, refi, evi) = mem.growth_counters();
+        assert!(ins >= RECALL_CAP as u64 + 1, "inserts counted: {ins}");
+        assert!(refi >= 20, "refines counted: {refi}");
+        assert_eq!(evi, 1, "exactly one eviction occurred: {evi}");
+    }
+
+    #[test]
+    fn fresh_entry_is_grace_protected_from_eviction() {
+        // A brand-new prototype must be recalled ≥once before it can be evicted,
+        // even if it is the lowest utility (PER: all experience seen at least once).
+        let mut mem = VocalTargetRecall::default();
+        for i in 0..RECALL_CAP {
+            mem.store(1 + i as u64, &one_hot(i), 0.1, 0.1, 0.6);
+        }
+        // Insert a fresh low-fit entry, then IMMEDIATELY (within grace) another
+        // novel target. The just-inserted fresh entry must NOT be the victim.
+        let t = 100u64; // all existing entries are still within grace too
+        mem.store(t, &one_hot(30), 0.1, 0.1, 0.31); // evicts something, inserts #30
+        mem.store(t + 1, &one_hot(31), 0.1, 0.1, 0.6); // within grace of #30
+        assert!(
+            mem.recall(&one_hot(30)).is_some(),
+            "a fresh entry within the grace window must not be evicted immediately"
+        );
     }
 
     #[test]

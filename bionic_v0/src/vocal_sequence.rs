@@ -273,13 +273,24 @@ impl VocalSequence {
             cur[0] = inf;
             for j in 1..=m {
                 let cost = spectral_shape_distance_mel64(s[i - 1], t[j - 1]);
-                let best = prev[j].min(cur[j - 1]).min(prev[j - 1]);
-                cur[j] = cost + best;
+                // F-fix (Giorgino 2009): symmetric2 step pattern — the diagonal
+                // move carries weight 2, the horizontal/vertical moves weight 1.
+                // With this weighting EVERY complete (0,0)→(n,m) path has total
+                // step-weight EXACTLY n+m, so the (n+m) divisor below is the exact
+                // average-per-step normalizer. The old symmetric1 (every move adds
+                // bare cost, divide by n+m) under-counted the path length — a
+                // diagonal advanced BOTH indices for one cost — so the distance was
+                // ~halved and seq_fit was biased HIGH, one-directionally inflating
+                // the max(per_frame_fit, seq_fit) credit.
+                let diag = prev[j - 1] + 2.0 * cost;
+                let up = prev[j] + cost;
+                let left = cur[j - 1] + cost;
+                cur[j] = diag.min(up).min(left);
             }
             std::mem::swap(&mut prev, &mut cur);
         }
-        // Normalize by an upper bound on the warping-path length so the score is
-        // utterance-length-invariant.
+        // Normalize by the warping-path step-weight (n+m), EXACT under symmetric2
+        // → a true average-per-step shape distance, utterance-length-invariant.
         let dist = prev[m] / (n + m) as f64;
         Some((1.0 - dist).clamp(0.0, 1.0))
     }
@@ -657,6 +668,42 @@ mod tests {
         assert!(
             seq_fit > per_frame + 0.1,
             "DTW alignment ({seq_fit:.3}) must beat per-frame fit ({per_frame:.3}) on a time-warped utterance"
+        );
+    }
+
+    #[test]
+    fn seq_fit_symmetric2_true_average_per_step() {
+        // Identical utterances → perfect alignment → fit ≈ 1.
+        let mut same = VocalSequence::default();
+        for _ in 0..4 {
+            same.push_self(&mel_with_peak(20));
+            same.push_target(&mel_with_peak(20));
+        }
+        let f_same = same.seq_fit().unwrap();
+        assert!(f_same > 0.999, "identical utterances must align perfectly, got {f_same}");
+
+        // Uniform mismatch: every aligned cell costs the SAME c. Under symmetric2
+        // the normalized DTW distance is exactly c (a TRUE average-per-step), so
+        // seq_fit = 1−c. The old symmetric1 normalization halved the path length
+        // and reported ≈ 1−c/2 — inflated. Assert the honest (lower) value.
+        let c = spectral_shape_distance_mel64(&mel_with_peak(10), &mel_with_peak(30));
+        assert!(c > 0.1, "precondition: distinct peaks must differ enough, c={c}");
+        let mut diff = VocalSequence::default();
+        for _ in 0..4 {
+            diff.push_self(&mel_with_peak(10));
+            diff.push_target(&mel_with_peak(30));
+        }
+        let f_diff = diff.seq_fit().unwrap();
+        let honest = 1.0 - c;
+        let inflated = 1.0 - c / 2.0;
+        assert!(
+            (f_diff - honest).abs() < 0.05,
+            "seq_fit ({f_diff:.4}) must be the true 1−c ({honest:.4}), not the \
+             symmetric1-inflated 1−c/2 ({inflated:.4})"
+        );
+        assert!(
+            f_diff < inflated - 0.05,
+            "seq_fit ({f_diff:.4}) must be markedly below the inflated value ({inflated:.4})"
         );
     }
 
