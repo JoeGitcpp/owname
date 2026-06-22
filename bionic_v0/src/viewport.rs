@@ -1441,6 +1441,18 @@ pub struct Viewport {
     /// the first observation. Runtime-only: re-converges after a restart and is
     /// not serialized (like the efference copy).
     pub visual_recon_mse_ema: RwLock<Option<f64>>,
+    /// All-time LOWEST value the slow recon-MSE baseline has ever reached — the
+    /// visual-competence high-water mark. Vision maturity advances ONLY when the
+    /// sustained reconstruction beats this (a genuinely-new level of visual skill),
+    /// not on every per-frame error reduction. A live camera scene constantly
+    /// changes, so the per-frame "improvement" credit never dried up (the treadmill:
+    /// adaptation-to-change mistaken for cumulative skill) and saturated the GLOBAL
+    /// developmental clock to 1.0 over a long call — which anneals ALL plasticity
+    /// (vocal included). None until the first observation; runtime-only.
+    pub visual_recon_mse_best: RwLock<Option<f64>>,
+    /// Own 1/s throttle cursor for the vision maturity clock, kept separate from
+    /// the vocal and binding cursors so the senses do not steal each other's slot.
+    pub last_vision_progress_us: AtomicU64,
     /// vocal_efficacy at the last maturity-throttle tick — the baseline the
     /// developmental clock credits the IMPROVEMENT (rise) of competence against,
     /// never the absolute level. Flat/declining efficacy ⇒ zero improvement ⇒ the
@@ -1640,6 +1652,8 @@ impl Viewport {
             developmental_maturity: RwLock::new(0.0),
             last_maturity_advance_us: AtomicU64::new(0),
             visual_recon_mse_ema: RwLock::new(None),
+            visual_recon_mse_best: RwLock::new(None),
+            last_vision_progress_us: AtomicU64::new(0),
             last_maturity_efficacy: RwLock::new(None),
             last_vocal_progress_us: AtomicU64::new(0),
             last_syllable_phase: RwLock::new(0.0),
@@ -4670,40 +4684,61 @@ impl Viewport {
         if !mse.is_finite() || active_frac <= crate::VIS_CLOSURE_ACTIVE_FRAC_MIN {
             return;
         }
-        // Update the slow recon-MSE baseline and read the improvement-based fit.
-        let fit = {
+        // Update the slow recon-MSE baseline (it tracks the CURRENT scene).
+        let ema_now = {
             let mut ema = self.visual_recon_mse_ema.write().unwrap();
             match *ema {
                 None => {
-                    // First observation: set the baseline, credit nothing yet
-                    // (no prior to measure improvement against).
                     *ema = Some(mse);
+                    // Seed the high-water mark alongside the baseline (separate lock,
+                    // no nesting) so the very next observation can already earn
+                    // credit; this first one credits nothing.
+                    *self.visual_recon_mse_best.write().unwrap() = Some(mse);
                     return;
                 }
                 Some(prev) => {
-                    let f = if prev > 1e-9 {
-                        ((prev - mse) / prev).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    *ema = Some(
-                        (1.0 - crate::VIS_RECON_MSE_EMA_BETA) * prev
-                            + crate::VIS_RECON_MSE_EMA_BETA * mse,
-                    );
-                    f
+                    let v = (1.0 - crate::VIS_RECON_MSE_EMA_BETA) * prev
+                        + crate::VIS_RECON_MSE_EMA_BETA * mse;
+                    *ema = Some(v);
+                    v
                 }
             }
         };
-        let c = fit;
-        if c <= 0.0 {
-            // No improvement this frame → no credit, and do NOT consume the
-            // shared throttle slot (leave it for a frame that earned something).
+        // HIGH-WATER-MARK: credit maturity ONLY when the sustained reconstruction
+        // reaches a new all-time best (lowest baseline ever). The old law credited
+        // every frame whose error beat the recent baseline — which a live, ever-
+        // changing scene supplies endlessly (the treadmill), saturating the global
+        // clock. Crediting only a genuinely-new-best stops that: once the body has
+        // achieved its best sustained prediction, scene-churn no longer matures it.
+        // Mirror of the vocal competence high-water mark.
+        let improvement = {
+            let mut best = self.visual_recon_mse_best.write().unwrap();
+            match *best {
+                None => {
+                    *best = Some(ema_now); // seed the high-water mark, credit nothing
+                    0.0
+                }
+                Some(b) => {
+                    if ema_now < b && b > 1e-9 {
+                        let imp = ((b - ema_now) / b).clamp(0.0, 1.0); // relative new-best gain
+                        *best = Some(ema_now);
+                        imp
+                    } else {
+                        0.0
+                    }
+                }
+            }
+        };
+        if improvement <= 0.0 {
             return;
         }
-        let last = self.last_maturity_advance_us.load(Ordering::Relaxed);
+        // Own throttle cursor + the same capped progress law as the vocal clock, so
+        // vision earns honest, bounded maturity that cannot saturate the global
+        // clock from scene-churn.
+        let last = self.last_vision_progress_us.load(Ordering::Relaxed);
         if now_us.saturating_sub(last) >= crate::MATURITY_ADVANCE_MIN_INTERVAL_US {
-            self.last_maturity_advance_us.store(now_us, Ordering::Relaxed);
-            self.advance_maturity(c);
+            self.last_vision_progress_us.store(now_us, Ordering::Relaxed);
+            self.advance_maturity_by_progress(improvement);
         }
     }
 

@@ -114,6 +114,40 @@ fn live_gaussian_field_path_matures_the_body() {
     );
 }
 
+/// The treadmill fix (2026-06-22): a live, ever-changing scene must NOT keep
+/// advancing maturity. The old law credited every frame whose error beat the
+/// recent baseline — adaptation-to-change endlessly mistaken for cumulative skill,
+/// which saturated the global clock over a long call. The high-water mark credits
+/// only a genuinely-new-best sustained reconstruction.
+#[test]
+fn changing_scene_does_not_treadmill_maturity() {
+    let vp = Viewport::new();
+    let mut t = 0u64;
+    vp.observe_visual_reflex_closure(t, 0.8, 0.5); // seed the baseline high
+    // Phase 1: sustained low recon error → the baseline drops to a new all-time
+    // best → genuine cumulative visual skill → maturity rises.
+    for _ in 0..150 {
+        t += SEC;
+        vp.observe_visual_reflex_closure(t, 0.1, 0.5);
+    }
+    let m_learned = vp.developmental_maturity();
+    assert!(m_learned > 0.0, "sustained recon improvement must mature, got {m_learned}");
+    // Phase 2: a CHANGING scene whose error oscillates ABOVE the best — per-frame
+    // down-swings the old law credited endlessly, but none beats the all-time best,
+    // so the high-water mark earns nothing → maturity holds (no treadmill).
+    for k in 0..120u64 {
+        t += SEC;
+        let osc = if k % 2 == 0 { 0.5 } else { 0.35 }; // both > the ~0.1 best
+        vp.observe_visual_reflex_closure(t, osc, 0.5);
+    }
+    let m_churn = vp.developmental_maturity();
+    assert!(
+        m_churn - m_learned < 0.02,
+        "a changing scene that never beats the all-time-best reconstruction must NOT \
+         keep maturing the body (treadmill): learned={m_learned}, after churn={m_churn}"
+    );
+}
+
 fn central_blob_frame() -> CameraFrame {
     let mut f = CameraFrame::zeros(0);
     let (cx, cy) = (CAM_W as f64 / 2.0, CAM_H as f64 / 2.0);
