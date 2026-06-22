@@ -56,12 +56,13 @@ use std::collections::VecDeque;
 /// Maximum simultaneously-active phoneme prototypes.
 /// 32 slots comfortably covers the phoneme inventory of most languages plus
 /// room for blends, filler sounds and novel explorations.
-/// B2 (2026-06-22): shrunk 32 → 12. The live inventory was 32/32 protos tiling
-/// the motor space at ~0.1 spacing — a discretized SMEAR, not a discrete phonemic
-/// inventory. A smaller cap forces COARSE categories (fewer, better-separated
-/// basins) and gives the inter-prototype repulsion room to actually separate
-/// them. Loading a pool saved under a larger cap truncates to the first PROTO_CAP.
-pub const PROTO_CAP: usize = 12;
+/// B2 (2026-06-22): shrunk 32 → 12 → 8. At 12 the live inventory finally began
+/// separating (nearest-neighbour rose from a ~0.1 smear to ~0.29), but it stayed
+/// 12/12 full with the closest pair (~0.22) still inside the 0.25 merge radius. A
+/// tighter cap forces FEWER, more-separated basins and gives the inter-prototype
+/// repulsion the room to push every pair clear of the merge radius. Loading a pool
+/// saved under a larger cap truncates to the first PROTO_CAP.
+pub const PROTO_CAP: usize = 8;
 
 /// Minimum rehearsal count before a proto is considered "stable" and eligible
 /// for the exploit-vs-explore tradeoff in `exploration_motor`.
@@ -380,8 +381,12 @@ impl PhonemeMemory {
     /// shared mean — the categorizing dynamic that makes babble→speech possible.
     /// Local, label-free substrate dynamics (no phoneme table, no reward).
     fn repel_from_neighbors(&mut self, idx: usize) {
-        const REPEL_RADIUS: f64 = 0.40;
-        const REPEL_STRENGTH: f64 = 0.04;
+        // Strengthened with the cap shrink (2026-06-22): the live inventory's
+        // closest pair settled at ~0.22, just inside the 0.25 merge radius. A wider
+        // radius + stronger push moves the repulsion/merge-pull equilibrium clear
+        // of the merge radius so every pair separates into a distinct basin.
+        const REPEL_RADIUS: f64 = 0.45;
+        const REPEL_STRENGTH: f64 = 0.07;
         let me = self.protos[idx].motor;
         // B2 strengthened (2026-06-22): repel from ALL neighbors within the radius,
         // not just the nearest. In a DENSE cloud (the live failure: 32 protos at
