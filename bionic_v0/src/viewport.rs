@@ -3066,36 +3066,47 @@ impl Viewport {
             0.0
         };
 
-        // Phase B2: blend in the perturbation_graph's own surprise +
-        // coordination signal. The slot-edge fabric above is the legacy
-        // routing surface; the graph IS the substrate the design doc
-        // wants reasoning to live on. A many-weak-relations graph reports
-        // high surprise (model still uncommitted); a few-strong-relations
-        // graph reports low surprise (committed habits cover most of the
-        // perturbations). Density adds to coordination — a denser graph
-        // means more things are seen together.
-        let (graph_surprise, graph_coord) = {
+        // Phase B2.0: the perturbation_graph's own surprise / coordination /
+        // instability. The slot-edge fabric above is the legacy routing surface;
+        // the graph IS the substrate the design doc wants reasoning to live on.
+        // - surprise = "uncommittedness" (1 - strength*expressivity): a
+        //   many-weak-relations graph is uncommitted (high surprise); a
+        //   few-strong-relations graph has habits covering most perturbations
+        //   (low surprise). (True per-relation predictive error is the dead C6
+        //   post_hoc_check's job; until then, uncommittedness is the proxy.)
+        // - coordination = graph_density (denser graph → more seen together).
+        // - instability = spread of relation maturities (structurally shifting).
+        let (graph_surprise, graph_coord, graph_instability, n_relations) = {
             let g = self.perturbation_graph.read().unwrap();
-            if g.relations.is_empty() {
-                (0.0, 0.0)
+            let n = g.relations.len();
+            if n == 0 {
+                (0.0, 0.0, 0.0, 0usize)
             } else {
                 let mut s = 0.0;
                 for r in &g.relations {
                     s += 1.0 - r.strength * r.expressivity;
                 }
-                let avg_uncommitted = s / g.relations.len() as f64;
-                (avg_uncommitted.clamp(0.0, 1.0), g.graph_density())
+                (
+                    (s / n as f64).clamp(0.0, 1.0),
+                    g.graph_density(),
+                    g.graph_instability(),
+                    n,
+                )
             }
         };
-        // Blend factor: small until the graph dominates routing (Phase D);
-        // mirrors the design-doc commitment to gradual cutover.
-        const PG_BLEND: f64 = 0.30;
-        let global_surprise_load = ((1.0 - PG_BLEND) * global_surprise_load
-            + PG_BLEND * graph_surprise)
-            .clamp(0.0, 1.0);
-        let coordinated_event_score = ((1.0 - PG_BLEND) * coordinated_event_score
-            + PG_BLEND * graph_coord)
-            .clamp(0.0, 1.0);
+        // B2.0 maturity-ramped blend (replaces the fixed PG_BLEND=0.30): a cold
+        // graph leans on the slot fabric (no regression / no bootstrap deadlock),
+        // a mature graph (>= PG_REASONING_FULL_RELATIONS relations) fully owns the
+        // three reasoning scalars — at which point slot attention_shares stop
+        // feeding them. routing_focus_* below is still slot-sourced (that is B2.1).
+        let pg_blend = crate::pg_reasoning_blend(n_relations);
+        let global_surprise_load =
+            ((1.0 - pg_blend) * global_surprise_load + pg_blend * graph_surprise).clamp(0.0, 1.0);
+        let coordinated_event_score =
+            ((1.0 - pg_blend) * coordinated_event_score + pg_blend * graph_coord).clamp(0.0, 1.0);
+        let network_instability_score = ((1.0 - pg_blend) * network_instability_score
+            + pg_blend * graph_instability)
+            .clamp(0.0, 2.0);
 
         // Top-N_ROUTING_FOCUS_EDGES edges by routing weight.
         let mut edge_order: [(f64, usize); N_REL_EDGES] =
@@ -3908,12 +3919,19 @@ impl Viewport {
         if self_match > crate::VOCAL_SELF_PLAY_MATCH_MIN {
             let last_sp = self.last_self_play_t_us.load(Ordering::Relaxed);
             if now_us.saturating_sub(last_sp) >= crate::VOCAL_SELF_PLAY_MIN_INTERVAL_US {
-                // closure_support here is the motor→sound contingency strength.
-                // The acoustic-fit honesty (heard-self vs target) is applied
-                // uniformly to ALL closure paths inside observe_vocal_reflex_
-                // closure, so both this self-play path and the action-consequence
-                // pair path are gated the same way — not just here.
-                let support = (self_match * vib.event_energy.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                // closure_support is the motor→sound contingency strength (how much
+                // sound the act produced), NOT the echo timing. self_match (the
+                // ~150ms voiced-recently freshness signal) is the GATE above; it
+                // must NOT scale the credit magnitude. Live telemetry showed it did:
+                // corr(efficacy, self_match)=+0.69 vs corr(efficacy, shape_dist)
+                // (real target match)≈−0.38 — so efficacy tracked "am I voicing in a
+                // tight rhythm and hearing my echo," not "do I sound like the
+                // target," and craved/crashed when late-call voicing got sparse and
+                // self_match collapsed even though shape_dist stayed fine. Dropping
+                // self_match from the magnitude lets the acoustic-fit honesty inside
+                // observe_vocal_reflex_closure carry the credit (target match), so
+                // efficacy reflects competence, not echo timing.
+                let support = vib.event_energy.clamp(0.0, 1.0);
                 self.observe_vocal_reflex_closure(now_us, support, true);
                 self.last_self_play_t_us.store(now_us, Ordering::Relaxed);
             }
