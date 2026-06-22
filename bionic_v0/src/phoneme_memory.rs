@@ -56,11 +56,28 @@ use std::collections::VecDeque;
 /// Maximum simultaneously-active phoneme prototypes.
 /// 32 slots comfortably covers the phoneme inventory of most languages plus
 /// room for blends, filler sounds and novel explorations.
-pub const PROTO_CAP: usize = 32;
+/// B2 (2026-06-22): shrunk 32 → 12. The live inventory was 32/32 protos tiling
+/// the motor space at ~0.1 spacing — a discretized SMEAR, not a discrete phonemic
+/// inventory. A smaller cap forces COARSE categories (fewer, better-separated
+/// basins) and gives the inter-prototype repulsion room to actually separate
+/// them. Loading a pool saved under a larger cap truncates to the first PROTO_CAP.
+pub const PROTO_CAP: usize = 12;
 
 /// Minimum rehearsal count before a proto is considered "stable" and eligible
 /// for the exploit-vs-explore tradeoff in `exploration_motor`.
 pub const PROTO_MIN_REHEARSALS: u64 = 6;
+
+/// Sanity ceiling on rehearsal_count. The distributed merge used to SUM counts
+/// (`+=`); because aborn seeds each ephemeral body's phoneme pool FROM master and
+/// merges it back, the merge re-added master's own seeded counts to itself, so
+/// rehearsal_count DOUBLED every ~10-min merge cycle and overflowed to ~1e19
+/// within hours (observed live: 0/32 protos had a sane count). Garbage counts
+/// broke eviction (evict least-rehearsed) and exploration (pick least-rehearsed),
+/// so the pool churned randomly and never crystallized a stable inventory. The
+/// fix is twofold: merge by MAX not SUM (idempotent under re-seed), and clamp to
+/// this ceiling everywhere (increment, merge, deserialize-heal). Far above the
+/// stable threshold and the maturity-score saturation, far below u64 overflow.
+pub const REHEARSAL_MAX: u64 = 1_000_000;
 
 /// Time window (µs) in which an external VIB event following own vocalization
 /// counts as a potential social response (Layer 3).
@@ -284,7 +301,7 @@ impl PhonemeMemory {
                     p.acoustic.resonance * (1.0 - EMA_ALPHA) + acoustic.resonance * EMA_ALPHA;
                 p.acoustic.envelope =
                     p.acoustic.envelope * (1.0 - EMA_ALPHA) + acoustic.envelope * EMA_ALPHA;
-                p.rehearsal_count += 1;
+                p.rehearsal_count = (p.rehearsal_count + 1).min(REHEARSAL_MAX);
                 p.last_voiced_us = now_us;
                 i
             }
@@ -366,30 +383,30 @@ impl PhonemeMemory {
         const REPEL_RADIUS: f64 = 0.40;
         const REPEL_STRENGTH: f64 = 0.04;
         let me = self.protos[idx].motor;
-        let mut nearest: Option<(usize, f64)> = None;
+        // B2 strengthened (2026-06-22): repel from ALL neighbors within the radius,
+        // not just the nearest. In a DENSE cloud (the live failure: 32 protos at
+        // ~0.1 spacing), pushing away from one neighbor just shoves toward another —
+        // net zero. Summing the repulsion from every nearby proto gives a real
+        // outward force that expands a packed cloud into separated basins.
+        let (mut dp, mut dr, mut dn) = (0.0_f64, 0.0_f64, 0.0_f64);
         for (j, p) in self.protos.iter().enumerate() {
             if j == idx || !p.active {
                 continue;
             }
-            let d = p.motor.dist(&me);
-            if nearest.map_or(true, |(_, nd)| d < nd) {
-                nearest = Some((j, d));
-            }
-        }
-        if let Some((j, d)) = nearest {
+            let nj = p.motor;
+            let d = nj.dist(&me);
             if d > 1e-6 && d < REPEL_RADIUS {
-                let strength = REPEL_STRENGTH * (1.0 - d / REPEL_RADIUS);
-                let nj = self.protos[j].motor;
-                // Unit vector pointing from the neighbor toward this proto.
-                let up = (me.pitch_tension - nj.pitch_tension) / d;
-                let ur = (me.resonance_pos - nj.resonance_pos) / d;
-                let un = (me.noise_mix - nj.noise_mix) / d;
-                let p = &mut self.protos[idx].motor;
-                p.pitch_tension = (p.pitch_tension + strength * up).clamp(0.0, 1.0);
-                p.resonance_pos = (p.resonance_pos + strength * ur).clamp(0.0, 1.0);
-                p.noise_mix = (p.noise_mix + strength * un).clamp(0.0, 1.0);
+                // push strength · unit(neighbor→me); strength grows as they near.
+                let s = REPEL_STRENGTH * (1.0 - d / REPEL_RADIUS) / d;
+                dp += s * (me.pitch_tension - nj.pitch_tension);
+                dr += s * (me.resonance_pos - nj.resonance_pos);
+                dn += s * (me.noise_mix - nj.noise_mix);
             }
         }
+        let p = &mut self.protos[idx].motor;
+        p.pitch_tension = (p.pitch_tension + dp).clamp(0.0, 1.0);
+        p.resonance_pos = (p.resonance_pos + dr).clamp(0.0, 1.0);
+        p.noise_mix = (p.noise_mix + dn).clamp(0.0, 1.0);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -433,8 +450,13 @@ impl PhonemeMemory {
                     p.acoustic.resonance = (p.acoustic.resonance * wa + op.acoustic.resonance * wb) / w;
                     p.acoustic.envelope = (p.acoustic.envelope * wa + op.acoustic.envelope * wb) / w;
                     p.social_response_rate = (p.social_response_rate * wa + op.social_response_rate * wb) / w;
-                    p.rehearsal_count += op.rehearsal_count;
-                    p.social_response_count += op.social_response_count;
+                    // MAX, not SUM: aborn seeds each branch's pool FROM master and
+                    // merges it back, so SUM re-added master's own seeded counts to
+                    // itself and DOUBLED every merge cycle → overflow to ~1e19. MAX
+                    // is idempotent under re-seed (a genuinely-more-rehearsed lineage
+                    // still raises the count) and clamped for safety.
+                    p.rehearsal_count = p.rehearsal_count.max(op.rehearsal_count).min(REHEARSAL_MAX);
+                    p.social_response_count = p.social_response_count.max(op.social_response_count);
                     p.last_voiced_us = p.last_voiced_us.max(op.last_voiced_us);
                 }
                 _ => {
@@ -708,7 +730,11 @@ impl PhonemeMemory {
             return None;
         }
         let n = u16::from_le_bytes(data[5..7].try_into().ok()?) as usize;
-        if n > PROTO_CAP {
+        // n may exceed PROTO_CAP when loading a pool saved under a LARGER cap (the
+        // pre-shrink 32-slot master). Read all n slots to advance the cursor, but
+        // the loop keeps only the first PROTO_CAP (its `i < PROTO_CAP` guard). Bound
+        // n to reject malformed data.
+        if n > 1024 {
             return None;
         }
         if data.len() < 7 + n * Self::BYTES_PER_PROTO {
@@ -758,10 +784,21 @@ impl PhonemeMemory {
             let spectral_center = rf64!();
             let resonance = rf64!();
             let envelope = rf64!();
-            let rehearsal_count = ru64!();
+            let mut rehearsal_count = ru64!();
             let last_voiced_us = ru64!();
             let social_response_rate = rf64!();
-            let social_response_count = ru32!();
+            let mut social_response_count = ru32!();
+            // Heal the historical merge-doubling corruption on load: any count past
+            // the sanity ceiling is unrecoverable garbage (~1e19). Reset rehearsals
+            // to the stable threshold (keep the real proto centroid, re-accumulate
+            // usage sanely) and zero out garbage social counts. Idempotent for sane
+            // files. This self-heals the master pool on the next load by any binary.
+            if rehearsal_count > REHEARSAL_MAX {
+                rehearsal_count = PROTO_MIN_REHEARSALS;
+            }
+            if social_response_count as u64 > REHEARSAL_MAX {
+                social_response_count = 0;
+            }
             if i < PROTO_CAP {
                 mem.protos[i] = PhonemeProto {
                     motor: MotorState {
@@ -818,7 +855,41 @@ mod tests {
         let shared = mainline.protos.iter()
             .filter(|p| p.active)
             .find(|p| p.motor.dist(&ms(0.5, 0.4, 0.1)) < 0.25).unwrap();
-        assert_eq!(shared.rehearsal_count, 4, "rehearsal evidence summed across branches");
+        // MAX, not SUM: a more-rehearsed lineage (branch=3) raises the count, but
+        // re-merging never doubles (idempotent under aborn's seed-from-master).
+        assert_eq!(shared.rehearsal_count, 3, "rehearsal evidence takes the max across branches");
+    }
+
+    #[test]
+    fn merge_is_idempotent_no_rehearsal_doubling() {
+        // The corruption root cause: aborn seeds each branch FROM master and merges
+        // it back. Re-merging a clone (the seeded baseline) must NOT inflate counts.
+        let mut master = PhonemeMemory::new();
+        for _ in 0..5 { master.record_voiced(ms(0.5, 0.4, 0.1), ac(0.5, 0.4, 0.6), 1_000); }
+        let count0 = master.protos.iter().find(|p| p.active).unwrap().rehearsal_count;
+        assert_eq!(count0, 5);
+        // Re-merge the seed (a deserialize round-trip from master = exactly how
+        // aborn re-seeds a branch) many times.
+        let seed = PhonemeMemory::deserialize(&master.serialize()).unwrap();
+        for _ in 0..40 { master.merge(&seed); }
+        let count1 = master.protos.iter().find(|p| p.active).unwrap().rehearsal_count;
+        assert_eq!(count1, 5, "re-merging the seed must not double/grow the count (got {count1})");
+        assert!(count1 <= REHEARSAL_MAX, "count bounded by the sanity ceiling");
+    }
+
+    #[test]
+    fn deserialize_heals_garbage_rehearsal_count() {
+        // A pool whose counts overflowed to garbage (~1e19) must heal on load:
+        // garbage reset to the stable threshold, real centroids preserved.
+        let mut pm = PhonemeMemory::new();
+        pm.record_voiced(ms(0.5, 0.4, 0.1), ac(0.5, 0.4, 0.6), 1_000);
+        // Inject the historical corruption.
+        pm.protos[0].rehearsal_count = 16_950_730_549_853_757_692; // observed live garbage
+        let bytes = pm.serialize();
+        let healed = PhonemeMemory::deserialize(&bytes).expect("deserialize");
+        let p = healed.protos.iter().find(|p| p.active).unwrap();
+        assert_eq!(p.rehearsal_count, PROTO_MIN_REHEARSALS, "garbage count healed to stable threshold");
+        assert!((p.motor.pitch_tension - 0.5).abs() < 1e-9, "real centroid preserved through heal");
     }
 
     #[test]
@@ -925,6 +996,42 @@ mod tests {
         assert!(
             d1 > d0 + 0.02,
             "protos must SEPARATE into distinct basins under repulsion: d0={d0:.3} → d1={d1:.3}"
+        );
+    }
+
+    #[test]
+    fn dense_cloud_expands_under_all_neighbor_repulsion() {
+        // The live failure: many protos packed at ~0.1 spacing (a smear). All-
+        // neighbor repulsion must EXPAND a packed cloud — pushing away from one
+        // neighbor alone nets zero in a crowd, summing over all gives real spread.
+        let mut pm = PhonemeMemory::new();
+        // 4 protos in a tight square: side 0.26 (>MATCH_RADIUS 0.25 → no merge),
+        // diagonal 0.37 (<REPEL_RADIUS 0.40 → all pairs repel).
+        let pts = [(0.40, 0.40), (0.40, 0.66), (0.66, 0.40), (0.66, 0.66)];
+        for &(p, r) in &pts {
+            pm.record_voiced(ms(p, r, 0.5), ac(0.5, 0.5, 0.5), 1_000);
+        }
+        assert_eq!(pm.active_count(), 4, "4 distinct protos");
+        let mean_pd = |pm: &PhonemeMemory| {
+            let ps: Vec<_> = pm.protos.iter().filter(|p| p.active).collect();
+            let (mut s, mut c) = (0.0, 0);
+            for a in 0..ps.len() {
+                for b in a + 1..ps.len() {
+                    s += ps[a].motor.dist(&ps[b].motor);
+                    c += 1;
+                }
+            }
+            s / c as f64
+        };
+        let d0 = mean_pd(&pm);
+        for k in 0..200u64 {
+            let (p, r) = pts[(k as usize) % 4];
+            pm.record_voiced(ms(p, r, 0.5), ac(0.5, 0.5, 0.5), 2_000 + k * 1_000);
+        }
+        let d1 = mean_pd(&pm);
+        assert!(
+            d1 > d0 + 0.03,
+            "a packed cloud must EXPAND under all-neighbor repulsion: d0={d0:.3} → d1={d1:.3}"
         );
     }
 
