@@ -49,14 +49,69 @@ fn progress_law_credits_improvement_only() {
     let m2 = vp.developmental_maturity();
     assert!(m2 > m1 && m2 < 1.0, "saturating-monotone, got {m2}");
 
-    // Sustained large improvement may legitimately reach the ceiling (a fully
-    // mastered competence is fully mature) — verify it clamps, not overflows.
+    // Sustained large improvement approaches the ceiling GRADUALLY (the per-tick
+    // cap means no single second can clamp to 1.0 — it asymptotes over many
+    // steps), and never overflows past 1.0.
     for _ in 0..200 {
         vp.advance_maturity_by_progress(0.5);
     }
+    let m3 = vp.developmental_maturity();
     assert!(
-        (vp.developmental_maturity() - 1.0).abs() < 1e-9,
-        "sustained improvement saturates to exactly 1.0 (clamped)"
+        m3 > 0.99 && m3 <= 1.0,
+        "sustained improvement asymptotes toward (but is bounded by) 1.0, got {m3}"
+    );
+}
+
+/// Defense-in-depth: a single pathological improvement (the stale-baseline
+/// overshoot that clamped maturity to 1.0 in one tick post-deploy) must NOT
+/// saturate the clock — the per-tick cap bounds the step.
+#[test]
+fn large_improvement_cannot_saturate_in_one_tick() {
+    let vp = Viewport::new();
+    vp.advance_maturity_by_progress(0.40); // the t=24s overshoot value
+    let m = vp.developmental_maturity();
+    assert!(
+        m > 0.0 && m < 0.1,
+        "one tick must not saturate — capped step bounds it well below 1.0, got {m}"
+    );
+}
+
+/// Regression for the post-deploy t=24s jump: vision closures advance the SHARED
+/// maturity throttle cursor ~50×/s and used to starve the vocal-progress baseline
+/// refresh, so when efficacy had climbed and vision finally yielded the slot the
+/// stale gap clamped maturity to exactly 1.0 in one tick. With an own cursor +
+/// high-water-mark baseline + per-tick cap, a burst of vision closures between
+/// vocal closures must produce only small, smooth maturity steps.
+#[test]
+fn vision_burst_cannot_starve_vocal_baseline_into_a_jump() {
+    let vp = Arc::new(Viewport::new());
+    let mut t = T0;
+    let mut prev_m = 0.0f64;
+    let mut max_step = 0.0f64;
+    let mut mse = 0.9f64;
+    for _ in 0..120u64 {
+        // a burst of improving vision closures this second (advance the shared cursor)
+        for k in 0..40u64 {
+            mse *= 0.999;
+            vp.observe_visual_reflex_closure(t + k * 1_000, mse, 0.5);
+        }
+        // then one genuine vocal evidence closure (efficacy keeps climbing)
+        voice_and_hear(&vp, t);
+        vp.observe_vocal_reflex_closure(t + 60_000, 0.8, true);
+        let m = vp.developmental_maturity();
+        max_step = max_step.max(m - prev_m);
+        prev_m = m;
+        t += SEC + 100_000;
+    }
+    assert!(
+        max_step < 0.2,
+        "maturity must rise smoothly; a vision-starved stale baseline caused a unit \
+         jump (largest single-step Δm was {max_step})"
+    );
+    assert!(
+        vp.developmental_maturity() < 0.999,
+        "must not saturate to 1.0, got {}",
+        vp.developmental_maturity()
     );
 }
 

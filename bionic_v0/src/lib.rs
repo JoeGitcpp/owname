@@ -647,7 +647,16 @@ pub const MATURITY_GAIN: f64 = 0.01;
 /// high-water-mark (Knudsen: close on ACHIEVED competence, not age). Grounded in
 /// Oudeyer/Kaplan/Hafner 2007 IAC (learning progress = error-decrease, not level)
 /// and mirrors the in-repo vision sibling (observe_visual_reflex_closure).
-pub const MATURITY_PROGRESS_GAIN: f64 = 2.5;
+pub const MATURITY_PROGRESS_GAIN: f64 = 1.0;
+
+/// Hard ceiling on the per-second competence improvement credited to the clock.
+/// Defense-in-depth against the t=24s overshoot bug: if `improvement·GAIN ≥ 1`,
+/// the saturating `(1−m)` term cannot tame the step and `m` clamps straight to
+/// 1.0 in a single tick. With STEP_MAX=0.05 and GAIN=1.0 the largest possible
+/// step factor is 0.05 — no honest (or glitched) single second can saturate the
+/// clock. A genuine fast learner still matures over tens of seconds of sustained
+/// new-high-water-mark competence.
+pub const MATURITY_PROGRESS_STEP_MAX: f64 = 0.05;
 
 /// Minimum spacing between maturity-advancing closures. The nursery produces
 /// ~6 heard-self evidence closures per second; capping at 1/s stretches the
@@ -735,10 +744,14 @@ pub const VOCAL_SELF_PLAY_MATCH_MIN: f64 = 0.5;
 /// scales with PREDICTEDNESS (the acoustic competence c = closure_support·fit),
 /// not a categorical label — Marsland/PNAS habituation as a continuous function
 /// of the act's own outcome, Bays/Wolpert sensory-attenuation by forward-model
-/// prediction. Small (≈0.01, the scale the bypass threshold 0.04 was tuned for)
-/// and rate-limited to 1/s so the dense pair path cannot ratchet the body mute;
-/// the existing 300s decay_vocal_suppression provides dishabituation/recovery.
-pub const VOCAL_SUPPRESSION_GAIN: f64 = 0.01;
+/// prediction. Rate-limited to 1/s so the dense pair path cannot ratchet the body
+/// mute; the existing 300s decay_vocal_suppression provides dishabituation. Sized
+/// against that decay so suppression settles to a BOUNDED steady state, not 1.0:
+/// per-1s deposit c·GAIN vs decay fraction (1−0.5^(1/300))≈0.00231 gives a fixed
+/// point s* = c·GAIN/0.00231; GAIN=0.001 with typical c≈0.85 ⇒ s*≈0.37 (moderate
+/// habituation that damps but never mutes). The first post-deploy call exposed
+/// GAIN=0.01 ⇒ s*≈3.7 ⇒ pinned at 1.0 — a level-deposit/decay imbalance.
+pub const VOCAL_SUPPRESSION_GAIN: f64 = 0.001;
 
 /// EMA smoothing for vocal_efficacy. Closures arrive at the orchestrator rate
 /// (tens of Hz via the action-consequence pair path), so vocal_efficacy is an

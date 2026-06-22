@@ -1448,6 +1448,13 @@ pub struct Viewport {
     /// ~0.9955 while real skill was flat). None until the first throttle tick.
     /// Runtime-only: re-converges after a restart, not serialized (like the EMA).
     pub last_maturity_efficacy: RwLock<Option<f64>>,
+    /// Own 1/s throttle cursor for the vocal LEARNING-PROGRESS clock. Kept SEPARATE
+    /// from last_maturity_advance_us: the vision path advances that shared cursor
+    /// ~50×/s and used to starve the vocal block of its slot, freezing the
+    /// last_maturity_efficacy baseline near 0 while efficacy climbed; the first
+    /// second vision yielded the slot, the stale gap (≈0.40)·GAIN overshot and
+    /// clamped maturity to exactly 1.0 in one tick (the post-deploy t=24s jump).
+    pub last_vocal_progress_us: AtomicU64,
     /// Dedupe cursor for the vocal_efficacy EMA step (last now_us it stepped on).
     /// The dense action-consequence pair path calls observe_vocal_reflex_closure K
     /// times per tick with the SAME now_us; an ungated EMA stepped K times while
@@ -1625,6 +1632,7 @@ impl Viewport {
             last_maturity_advance_us: AtomicU64::new(0),
             visual_recon_mse_ema: RwLock::new(None),
             last_maturity_efficacy: RwLock::new(None),
+            last_vocal_progress_us: AtomicU64::new(0),
             last_efficacy_advance_us: AtomicU64::new(0),
             last_binding_pair_consumed: AtomicU64::new(u64::MAX),
             last_av_action_pair_consumed: AtomicU64::new(u64::MAX),
@@ -2402,7 +2410,11 @@ impl Viewport {
     /// (Oudeyer IAC learning progress), no label, no reward. Sibling of the
     /// vision path's improvement-credit (observe_visual_reflex_closure).
     pub fn advance_maturity_by_progress(&self, improvement: f64) {
-        let imp = improvement.max(0.0);
+        // Cap the per-tick improvement BEFORE applying gain: if improvement·GAIN ≥ 1
+        // the saturating (1−m) term cannot tame the step and m clamps straight to
+        // 1.0 in a single tick (the verified t=24s overshoot). MATURITY_PROGRESS_
+        // STEP_MAX keeps any one second's step far below saturation.
+        let imp = improvement.clamp(0.0, crate::MATURITY_PROGRESS_STEP_MAX);
         if imp <= 0.0 {
             return;
         }
@@ -4592,17 +4604,29 @@ impl Viewport {
         // throttle is preserved; the baseline (last_maturity_efficacy) tracks each
         // throttle tick so the rise is measured per-second, not per-closure.
         if acoustic_competence.is_some() {
-            let last = self.last_maturity_advance_us.load(Ordering::Relaxed);
+            // Own throttle cursor (NOT the shared last_maturity_advance_us): the
+            // vision path advances that cursor ~50×/s and would otherwise starve
+            // this block of its 1/s slot, freezing the baseline (the t=24s jump).
+            let last = self.last_vocal_progress_us.load(Ordering::Relaxed);
             if now_us.saturating_sub(last) >= crate::MATURITY_ADVANCE_MIN_INTERVAL_US {
-                self.last_maturity_advance_us.store(now_us, Ordering::Relaxed);
+                self.last_vocal_progress_us.store(now_us, Ordering::Relaxed);
                 let eff_now = self.learned_bias.read().unwrap().vocal_efficacy;
+                // Credit only a NEW competence HIGH-WATER-MARK, measured against the
+                // running max (not the previous tick). Three properties fall out:
+                //   * jitter BELOW the peak earns 0 — no rectified-noise inflation
+                //     (a per-tick delta would sum every up-wiggle of the noisy EMA);
+                //   * a sustained plateau earns 0 — the clock holds (Knudsen: close
+                //     on achieved competence; Oudeyer IAC: progress, not level);
+                //   * a stale/late baseline can no longer manufacture a large step,
+                //     because the max only ever RISES (eff_now − peak ≤ tick delta).
+                // advance_maturity_by_progress additionally caps the step.
                 let improvement = {
-                    let mut prev = self.last_maturity_efficacy.write().unwrap();
-                    let imp = match *prev {
+                    let mut peak = self.last_maturity_efficacy.write().unwrap();
+                    let imp = match *peak {
                         Some(p) => (eff_now - p).max(0.0),
-                        None => 0.0, // first throttle tick only sets the baseline
+                        None => 0.0, // first tick only seeds the baseline
                     };
-                    *prev = Some(eff_now);
+                    *peak = Some(peak.map_or(eff_now, |p| p.max(eff_now)));
                     imp
                 };
                 self.advance_maturity_by_progress(improvement);
