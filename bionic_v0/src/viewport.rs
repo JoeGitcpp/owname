@@ -1455,6 +1455,15 @@ pub struct Viewport {
     /// second vision yielded the slot, the stale gap (≈0.40)·GAIN overshot and
     /// clamped maturity to exactly 1.0 in one tick (the post-deploy t=24s jump).
     pub last_vocal_progress_us: AtomicU64,
+    /// Last observed value of the organ's continuous syllable-frame phase. A new
+    /// syllable opening is detected as the phase wrapping (current < last) — a
+    /// continuous-signal event derived from the aperture oscillator, NOT a discrete
+    /// phase-machine check. This is the clock that drives one phoneme-motor sample
+    /// per syllable (so the inventory is populated by live voicing, ~3/s, and the
+    /// competition/repulsion dynamics actually fire), replacing the old gate that
+    /// fired only on a fresh-utterance organ transition the continuous voicing
+    /// stream almost never produced.
+    pub last_syllable_phase: RwLock<f64>,
     /// Dedupe cursor for the vocal_efficacy EMA step (last now_us it stepped on).
     /// The dense action-consequence pair path calls observe_vocal_reflex_closure K
     /// times per tick with the SAME now_us; an ungated EMA stepped K times while
@@ -1633,6 +1642,7 @@ impl Viewport {
             visual_recon_mse_ema: RwLock::new(None),
             last_maturity_efficacy: RwLock::new(None),
             last_vocal_progress_us: AtomicU64::new(0),
+            last_syllable_phase: RwLock::new(0.0),
             last_efficacy_advance_us: AtomicU64::new(0),
             last_binding_pair_consumed: AtomicU64::new(u64::MAX),
             last_av_action_pair_consumed: AtomicU64::new(u64::MAX),
@@ -5268,11 +5278,24 @@ impl Viewport {
         let is_active = self.read_vocal_organ().phase == VocalOrganPhase::Active;
 
         // ── L1/L2 (PhonemeMemory) ─────────────────────────────────────────────
-        // On a new burst: draw exploration motor params (babble-or-practice) and
-        // record the voiced event.  Adjust-voicing continues the existing organ
-        // state and does not re-sample, keeping the articulation stable within
-        // a single utterance.
-        let (final_pitch, final_resonance, final_noise) = if !is_active {
+        // A new SYLLABLE opening clocks one phoneme-motor sample. The opening is
+        // detected as the continuous aperture-oscillator phase wrapping past its
+        // peak — a signal-derived event, NOT a discrete phase-machine check. Each
+        // opening draws an exploration motor (babble-or-practice) and records it
+        // (which fires the inter-prototype competition + repulsion that crystallise
+        // a discrete inventory), then sets this syllable's articulation; between
+        // openings the live drive carries it. This replaces the prior gate that
+        // fired only on a fresh-utterance organ transition — which the continuous
+        // voicing stream produces almost never, so the inventory was never written
+        // from live voicing (observed: every proto frozen at its seed value).
+        let syllable_onset = {
+            let cur = self.read_vocal_organ().syllable_phase;
+            let mut last = self.last_syllable_phase.write().unwrap();
+            let onset = cur + 1e-9 < *last; // phase wrapped 2π→0 → a new opening
+            *last = cur;
+            onset
+        };
+        let (final_pitch, final_resonance, final_noise) = if syllable_onset || !is_active {
             use crate::phoneme_memory::{AcousticState, MotorState};
             let base = MotorState {
                 pitch_tension: combined.pitch,
