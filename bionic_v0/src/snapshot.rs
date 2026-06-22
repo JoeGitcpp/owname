@@ -2443,6 +2443,9 @@ fn read_vocal_organ_snapshot_v1(bytes: &[u8], cur: &mut usize) -> VocalOrganStat
         voiced_ratio: 0.0, breath_noise_ratio: 0.0,
         envelope_attack: 0.0, envelope_decay: 0.0, envelope_sustain: 0.0,
         phase, last_update_t_us,
+        // Transient articulator-oscillator state — re-derived from live voicing,
+        // not persisted; default on restore (no snapshot version bump).
+        aperture: 1.0, syllable_phase: 0.0,
     }
 }
 
@@ -2495,6 +2498,10 @@ fn read_vocal_organ_snapshot(bytes: &[u8], cur: &mut usize) -> VocalOrganState {
         envelope_sustain,
         phase,
         last_update_t_us,
+        // Transient articulator-oscillator state — re-derived from live voicing,
+        // not persisted; default on restore (no snapshot version bump).
+        aperture: 1.0,
+        syllable_phase: 0.0,
     }
 }
 

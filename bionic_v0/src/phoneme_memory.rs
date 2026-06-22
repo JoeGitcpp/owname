@@ -346,7 +346,50 @@ impl PhonemeMemory {
             proto_idx: Some(idx),
             motor,
         });
+        // B2: after rehearsing/birthing, push this proto AWAY from its nearest
+        // neighbor so distinct gestures separate into discrete basins.
+        self.repel_from_neighbors(idx);
         idx
+    }
+
+    /// B2 (2026-06-22): anti-Hebbian inter-prototype repulsion. The EMA merge in
+    /// `record_voiced` is mean-seeking — within a basin it (correctly) refines
+    /// toward the exemplar centroid, but it gives NO force separating distinct
+    /// protos, so the inventory drifts into one overlapping cloud (the confirmed
+    /// mean-collapse). This adds the DIVERGENT term: push the just-updated proto
+    /// away from its nearest OTHER active proto, strength growing as they get
+    /// closer and vanishing beyond REPEL_RADIUS. Distinct gestures thus settle
+    /// into SEPARATED basins (a discrete inventory) instead of diluting to a
+    /// shared mean — the categorizing dynamic that makes babble→speech possible.
+    /// Local, label-free substrate dynamics (no phoneme table, no reward).
+    fn repel_from_neighbors(&mut self, idx: usize) {
+        const REPEL_RADIUS: f64 = 0.40;
+        const REPEL_STRENGTH: f64 = 0.04;
+        let me = self.protos[idx].motor;
+        let mut nearest: Option<(usize, f64)> = None;
+        for (j, p) in self.protos.iter().enumerate() {
+            if j == idx || !p.active {
+                continue;
+            }
+            let d = p.motor.dist(&me);
+            if nearest.map_or(true, |(_, nd)| d < nd) {
+                nearest = Some((j, d));
+            }
+        }
+        if let Some((j, d)) = nearest {
+            if d > 1e-6 && d < REPEL_RADIUS {
+                let strength = REPEL_STRENGTH * (1.0 - d / REPEL_RADIUS);
+                let nj = self.protos[j].motor;
+                // Unit vector pointing from the neighbor toward this proto.
+                let up = (me.pitch_tension - nj.pitch_tension) / d;
+                let ur = (me.resonance_pos - nj.resonance_pos) / d;
+                let un = (me.noise_mix - nj.noise_mix) / d;
+                let p = &mut self.protos[idx].motor;
+                p.pitch_tension = (p.pitch_tension + strength * up).clamp(0.0, 1.0);
+                p.resonance_pos = (p.resonance_pos + strength * ur).clamp(0.0, 1.0);
+                p.noise_mix = (p.noise_mix + strength * un).clamp(0.0, 1.0);
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -821,6 +864,68 @@ mod tests {
         pm.record_voiced(m2, ac, 2_000_000);
         assert_eq!(pm.active_count(), 1, "nearby motors should merge");
         assert_eq!(pm.protos[0].rehearsal_count, 2);
+    }
+
+    #[test]
+    fn protos_mean_collapse_no_separation() {
+        // PROBE (2026-06-22): two DISTINCT gestures within MATCH_RADIUS(0.25) do not
+        // form two separated categories — they collapse into ONE proto whose
+        // centroid drifts to their MEAN via EMA, with zero inter-proto repulsion.
+        // Convergent (mean-seeking) dynamics, the mathematical opposite of
+        // categorization: the memory cannot crystallize a discrete inventory, so
+        // there is nothing discrete to sequence/reinforce. Confirms the binding
+        // constraint alongside the combine() midpoint proof.
+        let mut pm = PhonemeMemory::new();
+        let a = MotorState { pitch_tension: 0.40, resonance_pos: 0.40, noise_mix: 0.0 };
+        let b = MotorState { pitch_tension: 0.55, resonance_pos: 0.55, noise_mix: 0.0 }; // dist≈0.21 < 0.25
+        let ac = AcousticState::default();
+        for k in 0..200u64 {
+            let m = if k % 2 == 0 { a } else { b };
+            pm.record_voiced(m, ac, 1_000 + k * 1_000);
+        }
+        assert_eq!(
+            pm.active_count(),
+            1,
+            "two within-radius gestures collapse into ONE proto, not two categories"
+        );
+        let cen = pm.protos.iter().find(|p| p.active).unwrap().motor.pitch_tension;
+        let mean = 0.475; // (0.40 + 0.55) / 2 — expresses NEITHER gesture
+        assert!(
+            (cen - mean).abs() < 0.05,
+            "the single proto sits at the MEAN {mean} of the two gestures (neither a=0.40 nor \
+             b=0.55), got {cen} — mean-collapse, no separation"
+        );
+    }
+
+    #[test]
+    fn protos_repel_into_separated_basins() {
+        // B2: distinct protos (>MATCH_RADIUS apart) actively REPEL — anti-Hebbian
+        // push-apart — so the inventory forms SEPARATED basins instead of drifting
+        // toward a shared mean. The divergent (categorizing) dynamic the mean-
+        // seeking merge alone lacked. Inverts protos_mean_collapse_no_separation.
+        let mut pm = PhonemeMemory::new();
+        let a = MotorState { pitch_tension: 0.40, resonance_pos: 0.50, noise_mix: 0.0 };
+        let b = MotorState { pitch_tension: 0.70, resonance_pos: 0.50, noise_mix: 0.0 }; // dist 0.30 > 0.25
+        let ac = AcousticState::default();
+        pm.record_voiced(a, ac, 1_000);
+        pm.record_voiced(b, ac, 2_000);
+        assert_eq!(pm.active_count(), 2, "two distinct gestures = two protos");
+        let dist = |pm: &PhonemeMemory| {
+            let ps: Vec<_> = pm.protos.iter().filter(|p| p.active).collect();
+            ps[0].motor.dist(&ps[1].motor)
+        };
+        let d0 = dist(&pm);
+        // Rehearse each cluster repeatedly; repulsion should push the basins apart.
+        for k in 0..200u64 {
+            let m = if k % 2 == 0 { a } else { b };
+            pm.record_voiced(m, ac, 3_000 + k * 1_000);
+        }
+        assert_eq!(pm.active_count(), 2, "still two protos (repulsion does not spawn/merge)");
+        let d1 = dist(&pm);
+        assert!(
+            d1 > d0 + 0.02,
+            "protos must SEPARATE into distinct basins under repulsion: d0={d0:.3} → d1={d1:.3}"
+        );
     }
 
     #[test]

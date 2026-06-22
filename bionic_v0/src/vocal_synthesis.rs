@@ -214,8 +214,12 @@ impl VocalSynthesizer {
             // Aspiration noise (pink, gated by noise_mix and breath)
             let asp = self.pink.next() * noise * 0.20 * breath;
 
-            // Amplitude envelope
-            let target_env = breath;
+            // Amplitude envelope, gated by the vocal APERTURE: the syllable-frame
+            // oscillator's open→close cycle modulates loudness, turning a held
+            // breath into a sequence of CV-like syllables (open vowel + constricted
+            // closure) instead of one flat drone. aperture is floored (never 0) so
+            // a thread of self-sound survives the closure (anti-0×x).
+            let target_env = breath * organ.aperture;
             if target_env > self.env {
                 self.env += attack * (target_env - self.env);
             } else {
@@ -256,7 +260,39 @@ mod tests {
             envelope_sustain:   breath,
             phase:              VocalOrganPhase::Active,
             last_update_t_us:   0,
+            aperture:           1.0,
+            syllable_phase:     0.0,
         }
+    }
+
+    #[test]
+    fn aperture_segments_synthesis_into_syllables() {
+        // The audible signature of canonical babble: a held breath comes out
+        // SEGMENTED (amplitude modulated at the syllable rate), not as one flat
+        // drone. Drive the organ's syllable oscillator across frames and confirm
+        // the per-frame RMS is deeply modulated.
+        let mut synth = VocalSynthesizer::new();
+        let mut o = VocalOrganState::default();
+        o.begin_voicing(0, 0.9, 0.5, 0.5);
+        let frame = 512;
+        let mut rms = Vec::new();
+        let mut t = 0u64;
+        for _ in 0..90 {
+            t += 11_600; // ≈ one 512-sample frame at 44.1 kHz
+            o.adjust_toward(t, 0.9, 0.5, 0.5);
+            let pcm = synth.synthesize(&o, 1.0, frame);
+            let e = (pcm.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / frame as f64).sqrt();
+            rms.push(e);
+        }
+        let mx = rms.iter().cloned().fold(0.0_f64, f64::max);
+        let mn = rms.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(mx > 1e-4, "must produce sound (max RMS {mx})");
+        assert!(
+            mx / mn.max(1e-9) > 3.0,
+            "held voicing must be SEGMENTED into syllables (amplitude modulated), \
+             max/min frame RMS = {:.1}",
+            mx / mn.max(1e-9)
+        );
     }
 
     fn fft_harmonics(samples: &[f32], f0: f64, sr: f64) -> Vec<f64> {

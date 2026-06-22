@@ -134,6 +134,8 @@ fn live_human_nursery_summarizes_life_sign_vocal_visual_and_reentry_evidence() {
         envelope_sustain: 0.0,
         phase: VocalOrganPhase::Active,
         last_update_t_us: 2_000,
+        aperture: 1.0,
+        syllable_phase: 0.0,
     };
     vocal.action_output.n_write_epochs = 1;
     vocal.action_output.write_epoch_history = vec![SnapshotWriteEpochRecord {
@@ -165,6 +167,8 @@ fn live_human_nursery_summarizes_life_sign_vocal_visual_and_reentry_evidence() {
         envelope_sustain: 0.0,
         phase: VocalOrganPhase::Active,
         last_update_t_us: 2_000,
+        aperture: 1.0,
+        syllable_phase: 0.0,
     };
     closure.action_output.n_write_epochs = 1;
     closure.action_output.write_epoch_history = vec![SnapshotWriteEpochRecord {

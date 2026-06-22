@@ -14,6 +14,13 @@
 
 use crate::substrate::unit;
 
+/// Lateral-inhibition iterations for competitive parameter settling in `combine`.
+/// Each iteration is a normalized-squaring step (a_i <- a_i^2 / sum(a_j^2)) that
+/// sharpens activations toward a single winner; ~8 drives a near-one-hot winner
+/// even from a small intensity lead, so co-active gestures resolve to ONE
+/// configuration instead of their (mean-seeking) midpoint.
+const COMPETE_ITERS: usize = 8;
+
 /// One contribution to the vocal drive field from a source region.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VocalDriveContribution {
@@ -41,32 +48,52 @@ pub struct VocalDriveField {
 impl VocalDriveField {
     /// Combine source contributions into one field.
     ///
-    /// Intensity is the MAX across sources (no additive blow-up — same
-    /// semantics the old per-source maxing used). The voicing parameters are
-    /// the intensity-WEIGHTED blend across sources, so the strongest source
-    /// shapes the sound most while others still tint it. A source with zero
-    /// intensity contributes nothing.
+    /// Intensity is the MAX across sources (no additive blow-up). The voicing
+    /// PARAMETERS are chosen by COMPETITION, not averaging.
+    ///
+    /// B1 (2026-06-22): the old law blended params by `/= wsum` — it emitted the
+    /// intensity-weighted MIDPOINT of co-active gestures, an in-between sound that
+    /// is NEITHER. That convergent (mean-seeking) dynamic is the mathematical
+    /// opposite of categorization and structurally forbids a discrete vocal
+    /// inventory from forming (no matter how honest the credit). Here the sources
+    /// COMPETE: iterated normalized-squaring (lateral inhibition) sharpens the
+    /// activations toward a single winner, so the field settles onto ONE
+    /// configuration instead of the average. Divergent / winner-take-more dynamics
+    /// — the precondition for the continuous→discrete babble→speech transition.
     pub fn combine(contribs: &[VocalDriveContribution]) -> Self {
+        // Intensity: MAX across sources (unchanged).
         let mut intensity = 0.0_f64;
-        let mut wsum = 0.0_f64;
-        let mut breath = 0.0;
-        let mut pitch = 0.0;
-        let mut resonance = 0.0;
-        let mut noise = 0.0;
         for c in contribs {
-            let w = unit(c.intensity);
-            if w > intensity {
-                intensity = w;
-            }
-            if w > 0.0 {
-                breath += w * c.breath;
-                pitch += w * c.pitch;
-                resonance += w * c.resonance;
-                noise += w * c.noise;
-                wsum += w;
+            intensity = intensity.max(unit(c.intensity));
+        }
+
+        // Competitive settling for the parameters. Start from intensities; iterate
+        // a_i <- a_i^2 / sum(a_j^2) (normalized squaring keeps the sum at 1 and
+        // contracts toward the max). A few iterations drive a near-one-hot winner
+        // even from a small intensity lead — co-active gestures resolve to ONE, not
+        // their midpoint.
+        let mut act: Vec<f64> = contribs.iter().map(|c| unit(c.intensity)).collect();
+        if act.iter().cloned().fold(0.0_f64, f64::max) > 0.0 {
+            for _ in 0..COMPETE_ITERS {
+                let sumsq: f64 = act.iter().map(|a| a * a).sum();
+                if sumsq <= 1e-12 {
+                    break;
+                }
+                for a in act.iter_mut() {
+                    *a = (*a * *a) / sumsq;
+                }
             }
         }
+
+        let wsum: f64 = act.iter().sum();
+        let (mut breath, mut pitch, mut resonance, mut noise) = (0.0, 0.0, 0.0, 0.0);
         if wsum > 0.0 {
+            for (c, &a) in contribs.iter().zip(act.iter()) {
+                breath += a * c.breath;
+                pitch += a * c.pitch;
+                resonance += a * c.resonance;
+                noise += a * c.noise;
+            }
             breath /= wsum;
             pitch /= wsum;
             resonance /= wsum;
@@ -158,11 +185,13 @@ mod tests {
     }
 
     #[test]
-    fn pitch_is_intensity_weighted_blend() {
-        // strong source (0.6 @ pitch .3) should dominate weak (0.4 @ pitch .9)
+    fn pitch_settles_to_winner_not_blend() {
+        // B1: competition, not averaging. The stronger source (0.6 @ pitch .3)
+        // WINS; the weak one (0.4 @ pitch .9) is inhibited away. The old averager
+        // gave the midpoint (0.6*.3+0.4*.9)/1.0 = 0.54; competition settles to ~0.3.
         let f = VocalDriveField::combine(&[c(0.6, 0.3), c(0.4, 0.9)]);
-        let expected = (0.6 * 0.3 + 0.4 * 0.9) / (0.6 + 0.4);
-        assert!((f.pitch - expected).abs() < 1e-12, "pitch={}", f.pitch);
+        assert!((f.pitch - 0.3).abs() < 0.1, "pitch settles to the winner ~0.3, got {}", f.pitch);
+        assert!(f.pitch < 0.45, "must NOT be the averaging midpoint 0.54, got {}", f.pitch);
     }
 
     /// net=0 (default / un-arbitrated reading) must be the identity: the
@@ -202,6 +231,24 @@ mod tests {
                 assert!((0.0..=1.0).contains(&out), "out={out}");
             }
         }
+    }
+
+    /// B1 (2026-06-22): the INVERSE of the original diagnostic probe. Two co-active
+    /// separated gestures with even a small intensity lead now resolve to the
+    /// WINNER, not their unreachable midpoint — competitive (divergent) settling
+    /// replaced the mean-seeking averager. This is the production-side enabler of
+    /// the continuous→discrete transition: the field can finally COMMIT to one
+    /// gesture instead of always emitting the in-between smear.
+    #[test]
+    fn combine_settles_to_winner_not_midpoint() {
+        // Gesture A (closed/low) slightly more urged than B (open/high).
+        let a = VocalDriveContribution { intensity: 0.62, breath: 0.8, pitch: 0.1, resonance: 0.1, noise: 0.0 };
+        let b = VocalDriveContribution { intensity: 0.55, breath: 0.8, pitch: 0.9, resonance: 0.9, noise: 0.0 };
+        let f = VocalDriveField::combine(&[a, b]);
+        // Settles near the winner A, NOT at the 0.5 midpoint the averager produced.
+        assert!((f.pitch - a.pitch).abs() < 0.15, "settles to winner A pitch ~0.1, got {}", f.pitch);
+        assert!((f.resonance - a.resonance).abs() < 0.15, "settles to winner A resonance ~0.1, got {}", f.resonance);
+        assert!((f.pitch - 0.5).abs() > 0.25, "must NOT be the averaging midpoint 0.5, got {}", f.pitch);
     }
 
     #[test]

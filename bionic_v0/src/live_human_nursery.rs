@@ -326,6 +326,8 @@ fn active_vocal_organ() -> VocalOrganState {
         envelope_sustain: 0.0,
         phase: VocalOrganPhase::Active,
         last_update_t_us: 2_000,
+        aperture: 1.0,
+        syllable_phase: 0.0,
     }
 }
 

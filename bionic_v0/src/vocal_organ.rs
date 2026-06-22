@@ -14,12 +14,31 @@ impl VocalOrganPhase {
     }
 }
 
+/// Syllable-frame articulator rhythm (Hz). Canonical babble alternates open↔close
+/// at ~3 Hz (MacNeilage frame/content): a rhythmic mandibular/aperture limit-cycle
+/// onto which slower gestures ride. This is the cheapest DISCRETE-GENERATING
+/// dynamic — it segments an otherwise continuous drone into CV-like syllables.
+pub const SYLLABLE_RATE_HZ: f64 = 3.0;
+/// The aperture never fully closes (a sonorant/approximant constriction, not a
+/// hard stop): keeps a thread of self-sound alive through the closure so the
+/// heard-self loop never goes 0×x silent, while still giving a deep amplitude dip.
+pub const APERTURE_FLOOR: f64 = 0.12;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VocalOrganState {
     pub breath_drive: f64,
     pub pitch_tension: f64,
     pub resonance_position: f64,
     pub noise_mix: f64,
+    /// Vocal-tract APERTURE [APERTURE_FLOOR, 1]: 1 = open (vowel), low = constricted
+    /// (consonant). Driven by an open→close limit cycle (`syllable_phase`); the
+    /// synthesizer gates source amplitude by it, so a held breath becomes a
+    /// SEQUENCE of syllables instead of one flat vowel. The missing articulatory
+    /// degree of freedom whose oscillation generates temporal discreteness.
+    pub aperture: f64,
+    /// Phase of the syllable-frame oscillator [0, 2π). Organ state advanced by the
+    /// body's own voicing dt (NOT a global clock); stops when voicing stops.
+    pub syllable_phase: f64,
     // v2 formant parameters (Hz)
     pub formant_f1: f64,
     pub formant_f2: f64,
@@ -41,6 +60,8 @@ impl Default for VocalOrganState {
             pitch_tension: 0.0,
             resonance_position: 0.0,
             noise_mix: 0.0,
+            aperture: 1.0,
+            syllable_phase: 0.0,
             // Infant vocal tract defaults (shorter tract → higher formants)
             formant_f1: 800.0,
             formant_f2: 2500.0,
@@ -68,10 +89,30 @@ impl VocalOrganState {
         (300.0 + r * 600.0, 850.0 + r * 1500.0) // F1 300–900 Hz, F2 850–2350 Hz
     }
 
+    /// Advance the syllable-frame articulator limit cycle by the elapsed voicing
+    /// dt and recompute aperture. Open (1) at phase 0 → constricted (floor) at π →
+    /// open again: a held breath is rendered as a SEQUENCE of CV syllables. Called
+    /// each voicing tick; engaged only while the organ is actually voicing, so it
+    /// is body-state-driven, not a global wall-clock.
+    fn advance_syllable(&mut self, now_us: u64) {
+        let dt_s = now_us.saturating_sub(self.last_update_t_us) as f64 / 1_000_000.0;
+        if dt_s <= 0.0 {
+            return;
+        }
+        self.syllable_phase = (self.syllable_phase
+            + std::f64::consts::TAU * SYLLABLE_RATE_HZ * dt_s)
+            .rem_euclid(std::f64::consts::TAU);
+        let open = 0.5 + 0.5 * self.syllable_phase.cos(); // [0,1], 1 at vowel-open, 0 at closure
+        self.aperture = APERTURE_FLOOR + (1.0 - APERTURE_FLOOR) * open;
+    }
+
     pub fn begin_voicing(&mut self, now_us: u64, breath: f64, pitch: f64, resonance: f64) {
         self.breath_drive = breath;
         self.pitch_tension = pitch;
         self.resonance_position = resonance;
+        // Start each fresh utterance vowel-open (phase 0).
+        self.syllable_phase = 0.0;
+        self.aperture = 1.0;
         // Keep explicit formants in sync with the resonance scalar so the
         // synthesizer (which reads them) reproduces the exact legacy vowel locus.
         let (f1, f2) = Self::formants_from_resonance(resonance);
@@ -83,6 +124,9 @@ impl VocalOrganState {
     }
 
     pub fn adjust_toward(&mut self, now_us: u64, breath: f64, pitch: f64, resonance: f64) {
+        // Advance the syllable oscillator over the elapsed dt BEFORE last_update is
+        // bumped, so a held voicing is segmented into syllables.
+        self.advance_syllable(now_us);
         let alpha = 0.1;
         self.breath_drive = self.breath_drive * (1.0 - alpha) + breath * alpha;
         self.pitch_tension = self.pitch_tension * (1.0 - alpha) + pitch * alpha;
@@ -109,6 +153,8 @@ impl VocalOrganState {
         self.envelope_attack = attack.clamp(0.0, 1.0);
         self.envelope_decay = decay.clamp(0.0, 1.0);
         self.envelope_sustain = sustain.clamp(0.0, 1.0);
+        self.syllable_phase = 0.0;
+        self.aperture = 1.0;
         self.phase = VocalOrganPhase::Active;
         self.last_update_t_us = now_us;
     }
@@ -124,5 +170,47 @@ impl VocalOrganState {
             self.phase = VocalOrganPhase::Idle;
             self.breath_drive = 0.0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aperture_limit_cycle_segments_a_held_voicing() {
+        // A held voicing must be rendered as a SEQUENCE of syllables: the aperture
+        // oscillator opens (vowel) and constricts (consonant) at the syllable rate,
+        // never fully closing (floored). This is the cheapest discrete-GENERATING
+        // dynamic — without it, a held breath is one flat continuous drone.
+        let mut o = VocalOrganState::default();
+        o.begin_voicing(0, 0.8, 0.5, 0.5);
+        assert!((o.aperture - 1.0).abs() < 1e-9, "fresh utterance starts vowel-open");
+        let (mut amin, mut amax) = (f64::INFINITY, 0.0_f64);
+        let mut t = 0u64;
+        for _ in 0..120 {
+            t += 10_000; // 10 ms steps → ~1.2 s ≈ 3.6 syllables at 3 Hz
+            o.adjust_toward(t, 0.8, 0.5, 0.5);
+            amin = amin.min(o.aperture);
+            amax = amax.max(o.aperture);
+        }
+        assert!(amax > 0.8, "aperture must open (vowel), got max {amax}");
+        assert!(amin < 0.3, "aperture must constrict (consonant), got min {amin}");
+        assert!(
+            amin >= APERTURE_FLOOR - 1e-9,
+            "aperture is floored (never fully silent → no 0×x), got min {amin}"
+        );
+    }
+
+    #[test]
+    fn syllable_oscillator_is_engagement_gated_not_a_wall_clock() {
+        // Zero elapsed voicing dt → no phase advance. The oscillator is organ state
+        // driven by the body's own voicing, not a global clock (which would repeat
+        // the scripted-sine anti-pattern).
+        let mut o = VocalOrganState::default();
+        o.begin_voicing(1_000, 0.8, 0.5, 0.5);
+        let p0 = o.syllable_phase;
+        o.adjust_toward(1_000, 0.8, 0.5, 0.5); // same now_us → dt = 0
+        assert_eq!(o.syllable_phase, p0, "no dt → no oscillator advance");
     }
 }
