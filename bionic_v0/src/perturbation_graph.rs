@@ -1554,6 +1554,31 @@ impl PerturbationGraph {
         }
     }
 
+    /// B2.0: instability readout for reasoning — population std-dev of relation
+    /// `strength` (scaled ×2, clamped to [0,1]). High when the relation set spans
+    /// mixed maturities (a structurally shifting network: some habits committing
+    /// while others are fresh); ~0 when relations are uniform, and exactly 0 with
+    /// fewer than two relations. Cheap O(relations) pass — and the reasoning
+    /// cycle already iterates `relations` for graph_surprise, so this adds no new
+    /// traversal class. Replaces the slot-fabric `relation_err + |lead_lag|` term.
+    pub fn graph_instability(&self) -> f64 {
+        let n = self.relations.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let mean = self.relations.iter().map(|r| r.strength).sum::<f64>() / n as f64;
+        let var = self
+            .relations
+            .iter()
+            .map(|r| {
+                let d = r.strength - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n as f64;
+        (2.0 * var.sqrt()).clamp(0.0, 1.0)
+    }
+
     /// Phase C: bump the post-hoc disagree EMA. Caller is `post_hoc_check`.
     pub fn note_post_hoc_outcome(&mut self, disagreed: bool) {
         const ALPHA: f64 = 0.05;
@@ -3700,6 +3725,38 @@ mod tests {
                 .unwrap();
         }
         rid
+    }
+
+    #[test]
+    fn graph_instability_reflects_strength_spread() {
+        let mut g = PerturbationGraph::default();
+        // Empty → 0 (need >= 2 relations).
+        assert_eq!(g.graph_instability(), 0.0);
+
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.11));
+        let c = g.add_node(0, sig_at(0.50));
+
+        // One strong relation → still 0 (need >= 2).
+        for k in 0..40 {
+            g.observe_relation(k * 10, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+        }
+        assert_eq!(g.graph_instability(), 0.0);
+
+        // A second, equally-strengthened relation → uniform maturities → ~0.
+        for k in 0..40 {
+            g.observe_relation(1_000 + k * 10, Endpoint::Node(a), Endpoint::Node(c), EdgeKind::Cooccur);
+        }
+        let uniform = g.graph_instability();
+        assert!(uniform < 0.05, "uniform strengths → low instability, got {uniform}");
+
+        // A third, freshly-seeded weak relation → spread of maturities → rises.
+        g.observe_relation(9_000, Endpoint::Node(b), Endpoint::Node(c), EdgeKind::Cooccur);
+        let mixed = g.graph_instability();
+        assert!(
+            mixed > uniform,
+            "mixed maturities → higher instability ({mixed} vs {uniform})"
+        );
     }
 
     #[test]

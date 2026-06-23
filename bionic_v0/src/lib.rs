@@ -943,6 +943,47 @@ pub const N_ROUTING_FOCUS_EDGES: usize = 8;
 /// Number of top-priority slot slots in GlobalReasoningState.routing_focus_slot_ids.
 pub const N_ROUTING_FOCUS_SLOTS: usize = 4;
 
+/// B2.0: number of first-class perturbation_graph relations at which the graph
+/// fully owns the reasoning scalars (surprise / coordination / instability).
+/// Below this the legacy slot fabric is blended in pro-rata so a cold/sparse
+/// graph does not starve gap_pressure (bootstrap-deadlock guard, mirrors the C5
+/// "<8 nodes → fall back" pattern). At/above it the slot attention_shares stop
+/// feeding these three outputs. routing_focus_* stays slot-sourced until B2.1.
+pub const PG_REASONING_FULL_RELATIONS: usize = 32;
+
+/// B2.0: maturity-ramped blend weight for the graph-vs-slot reasoning scalars.
+/// 0.0 at an empty graph (pure slot == legacy behaviour, zero regression),
+/// ramping linearly to 1.0 (pure graph) at [`PG_REASONING_FULL_RELATIONS`].
+/// Pure function so the cutover policy is unit-testable independent of Viewport.
+pub fn pg_reasoning_blend(n_relations: usize) -> f64 {
+    (n_relations as f64 / PG_REASONING_FULL_RELATIONS as f64).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod pg_reasoning_blend_tests {
+    use super::{pg_reasoning_blend, PG_REASONING_FULL_RELATIONS};
+
+    #[test]
+    fn blend_ramps_from_slot_to_graph() {
+        // Empty graph → pure slot fabric (legacy behaviour, no regression).
+        assert_eq!(pg_reasoning_blend(0), 0.0);
+        // Half-full → even split.
+        let half = pg_reasoning_blend(PG_REASONING_FULL_RELATIONS / 2);
+        assert!((half - 0.5).abs() < 1e-9, "got {half}");
+        // At the ramp ceiling → pure graph.
+        assert_eq!(pg_reasoning_blend(PG_REASONING_FULL_RELATIONS), 1.0);
+        // Beyond the ceiling stays clamped at pure graph.
+        assert_eq!(pg_reasoning_blend(PG_REASONING_FULL_RELATIONS * 4), 1.0);
+        // Monotonic non-decreasing.
+        let mut prev = -1.0;
+        for n in 0..(PG_REASONING_FULL_RELATIONS * 2) {
+            let v = pg_reasoning_blend(n);
+            assert!(v >= prev, "non-monotonic at n={n}: {v} < {prev}");
+            prev = v;
+        }
+    }
+}
+
 // --- Phase 5G: Global reasoning temporal memory substrate ---
 
 /// Ring buffer capacity for reasoning history entries.
