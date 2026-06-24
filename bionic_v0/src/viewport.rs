@@ -3823,34 +3823,18 @@ impl Viewport {
             return;
         }
 
-        // Phase C5: salience-weighted graph replay branch. When the
-        // perturbation_graph has a meaningful node population, prefer
-        // replaying FROM IT (deterministic salience-weighted pick of a
-        // top-bind node) over the legacy reasoning history. A replay this
-        // way refreshes the chosen node's last_active_t_us slightly and
-        // contributes its bind_strength to replay_intensity. The previous
-        // reasoning-history branch is the fallback.
-        let graph_replay_novelty: Option<f64> = {
-            let g = self.perturbation_graph.read().unwrap();
-            if g.nodes.len() >= 8 {
-                // Salience-weighted "pick" = top-K nodes by bind, then rotate.
-                let mut top: Vec<(crate::perturbation_graph::NodeId, f64)> = g
-                    .nodes
-                    .iter()
-                    .map(|n| (n.id, n.bind_strength * (1.0 + n.persistence_ema)))
-                    .collect();
-                top.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                let k = top.len().min(8);
-                let idx = ((now_us / 100_000) as usize) % k.max(1);
-                let (_, novelty) = top[idx];
-                Some(novelty.clamp(0.0, 1.0))
-            } else {
-                None
-            }
-        };
+        // Phase C5 / B2.2: spreading graph replay branch. When the
+        // perturbation_graph has a meaningful node population, prefer replaying
+        // FROM IT over the legacy reasoning history. quiet_replay_novelty picks
+        // a salient internal cue and spreads along LEARNED relations, returning
+        // the salience of the associative neighbourhood it evokes — so rest
+        // activity follows structure, not a flat top-K rotation. The previous
+        // reasoning-history branch is the fallback below the 8-node floor.
+        let graph_replay_novelty: Option<f64> = self
+            .perturbation_graph
+            .read()
+            .unwrap()
+            .quiet_replay_novelty(now_us, crate::QUIET_REPLAY_SPREAD_DEPTH);
 
         let replay_novelty = if let Some(n) = graph_replay_novelty {
             n

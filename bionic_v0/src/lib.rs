@@ -907,6 +907,13 @@ pub const ATTN_ERR_REBALANCE_ALPHA: f64 = 0.10;
 /// This is a substrate knob, not a fixed replay law.
 pub const REPLAY_ALPHA: f64 = 0.05;
 
+/// B2.2: bounded depth of the rest-state spreading replay walk
+/// ([`perturbation_graph::PerturbationGraph::quiet_replay_novelty`]). The quiet
+/// cue spreads this many hops along learned relations before its neighbourhood
+/// salience feeds replay_intensity. Small — a cue evokes its near associations,
+/// not the whole graph.
+pub const QUIET_REPLAY_SPREAD_DEPTH: usize = 2;
+
 // --- Phase 5D: Cross-object temporal relation substrate ---
 
 /// Number of directed relation edges in GlobalRelationState.

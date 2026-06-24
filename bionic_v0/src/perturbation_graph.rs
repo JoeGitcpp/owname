@@ -1544,6 +1544,48 @@ impl PerturbationGraph {
         cands.last().copied()
     }
 
+    /// B2.2: rest-state replay salience. Picks a salient seed cue (top node by
+    /// `bind_strength × (1+persistence_ema)`, clock-rotated by `now_us` so the
+    /// cue varies across quiet ticks — an internal cue, no RNG) and SPREADS
+    /// from it along LEARNED relations up to `spread_depth`, returning the mean
+    /// salience of the associative neighbourhood it evokes. This replaces a flat
+    /// clock-rotation over the top-K with a structure-following walk (and is the
+    /// first live caller of `traverse_relations_from`). Read-only: it does NOT
+    /// refresh node activation — consolidation (which ripples into eviction /
+    /// is_active / binding) is deferred to a separate, deliberate step. Returns
+    /// None below the 8-node floor so a cold graph falls back to history replay.
+    pub fn quiet_replay_novelty(&self, now_us: u64, spread_depth: usize) -> Option<f64> {
+        if self.nodes.len() < 8 {
+            return None;
+        }
+        let salience =
+            |n: &PerturbationNode| (n.bind_strength * (1.0 + n.persistence_ema)).clamp(0.0, 1.0);
+        let mut top: Vec<(NodeId, f64)> =
+            self.nodes.iter().map(|n| (n.id, salience(n))).collect();
+        top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let k = top.len().min(8);
+        let idx = ((now_us / 100_000) as usize) % k.max(1);
+        let (seed, seed_sal) = top[idx];
+        // Spread from the cue along learned relations (cycle-safe, depth-bounded).
+        let mut visited_ids: Vec<NodeId> = Vec::new();
+        self.traverse_relations_from(Endpoint::Node(seed), spread_depth, |ep, _d| {
+            if let Endpoint::Node(nid) = ep {
+                visited_ids.push(nid);
+            }
+        });
+        // Mean salience of the evoked neighbourhood: a cue embedded in a rich,
+        // salient associative web replays stronger than an isolated one.
+        let mut sum = 0.0;
+        let mut count = 0.0;
+        for nid in visited_ids {
+            if let Some(n) = self.node(nid) {
+                sum += salience(n);
+                count += 1.0;
+            }
+        }
+        Some(if count > 0.0 { sum / count } else { seed_sal })
+    }
+
     // ── FastPath ops (Phase A5: muscle memory / default cognition) ───────────
 
     /// The user's design-doc reframing: most behaviour flows through the
@@ -3648,6 +3690,63 @@ mod tests {
         let x = g.sample_out_relation(Endpoint::Node(from), crate::PG_WALK_MAX_TEMP, 0.42).unwrap().to;
         let y = g.sample_out_relation(Endpoint::Node(from), crate::PG_WALK_MAX_TEMP, 0.42).unwrap().to;
         assert_eq!(x, y);
+    }
+
+    // ── B2.2: rest-state spreading replay (quiet_replay_novelty) ─────────────
+
+    /// Helper: 8 nodes with controlled salience; node 0 is the unique top
+    /// (so now_us=0 → idx 0 picks it as the seed). persistence zeroed so
+    /// salience == bind_strength.
+    fn graph_with_salience(binds: [f64; 8]) -> (PerturbationGraph, Vec<NodeId>) {
+        let mut g = PerturbationGraph::default();
+        let ids: Vec<NodeId> = (0..8).map(|i| g.add_node(0, sig_at(0.1 * i as f64))).collect();
+        for (i, &id) in ids.iter().enumerate() {
+            let n = g.node_mut(id).unwrap();
+            n.bind_strength = binds[i];
+            n.persistence_ema = 0.0;
+        }
+        (g, ids)
+    }
+
+    #[test]
+    fn quiet_replay_novelty_none_below_node_floor() {
+        let mut g = PerturbationGraph::default();
+        for i in 0..7 {
+            g.add_node(0, sig_at(0.1 * i as f64));
+        }
+        assert!(g.quiet_replay_novelty(0, 2).is_none(), "7 nodes < 8-floor → None");
+    }
+
+    #[test]
+    fn quiet_replay_novelty_is_the_seed_alone_when_cue_is_isolated() {
+        // Seed (node 0, bind 0.9) has NO relations → neighbourhood is just itself.
+        let (g, _ids) = graph_with_salience([0.9, 0.5, 0.1, 0.1, 0.1, 0.05, 0.05, 0.05]);
+        let nov = g.quiet_replay_novelty(0, 2).unwrap();
+        assert!((nov - 0.9).abs() < 1e-9, "isolated cue replays at its own salience, got {nov}");
+    }
+
+    #[test]
+    fn quiet_replay_novelty_follows_relations_not_global_salience() {
+        // Seed (node 0, bind 0.9) is related to three LOW nodes (1,2,3 = 0.1).
+        // Node 4 (bind 0.5) is salient but UNRELATED — it must not be evoked.
+        let (mut g, ids) = graph_with_salience([0.9, 0.1, 0.1, 0.1, 0.5, 0.05, 0.05, 0.05]);
+        for &low in &ids[1..4] {
+            g.observe_relation(0, Endpoint::Node(ids[0]), Endpoint::Node(low), EdgeKind::Cooccur);
+        }
+        let nov = g.quiet_replay_novelty(0, 2).unwrap();
+        // Neighbourhood = {0.9, 0.1, 0.1, 0.1} → mean 0.3. The spread pulls the
+        // signal DOWN from the seed (0.9); the unrelated 0.5 node is excluded.
+        assert!((nov - 0.3).abs() < 1e-9, "mean over relational neighbourhood, got {nov}");
+        assert!(nov < 0.9, "spread must move the signal off the bare seed salience");
+    }
+
+    #[test]
+    fn quiet_replay_novelty_is_deterministic_in_now_us() {
+        let (mut g, ids) = graph_with_salience([0.9, 0.1, 0.1, 0.1, 0.5, 0.05, 0.05, 0.05]);
+        for &low in &ids[1..4] {
+            g.observe_relation(0, Endpoint::Node(ids[0]), Endpoint::Node(low), EdgeKind::Cooccur);
+        }
+        assert_eq!(g.quiet_replay_novelty(0, 2), g.quiet_replay_novelty(0, 2));
     }
 
     #[test]
