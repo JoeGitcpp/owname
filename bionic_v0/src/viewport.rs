@@ -5913,14 +5913,23 @@ impl Viewport {
                     }
                 }
                 Endpoint::Relation(rid) => {
-                    // Step once along the relation toward its `to` looking
-                    // for a vocal-bearing endpoint. Cycle-safe via the
-                    // bounded depth.
+                    // Walk along the relation toward its `to` looking for a
+                    // vocal-bearing endpoint. Cycle-safe via the bounded depth.
                     let mut visited = std::collections::HashSet::new();
                     visited.insert(Endpoint::Relation(rid));
                     let mut current = g.relation(rid).map(|r| r.to);
                     let mut depth = 0usize;
                     let mut found: Option<(crate::perturbation_graph::VocalProfile, u32)> = None;
+                    // B2.1: each hop is temperature-sampled rather than hard
+                    // argmax, so a mature graph can wander to a non-strongest
+                    // edge (input-decoupled association). Temperature ramps with
+                    // graph maturity: a cold graph stays argmax (zero regression).
+                    // The LCG (same constants as phoneme_memory::LcgRng) only
+                    // picks which vocal node we express and never feeds
+                    // persistence, so seed-determinism from now_us is enough.
+                    let temp = crate::PG_WALK_MAX_TEMP
+                        * crate::pg_reasoning_blend(g.relations.len());
+                    let mut rng = now_us ^ 0x9e37_79b9_7f4a_7c15;
                     while let Some(ep) = current {
                         if depth >= RELATION_TRAVERSAL_MAX_DEPTH {
                             break;
@@ -5934,7 +5943,11 @@ impl Viewport {
                                 break;
                             }
                         }
-                        current = g.strongest_out_relation(ep).map(|r| r.to);
+                        rng = rng
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        let uu = ((rng >> 11) as f64) / ((1u64 << 52) as f64);
+                        current = g.sample_out_relation(ep, temp, uu).map(|r| r.to);
                         depth += 1;
                     }
                     found

@@ -959,6 +959,21 @@ pub fn pg_reasoning_blend(n_relations: usize) -> f64 {
     (n_relations as f64 / PG_REASONING_FULL_RELATIONS as f64).clamp(0.0, 1.0)
 }
 
+/// B2.1: graph-walk exploration temperature ceiling. The per-hop relation
+/// sampler ([`perturbation_graph::PerturbationGraph::sample_out_relation`]) is
+/// driven at `PG_WALK_MAX_TEMP * pg_reasoning_blend(n_relations)`, so a cold
+/// graph walks argmax (temp→0, zero regression) and a mature one (≥
+/// [`PG_REASONING_FULL_RELATIONS`] relations) explores up to this ceiling. Kept
+/// well below 1.0 so the walk still favours strong edges — divergence, not
+/// chaos. Tuning knob: lower it, or square the blend, to phase exploration in
+/// later (see [[input-decoupled-association]]; mind the vocal-multistability
+/// bootstrap-deadlock lesson — gate by maturity, don't crank globally).
+pub const PG_WALK_MAX_TEMP: f64 = 0.7;
+
+/// Below this temperature `sample_out_relation` short-circuits to argmax
+/// (exact back-compat on a cold graph + numerical safety).
+pub const PG_WALK_TEMP_EPS: f64 = 1e-3;
+
 #[cfg(test)]
 mod pg_reasoning_blend_tests {
     use super::{pg_reasoning_blend, PG_REASONING_FULL_RELATIONS};

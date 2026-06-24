@@ -1493,6 +1493,57 @@ impl PerturbationGraph {
         })
     }
 
+    /// B2.1: temperature-sampled outgoing relation — the divergent counterpart
+    /// of [`strongest_out_relation`](Self::strongest_out_relation). With
+    /// `temperature <= PG_WALK_TEMP_EPS` this returns exactly the argmax (zero
+    /// regression on a cold/immature graph); above it, relations are drawn in
+    /// proportion to `(strength × expressivity)` sharpened by `1/temperature`,
+    /// so a mature graph can wander to a non-strongest edge. `u` is a single
+    /// uniform draw in `[0,1)`; the caller owns the RNG so this stays a pure,
+    /// unit-testable selection policy (mirrors `pg_reasoning_blend`).
+    pub fn sample_out_relation(
+        &self,
+        from: Endpoint,
+        temperature: f64,
+        u: f64,
+    ) -> Option<&Relation> {
+        // Cold / argmax fast path — identical result to strongest_out_relation.
+        if temperature <= crate::PG_WALK_TEMP_EPS {
+            return self.strongest_out_relation(from);
+        }
+        let cands: Vec<&Relation> = self.out_relations(from).collect();
+        if cands.is_empty() {
+            return None;
+        }
+        let score = |r: &Relation| (r.strength * r.expressivity).max(0.0);
+        let max_score = cands.iter().map(|r| score(r)).fold(0.0_f64, f64::max);
+        if max_score <= 0.0 {
+            // No expressive edge yet — stay deterministic.
+            return self.strongest_out_relation(from);
+        }
+        // Normalised power weights: the strongest edge is 1.0, weaker edges
+        // decay with 1/temperature. Normalising by max_score avoids overflow
+        // and keeps the argmax limit exact as temperature → 0.
+        let inv_t = 1.0 / temperature;
+        let weights: Vec<f64> = cands
+            .iter()
+            .map(|r| (score(r) / max_score).powf(inv_t))
+            .collect();
+        let sum: f64 = weights.iter().sum();
+        if sum <= 0.0 {
+            return self.strongest_out_relation(from);
+        }
+        let target = u.clamp(0.0, 1.0) * sum;
+        let mut acc = 0.0;
+        for i in 0..cands.len() {
+            acc += weights[i];
+            if acc >= target {
+                return Some(cands[i]);
+            }
+        }
+        cands.last().copied()
+    }
+
     // ── FastPath ops (Phase A5: muscle memory / default cognition) ───────────
 
     /// The user's design-doc reframing: most behaviour flows through the
@@ -3502,6 +3553,101 @@ mod tests {
         let top = g.strongest_out_relation(Endpoint::Node(from)).expect("at least one");
         // The well-aligned target should win on expressivity tie-break.
         assert_eq!(top.to, Endpoint::Node(to_a));
+    }
+
+    // ── B2.1: temperature-sampled walk step (sample_out_relation) ────────────
+
+    #[test]
+    fn sample_out_relation_below_temp_eps_equals_argmax() {
+        // Regression guard: at/below the eps temperature the sampler must
+        // return byte-for-byte what strongest_out_relation returns, for ANY u.
+        let mut g = PerturbationGraph::default();
+        let from = g.add_node(0, sig_at(0.10));
+        let strong = g.add_node(0, sig_at(0.105)); // well-aligned → high expressivity
+        let weak = g.add_node(0, sig_at(0.40)); // farther → lower expressivity
+        for t in 0..6 {
+            g.observe_relation(t * 100, Endpoint::Node(from), Endpoint::Node(strong), EdgeKind::Cooccur);
+        }
+        for t in 0..3 {
+            g.observe_relation(t * 100, Endpoint::Node(from), Endpoint::Node(weak), EdgeKind::Cooccur);
+        }
+        let argmax = g.strongest_out_relation(Endpoint::Node(from)).unwrap().to;
+        for &u in &[0.0, 0.1, 0.37, 0.5, 0.83, 0.999] {
+            let picked = g.sample_out_relation(Endpoint::Node(from), 0.0, u).unwrap().to;
+            assert_eq!(picked, argmax, "temp=0 must equal argmax for u={u}");
+        }
+        // Below eps but non-zero — still argmax.
+        let picked = g
+            .sample_out_relation(Endpoint::Node(from), crate::PG_WALK_TEMP_EPS / 2.0, 0.99)
+            .unwrap()
+            .to;
+        assert_eq!(picked, argmax);
+    }
+
+    #[test]
+    fn sample_out_relation_can_reach_weaker_edge_at_high_temp() {
+        // Two similar-score targets: at the exploration ceiling, sweeping u
+        // must be able to diverge to more than one of them.
+        let mut g = PerturbationGraph::default();
+        let from = g.add_node(0, sig_at(0.10));
+        let a = g.add_node(0, sig_at(0.105));
+        let b = g.add_node(0, sig_at(0.120));
+        for t in 0..5 {
+            g.observe_relation(t * 100, Endpoint::Node(from), Endpoint::Node(a), EdgeKind::Cooccur);
+            g.observe_relation(t * 100, Endpoint::Node(from), Endpoint::Node(b), EdgeKind::Cooccur);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..64 {
+            let u = i as f64 / 64.0;
+            if let Some(r) = g.sample_out_relation(Endpoint::Node(from), crate::PG_WALK_MAX_TEMP, u) {
+                seen.insert(r.to);
+            }
+        }
+        assert!(
+            seen.len() >= 2,
+            "high-temp walk must diverge to >1 target, saw {seen:?}"
+        );
+    }
+
+    #[test]
+    fn sample_out_relation_single_candidate_is_returned_regardless_of_u() {
+        // Safety property: a node with one out-edge can never diverge —
+        // sampling is a no-op there, so an immature/sparse graph is unperturbed.
+        let mut g = PerturbationGraph::default();
+        let from = g.add_node(0, sig_at(0.10));
+        let only = g.add_node(0, sig_at(0.20));
+        g.observe_relation(0, Endpoint::Node(from), Endpoint::Node(only), EdgeKind::Cooccur);
+        for &u in &[0.0, 0.5, 0.99] {
+            let picked = g
+                .sample_out_relation(Endpoint::Node(from), crate::PG_WALK_MAX_TEMP, u)
+                .unwrap()
+                .to;
+            assert_eq!(picked, Endpoint::Node(only));
+        }
+    }
+
+    #[test]
+    fn sample_out_relation_returns_none_when_no_out_edges() {
+        let mut g = PerturbationGraph::default();
+        let lonely = g.add_node(0, sig_at(0.10));
+        assert!(g
+            .sample_out_relation(Endpoint::Node(lonely), crate::PG_WALK_MAX_TEMP, 0.5)
+            .is_none());
+    }
+
+    #[test]
+    fn sample_out_relation_is_deterministic_in_u() {
+        let mut g = PerturbationGraph::default();
+        let from = g.add_node(0, sig_at(0.10));
+        let a = g.add_node(0, sig_at(0.105));
+        let b = g.add_node(0, sig_at(0.120));
+        for t in 0..5 {
+            g.observe_relation(t * 100, Endpoint::Node(from), Endpoint::Node(a), EdgeKind::Cooccur);
+            g.observe_relation(t * 100, Endpoint::Node(from), Endpoint::Node(b), EdgeKind::Cooccur);
+        }
+        let x = g.sample_out_relation(Endpoint::Node(from), crate::PG_WALK_MAX_TEMP, 0.42).unwrap().to;
+        let y = g.sample_out_relation(Endpoint::Node(from), crate::PG_WALK_MAX_TEMP, 0.42).unwrap().to;
+        assert_eq!(x, y);
     }
 
     #[test]
