@@ -3,6 +3,28 @@ fn read(path: &str) -> String {
         .unwrap_or_else(|_| String::new())
 }
 
+/// True if `term` occurs as a standalone word — not as a substring of a longer
+/// identifier. The forbidden list targets chat/agent-ontology drift words; a
+/// plain `contains` over-matches legitimate domain vocabulary that merely shares
+/// a prefix (e.g. `intention` — the body "deciding to say something", a
+/// first-class module — wrongly tripping the `intent` ban). Word-boundary
+/// matching preserves the ban's purpose while dropping that false positive.
+fn contains_word(src: &str, term: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut search_start = 0;
+    while let Some(rel) = src[search_start..].find(term) {
+        let start = search_start + rel;
+        let end = start + term.len();
+        let before_ok = start == 0 || !is_word(src[..start].chars().next_back().unwrap());
+        let after_ok = end == src.len() || !is_word(src[end..].chars().next().unwrap());
+        if before_ok && after_ok {
+            return true;
+        }
+        search_start = start + 1;
+    }
+    false
+}
+
 #[test]
 fn character_io_sources_do_not_introduce_chat_or_token_ontology() {
     let paths = [
@@ -39,7 +61,7 @@ fn character_io_sources_do_not_introduce_chat_or_token_ontology() {
         let src = read(path);
         for term in forbidden {
             assert!(
-                !src.contains(term),
+                !contains_word(&src, term),
                 "{path} must not contain forbidden character-I/O drift term: {term}"
             );
         }

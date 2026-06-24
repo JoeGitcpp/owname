@@ -17,23 +17,13 @@ fn active_test_suite_contains_no_semantic_contract_files() {
     );
 }
 
-#[test]
-fn active_source_contains_no_orphan_intention_system() {
-    let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-    assert!(
-        !std::path::Path::new(&format!("{}/intention.rs", src_root)).exists(),
-        "src/intention.rs must not exist (quarantined)"
-    );
-
-    let lib_src = std::fs::read_to_string(format!("{}/lib.rs", src_root)).expect("read lib.rs");
-    for forbidden in ["mod intention", "pub mod intention"] {
-        assert!(
-            !lib_src.contains(forbidden),
-            "lib.rs must not expose `{}` (cleanup spec 2026-04-20)",
-            forbidden
-        );
-    }
-}
+// NOTE: the `active_source_contains_no_orphan_intention_system` guard was
+// retired 2026-06-25. `src/intention.rs` was re-introduced 2026-06-18 (commit
+// 0aad662) as a first-class perturbation-graph module — intention arbitration /
+// spontaneous expression, the graph walk's seed — so the 2026-04-20 quarantine
+// of the OLD intention system (which was bundled with the rejected
+// semantic-readiness / symbolizer / concept-id stack) no longer applies to it.
+// The semantic / symbolizer / concept-id guards below remain in force.
 
 #[test]
 fn snapshot_schema_contains_no_semantic_or_symbolizer_sections() {
