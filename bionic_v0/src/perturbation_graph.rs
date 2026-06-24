@@ -1544,17 +1544,18 @@ impl PerturbationGraph {
         cands.last().copied()
     }
 
-    /// B2.2: rest-state replay salience. Picks a salient seed cue (top node by
-    /// `bind_strength × (1+persistence_ema)`, clock-rotated by `now_us` so the
-    /// cue varies across quiet ticks — an internal cue, no RNG) and SPREADS
-    /// from it along LEARNED relations up to `spread_depth`, returning the mean
-    /// salience of the associative neighbourhood it evokes. This replaces a flat
-    /// clock-rotation over the top-K with a structure-following walk (and is the
-    /// first live caller of `traverse_relations_from`). Read-only: it does NOT
-    /// refresh node activation — consolidation (which ripples into eviction /
-    /// is_active / binding) is deferred to a separate, deliberate step. Returns
-    /// None below the 8-node floor so a cold graph falls back to history replay.
-    pub fn quiet_replay_novelty(&self, now_us: u64, spread_depth: usize) -> Option<f64> {
+    /// B2.2: rest cue + its associative neighbourhood (read-only). Picks a
+    /// salient seed cue (top node by `bind_strength × (1+persistence_ema)`,
+    /// clock-rotated by `now_us` so the cue varies across quiet ticks — an
+    /// internal cue, no RNG) and SPREADS from it along LEARNED relations up to
+    /// `spread_depth`. Returns the visited node ids and the mean salience of the
+    /// neighbourhood. None below the 8-node floor (cold graph → history replay).
+    /// First live caller of `traverse_relations_from`.
+    fn quiet_cue_neighborhood(
+        &self,
+        now_us: u64,
+        spread_depth: usize,
+    ) -> Option<(Vec<NodeId>, f64)> {
         if self.nodes.len() < 8 {
             return None;
         }
@@ -1577,13 +1578,45 @@ impl PerturbationGraph {
         // salient associative web replays stronger than an isolated one.
         let mut sum = 0.0;
         let mut count = 0.0;
-        for nid in visited_ids {
+        for &nid in &visited_ids {
             if let Some(n) = self.node(nid) {
                 sum += salience(n);
                 count += 1.0;
             }
         }
-        Some(if count > 0.0 { sum / count } else { seed_sal })
+        let novelty = if count > 0.0 { sum / count } else { seed_sal };
+        Some((visited_ids, novelty))
+    }
+
+    /// B2.2: read-only rest-replay salience — the mean salience of the cue's
+    /// associative neighbourhood. See [`quiet_cue_neighborhood`](Self::quiet_cue_neighborhood).
+    pub fn quiet_replay_novelty(&self, now_us: u64, spread_depth: usize) -> Option<f64> {
+        self.quiet_cue_neighborhood(now_us, spread_depth)
+            .map(|(_, novelty)| novelty)
+    }
+
+    /// B2.2b: rest consolidation. Re-walks the rest cue's associative
+    /// neighbourhood and gives each rehearsed node BOUNDED eviction protection:
+    /// its idle clock is pulled up only as far as "just aged out of the active
+    /// window", so rehearsal resists forgetting WITHOUT letting the node
+    /// masquerade as currently perceived — `is_active` stays false, and the live
+    /// binding / disturbance set is untouched. The `.max` never moves a fresher
+    /// node's timestamp backward. Returns the neighbourhood novelty (identical to
+    /// `quiet_replay_novelty`) so the caller still gets the replay signal.
+    pub fn consolidate_quiet_neighborhood(
+        &mut self,
+        now_us: u64,
+        spread_depth: usize,
+    ) -> Option<f64> {
+        let (ids, novelty) = self.quiet_cue_neighborhood(now_us, spread_depth)?;
+        // Just outside the active window: max protection among non-active nodes.
+        let protect_floor = now_us.saturating_sub(PG_ACTIVE_WINDOW_US + 1);
+        for id in ids {
+            if let Some(n) = self.node_mut(id) {
+                n.last_active_t_us = n.last_active_t_us.max(protect_floor);
+            }
+        }
+        Some(novelty)
     }
 
     // ── FastPath ops (Phase A5: muscle memory / default cognition) ───────────
@@ -3747,6 +3780,85 @@ mod tests {
             g.observe_relation(0, Endpoint::Node(ids[0]), Endpoint::Node(low), EdgeKind::Cooccur);
         }
         assert_eq!(g.quiet_replay_novelty(0, 2), g.quiet_replay_novelty(0, 2));
+    }
+
+    // ── B2.2b: rest consolidation (consolidate_quiet_neighborhood) ───────────
+
+    /// Build the standard cue→{low1,low2,low3} neighbourhood with the lows aged
+    /// out (last_active = 0), seed at node 0.
+    fn graph_with_aged_neighborhood() -> (PerturbationGraph, Vec<NodeId>) {
+        let (mut g, ids) = graph_with_salience([0.9, 0.1, 0.1, 0.1, 0.5, 0.05, 0.05, 0.05]);
+        for &low in &ids[1..4] {
+            g.observe_relation(0, Endpoint::Node(ids[0]), Endpoint::Node(low), EdgeKind::Cooccur);
+        }
+        for &id in &ids {
+            g.node_mut(id).unwrap().last_active_t_us = 0;
+        }
+        (g, ids)
+    }
+
+    #[test]
+    fn consolidate_protects_old_neighbor_without_making_it_active() {
+        let (mut g, ids) = graph_with_aged_neighborhood();
+        let now = 10 * PG_ACTIVE_WINDOW_US;
+        g.consolidate_quiet_neighborhood(now, 2);
+        let low = ids[1]; // reachable from seed
+        assert_eq!(
+            g.node(low).unwrap().last_active_t_us,
+            now - PG_ACTIVE_WINDOW_US - 1,
+            "rehearsed node pulled up to just-aged-out (eviction-protected)"
+        );
+        assert!(
+            !g.is_active(low, now),
+            "rehearsal must NOT make a node count as currently perceived"
+        );
+    }
+
+    #[test]
+    fn consolidate_never_pulls_a_fresher_node_backward() {
+        let (mut g, ids) = graph_with_aged_neighborhood();
+        let now = 10 * PG_ACTIVE_WINDOW_US;
+        // Make a reachable node fresh (currently active).
+        g.node_mut(ids[1]).unwrap().last_active_t_us = now;
+        g.consolidate_quiet_neighborhood(now, 2);
+        assert_eq!(
+            g.node(ids[1]).unwrap().last_active_t_us,
+            now,
+            "max() keeps the fresher timestamp"
+        );
+        assert!(g.is_active(ids[1], now), "an already-active node stays active");
+    }
+
+    #[test]
+    fn consolidate_leaves_unreachable_nodes_untouched() {
+        let (mut g, ids) = graph_with_aged_neighborhood();
+        let now = 10 * PG_ACTIVE_WINDOW_US;
+        // ids[4] (salient 0.5) is NOT related to the seed → outside the walk.
+        g.consolidate_quiet_neighborhood(now, 2);
+        assert_eq!(
+            g.node(ids[4]).unwrap().last_active_t_us,
+            0,
+            "a node outside the cue's neighbourhood is not protected"
+        );
+    }
+
+    #[test]
+    fn consolidate_returns_same_novelty_as_read_only() {
+        let (mut g, _ids) = graph_with_aged_neighborhood();
+        // now_us=0 → protect_floor=0 → no mutation, so the signal must match.
+        assert_eq!(
+            g.quiet_replay_novelty(0, 2),
+            g.consolidate_quiet_neighborhood(0, 2)
+        );
+    }
+
+    #[test]
+    fn consolidate_none_below_node_floor() {
+        let mut g = PerturbationGraph::default();
+        for i in 0..7 {
+            g.add_node(0, sig_at(0.1 * i as f64));
+        }
+        assert!(g.consolidate_quiet_neighborhood(10 * PG_ACTIVE_WINDOW_US, 2).is_none());
     }
 
     #[test]

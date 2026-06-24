@@ -3823,18 +3823,19 @@ impl Viewport {
             return;
         }
 
-        // Phase C5 / B2.2: spreading graph replay branch. When the
-        // perturbation_graph has a meaningful node population, prefer replaying
-        // FROM IT over the legacy reasoning history. quiet_replay_novelty picks
-        // a salient internal cue and spreads along LEARNED relations, returning
-        // the salience of the associative neighbourhood it evokes — so rest
-        // activity follows structure, not a flat top-K rotation. The previous
-        // reasoning-history branch is the fallback below the 8-node floor.
+        // Phase C5 / B2.2b: spreading graph replay + consolidation. When the
+        // perturbation_graph has a meaningful node population, replay FROM IT:
+        // consolidate_quiet_neighborhood picks a salient internal cue, spreads
+        // along LEARNED relations, and (a) returns the neighbourhood salience to
+        // drive replay_intensity while (b) giving the rehearsed nodes bounded
+        // eviction protection — so rest rehearsal resists forgetting without
+        // masquerading as live perception. Reasoning-history is the fallback
+        // below the 8-node floor.
         let graph_replay_novelty: Option<f64> = self
             .perturbation_graph
-            .read()
+            .write()
             .unwrap()
-            .quiet_replay_novelty(now_us, crate::QUIET_REPLAY_SPREAD_DEPTH);
+            .consolidate_quiet_neighborhood(now_us, crate::QUIET_REPLAY_SPREAD_DEPTH);
 
         let replay_novelty = if let Some(n) = graph_replay_novelty {
             n
