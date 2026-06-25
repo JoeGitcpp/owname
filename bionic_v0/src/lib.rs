@@ -914,6 +914,13 @@ pub const REPLAY_ALPHA: f64 = 0.05;
 /// not the whole graph.
 pub const QUIET_REPLAY_SPREAD_DEPTH: usize = 2;
 
+/// B2.3: how long a captured rest "scene" stays eligible to bias behaviour
+/// before it is considered released. A held scene is transient — held for a few
+/// seconds while idle, then let go — so
+/// [`perturbation_graph::PerturbationGraph::held_scene_lead`] returns None once
+/// this elapses since the last capture.
+pub const HELD_SCENE_TTL_US: u64 = 4_000_000; // 4 s
+
 // --- Phase 5D: Cross-object temporal relation substrate ---
 
 /// Number of directed relation edges in GlobalRelationState.

@@ -653,6 +653,26 @@ pub struct PerturbationEdge {
     pub last_t_us: u64,
 }
 
+/// B2.3: a transient internal "scene" — the set of associatively-evoked nodes
+/// the rest walk gathered (and used to discard). Runtime-only; never serialized.
+/// Holding it is NOT perception: it carries node ids + salience, and capturing
+/// it never sets is_active / moves last_active_t_us / adds any binding.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct HeldScene {
+    /// The salient lead cue the rest walk started from (its seed).
+    pub lead: Option<NodeId>,
+    /// The evoked neighbourhood — the captured node set (was previously dropped).
+    pub nodes: Vec<NodeId>,
+    /// Per-node salience, parallel to `nodes`: bind_strength × (1 + persistence_ema).
+    pub salience: Vec<f64>,
+    /// Mean salience of the neighbourhood (== the rest-replay novelty signal).
+    pub mean_salience: f64,
+    /// When this lead's scene was first assembled.
+    pub assembled_t_us: u64,
+    /// Last quiet tick that refreshed the scene (TTL is measured from here).
+    pub last_update_t_us: u64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PerturbationGraph {
     pub nodes: Vec<PerturbationNode>,
@@ -711,6 +731,10 @@ pub struct PerturbationGraph {
     /// INTERO_POST_HOC_DISAGREE_RATE — if this trends high, FastPath
     /// promotion is too eager.
     pub post_hoc_disagree_ema: f64,
+    /// B2.3: the currently-held internal "scene" (runtime-only, never
+    /// serialized). Captured from the rest walk's evoked neighbourhood; empty
+    /// (lead == None) when no scene is held.
+    pub held_scene: HeldScene,
 }
 
 impl Default for PerturbationGraph {
@@ -745,6 +769,7 @@ impl Default for PerturbationGraph {
             fast_path_hit_ema: 0.0,
             fast_path_query_ema: 0.0,
             post_hoc_disagree_ema: 0.0,
+            held_scene: HeldScene::default(),
         }
     }
 }
@@ -1555,7 +1580,7 @@ impl PerturbationGraph {
         &self,
         now_us: u64,
         spread_depth: usize,
-    ) -> Option<(Vec<NodeId>, f64)> {
+    ) -> Option<(NodeId, Vec<NodeId>, f64)> {
         if self.nodes.len() < 8 {
             return None;
         }
@@ -1585,30 +1610,33 @@ impl PerturbationGraph {
             }
         }
         let novelty = if count > 0.0 { sum / count } else { seed_sal };
-        Some((visited_ids, novelty))
+        Some((seed, visited_ids, novelty))
     }
 
     /// B2.2: read-only rest-replay salience — the mean salience of the cue's
     /// associative neighbourhood. See [`quiet_cue_neighborhood`](Self::quiet_cue_neighborhood).
     pub fn quiet_replay_novelty(&self, now_us: u64, spread_depth: usize) -> Option<f64> {
         self.quiet_cue_neighborhood(now_us, spread_depth)
-            .map(|(_, novelty)| novelty)
+            .map(|(_, _, novelty)| novelty)
     }
 
-    /// B2.2b: rest consolidation. Re-walks the rest cue's associative
-    /// neighbourhood and gives each rehearsed node BOUNDED eviction protection:
-    /// its idle clock is pulled up only as far as "just aged out of the active
-    /// window", so rehearsal resists forgetting WITHOUT letting the node
-    /// masquerade as currently perceived — `is_active` stays false, and the live
-    /// binding / disturbance set is untouched. The `.max` never moves a fresher
-    /// node's timestamp backward. Returns the neighbourhood novelty (identical to
+    /// B2.2b / B2.3: rest consolidation + scene capture. Re-walks the rest cue's
+    /// associative neighbourhood, CAPTURES it as the held scene (B2.3), and gives
+    /// each rehearsed node BOUNDED eviction protection (B2.2b): its idle clock is
+    /// pulled up only as far as "just aged out of the active window", so
+    /// rehearsal resists forgetting WITHOUT letting the node masquerade as
+    /// currently perceived — `is_active` stays false, and the live binding /
+    /// disturbance set is untouched. The `.max` never moves a fresher node's
+    /// timestamp backward. Returns the neighbourhood novelty (identical to
     /// `quiet_replay_novelty`) so the caller still gets the replay signal.
     pub fn consolidate_quiet_neighborhood(
         &mut self,
         now_us: u64,
         spread_depth: usize,
     ) -> Option<f64> {
-        let (ids, novelty) = self.quiet_cue_neighborhood(now_us, spread_depth)?;
+        let (lead, ids, novelty) = self.quiet_cue_neighborhood(now_us, spread_depth)?;
+        // B2.3: hold the evoked set as the scene (the Vec was previously dropped).
+        self.capture_held_scene(lead, &ids, novelty, now_us);
         // Just outside the active window: max protection among non-active nodes.
         let protect_floor = now_us.saturating_sub(PG_ACTIVE_WINDOW_US + 1);
         for id in ids {
@@ -1617,6 +1645,57 @@ impl PerturbationGraph {
             }
         }
         Some(novelty)
+    }
+
+    /// B2.3: capture the rest walk's evoked neighbourhood AS the held scene.
+    /// `lead` is the walk's salient seed; `ids` its visited set; `mean_salience`
+    /// the replay novelty. READ-ONLY on graph nodes — it records ids + salience
+    /// and (mirroring `consolidate_quiet_neighborhood`'s discipline) does NOT set
+    /// is_active, move last_active_t_us, or add any binding / disturbance. A held
+    /// scene is never a perception.
+    fn capture_held_scene(&mut self, lead: NodeId, ids: &[NodeId], mean_salience: f64, now_us: u64) {
+        let salience: Vec<f64> = ids
+            .iter()
+            .map(|&id| {
+                self.node(id)
+                    .map(|n| (n.bind_strength * (1.0 + n.persistence_ema)).clamp(0.0, 1.0))
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        // Keep the assembly origin while the SAME lead's scene is refreshed;
+        // reset it when a different lead takes over.
+        let assembled_t_us = if self.held_scene.lead == Some(lead) {
+            self.held_scene.assembled_t_us
+        } else {
+            now_us
+        };
+        self.held_scene = HeldScene {
+            lead: Some(lead),
+            nodes: ids.to_vec(),
+            salience,
+            mean_salience,
+            assembled_t_us,
+            last_update_t_us: now_us,
+        };
+    }
+
+    /// B2.3: read-only access to the currently held scene (may be empty —
+    /// `lead == None` when nothing is held).
+    pub fn held_scene(&self) -> &HeldScene {
+        &self.held_scene
+    }
+
+    /// B2.3: the held scene's lead cue + mean salience, but only while the scene
+    /// is still FRESH (within `HELD_SCENE_TTL_US` of its last capture). Returns
+    /// None once the scene has aged out — "held while idle, then released" — so a
+    /// stale scene can never bias behaviour forever.
+    pub fn held_scene_lead(&self, now_us: u64) -> Option<(NodeId, f64)> {
+        let s = &self.held_scene;
+        let lead = s.lead?;
+        if now_us.saturating_sub(s.last_update_t_us) > crate::HELD_SCENE_TTL_US {
+            return None;
+        }
+        Some((lead, s.mean_salience))
     }
 
     // ── FastPath ops (Phase A5: muscle memory / default cognition) ───────────
@@ -2855,6 +2934,7 @@ impl PerturbationGraph {
             fast_path_hit_ema: 0.0,
             fast_path_query_ema: 0.0,
             post_hoc_disagree_ema: 0.0,
+            held_scene: HeldScene::default(), // runtime-only, never persisted
         })
     }
 }
@@ -3859,6 +3939,72 @@ mod tests {
             g.add_node(0, sig_at(0.1 * i as f64));
         }
         assert!(g.consolidate_quiet_neighborhood(10 * PG_ACTIVE_WINDOW_US, 2).is_none());
+    }
+
+    // ── B2.3: held scene capture / TTL / anti-fake-perception ────────────────
+
+    #[test]
+    fn capture_held_scene_records_lead_nodes_and_salience() {
+        let (mut g, ids) = graph_with_salience([0.9, 0.4, 0.2, 0.1, 0.1, 0.05, 0.05, 0.05]);
+        let set = [ids[0], ids[1], ids[2]];
+        g.capture_held_scene(ids[0], &set, 0.5, 1_000);
+        let s = g.held_scene();
+        assert_eq!(s.lead, Some(ids[0]));
+        assert_eq!(s.nodes, set.to_vec());
+        // salience parallel to nodes (persistence=0 → salience == bind_strength).
+        assert!((s.salience[0] - 0.9).abs() < 1e-9);
+        assert!((s.salience[1] - 0.4).abs() < 1e-9);
+        assert!((s.salience[2] - 0.2).abs() < 1e-9);
+        assert!((s.mean_salience - 0.5).abs() < 1e-9);
+        assert_eq!(s.last_update_t_us, 1_000);
+    }
+
+    #[test]
+    fn held_scene_lead_respects_ttl() {
+        let (mut g, ids) = graph_with_salience([0.9, 0.4, 0.2, 0.1, 0.1, 0.05, 0.05, 0.05]);
+        g.capture_held_scene(ids[0], &[ids[0], ids[1]], 0.6, 1_000);
+        assert_eq!(g.held_scene_lead(1_000), Some((ids[0], 0.6)));
+        // Still fresh exactly at the TTL boundary; aged out one tick past it.
+        assert!(g.held_scene_lead(1_000 + crate::HELD_SCENE_TTL_US).is_some());
+        assert!(g.held_scene_lead(1_000 + crate::HELD_SCENE_TTL_US + 1).is_none());
+        // An empty (never-captured) scene yields no lead.
+        assert!(PerturbationGraph::default().held_scene_lead(0).is_none());
+    }
+
+    #[test]
+    fn capture_held_scene_does_not_touch_node_activation() {
+        // Anti-fake-perception: holding a node in a scene must NOT make it look
+        // perceived — same discipline as consolidate.
+        let (mut g, ids) = graph_with_salience([0.9, 0.4, 0.2, 0.1, 0.1, 0.05, 0.05, 0.05]);
+        let now = 10 * PG_ACTIVE_WINDOW_US;
+        g.node_mut(ids[1]).unwrap().last_active_t_us = 0; // old
+        let before = g.node(ids[1]).unwrap().last_active_t_us;
+        g.capture_held_scene(ids[0], &[ids[0], ids[1]], 0.5, now);
+        assert_eq!(
+            g.node(ids[1]).unwrap().last_active_t_us,
+            before,
+            "capture must not move last_active_t_us"
+        );
+        assert!(
+            !g.is_active(ids[1], now),
+            "a held node stays inactive — no perception-masquerade"
+        );
+    }
+
+    #[test]
+    fn consolidate_captures_walk_neighborhood_with_seed_as_lead() {
+        // now_us=0 → seed = top-salience node (ids[0]); capture must record the
+        // SEED as lead (not visited_ids[0]) and hold the walked set.
+        let (mut g, ids) = graph_with_aged_neighborhood(); // seed(0) → low1,low2,low3
+        g.consolidate_quiet_neighborhood(0, 2);
+        let s = g.held_scene();
+        assert_eq!(s.lead, Some(ids[0]), "lead is the salient seed, not visited_ids[0]");
+        assert_eq!(s.nodes.len(), 4, "held the seed + its 3 relations");
+        for expected in [ids[0], ids[1], ids[2], ids[3]] {
+            assert!(s.nodes.contains(&expected), "scene holds the walked neighbourhood");
+        }
+        assert!(!s.nodes.contains(&ids[4]), "unrelated node is not in the scene");
+        assert!(g.held_scene_lead(0).is_some(), "scene is fresh right after capture");
     }
 
     #[test]

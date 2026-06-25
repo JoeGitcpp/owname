@@ -749,8 +749,15 @@ fn main() {
                 // Written every checkpoint tick (~1 Hz) — cheap.
                 let top_group_bind = g.most_bound_group().map(|gr| gr.bind_strength).unwrap_or(0.0);
                 let top_node_bind = g.most_bound().map(|n| n.bind_strength).unwrap_or(0.0);
+                // B2.3: held-scene readout — is a scene being held right now, and
+                // what does it hold? Flat numeric keys for the observer sidecar.
+                let scene = g.held_scene();
+                let scene_lead = scene.lead.map(|id| id as i64).unwrap_or(-1);
+                let scene_top0 = scene.nodes.first().copied().unwrap_or(0);
+                let scene_top1 = scene.nodes.get(1).copied().unwrap_or(0);
+                let scene_top2 = scene.nodes.get(2).copied().unwrap_or(0);
                 let stats = format!(
-                    "{{\"n_nodes\":{},\"n_edges\":{},\"n_groups\":{},\"n_relations\":{},\"n_fast_paths\":{},\"n_kinds\":{},\"n_vocal_profiles\":{},\"top_node_bind\":{:.6},\"top_group_bind\":{:.6},\"fast_path_hit_rate\":{:.6},\"graph_density\":{:.6},\"post_hoc_disagree\":{:.6}}}\n",
+                    "{{\"n_nodes\":{},\"n_edges\":{},\"n_groups\":{},\"n_relations\":{},\"n_fast_paths\":{},\"n_kinds\":{},\"n_vocal_profiles\":{},\"top_node_bind\":{:.6},\"top_group_bind\":{:.6},\"fast_path_hit_rate\":{:.6},\"graph_density\":{:.6},\"post_hoc_disagree\":{:.6},\"scene_lead\":{},\"scene_n\":{},\"scene_sal\":{:.6},\"scene_top0\":{},\"scene_top1\":{},\"scene_top2\":{}}}\n",
                     g.nodes.len(),
                     g.edges.len(),
                     g.groups.len(),
@@ -763,6 +770,12 @@ fn main() {
                     g.fast_path_hit_rate(),
                     g.graph_density(),
                     g.post_hoc_disagree_ema,
+                    scene_lead,
+                    scene.nodes.len(),
+                    scene.mean_salience,
+                    scene_top0,
+                    scene_top1,
+                    scene_top2,
                 );
                 let pg_stats_cp = runtime_dir.join("pg_stats.json");
                 bionic_v0::atomic_write_or_warn("checkpoint pg_stats", &pg_stats_cp, stats.as_bytes());

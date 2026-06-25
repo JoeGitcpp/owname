@@ -5757,9 +5757,26 @@ impl Viewport {
         const ACTIVE_REASONING_MIN_SCORE: f64 = 0.05;
         let mut intention = self.intention.write().unwrap();
         if silent >= ACTIVE_REASONING_FAST_PATH_SILENT_TICKS {
+            // 1) Perception-derived candidate: the live anchor's strongest relation.
             if let Some((target_ep, rel_id)) = candidate {
                 if candidate_score >= ACTIVE_REASONING_MIN_SCORE {
                     intention.try_commit(target_ep, Some(rel_id), candidate_score, now_us);
+                }
+            }
+            // 2) B2.3 held-scene candidate — INPUT-DECOUPLED. When a fresh scene
+            //    is held, its lead competes as an intention candidate scored by
+            //    the neighbourhood salience. With no live perception candidate it
+            //    fills the slot (the body forms an intention from what it holds
+            //    in mind while idle); against a live candidate it must beat
+            //    try_commit's dominance window, so perception still wins unless
+            //    the scene is markedly stronger. It can only ever offer a node
+            //    the graph itself evoked from learned relations — never a
+            //    fabricated target.
+            if let Some((lead, scene_score)) =
+                self.perturbation_graph.read().unwrap().held_scene_lead(now_us)
+            {
+                if scene_score >= ACTIVE_REASONING_MIN_SCORE {
+                    intention.try_commit(Endpoint::Node(lead), None, scene_score, now_us);
                 }
             }
         }

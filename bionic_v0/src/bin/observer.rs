@@ -781,8 +781,25 @@ fn pg_summary(stats: Option<&std::collections::HashMap<String, f64>>) -> String 
     let Some(s) = stats else { return "-".to_string(); };
     let n = |k: &str| s.get(k).copied().unwrap_or(0.0) as u64;
     let f = |k: &str| s.get(k).copied().unwrap_or(0.0);
+    // B2.3: held-scene cell — "scene:-" when nothing is held, else
+    // "scene:<lead>(<n>@<sal>)[top3]" so you can watch the body hold + release
+    // a scene live.
+    let scene_lead = s.get("scene_lead").copied().unwrap_or(-1.0) as i64;
+    let scene_cell = if scene_lead < 0 {
+        "scene:-".to_string()
+    } else {
+        format!(
+            "scene:{}({}@{:.3})[{},{},{}]",
+            scene_lead,
+            n("scene_n"),
+            f("scene_sal"),
+            n("scene_top0"),
+            n("scene_top1"),
+            n("scene_top2"),
+        )
+    };
     format!(
-        "n{}|e{}|g{}|r{}|fp{}|k{}|vp{}|tnb{:.3}|tgb{:.3}|fhr{:.3}|dens{:.3}|phd{:.3}",
+        "n{}|e{}|g{}|r{}|fp{}|k{}|vp{}|tnb{:.3}|tgb{:.3}|fhr{:.3}|dens{:.3}|phd{:.3}|{}",
         n("n_nodes"),
         n("n_edges"),
         n("n_groups"),
@@ -795,6 +812,7 @@ fn pg_summary(stats: Option<&std::collections::HashMap<String, f64>>) -> String 
         f("fast_path_hit_rate"),
         f("graph_density"),
         f("post_hoc_disagree"),
+        scene_cell,
     )
 }
 
