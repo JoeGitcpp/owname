@@ -3,6 +3,7 @@
 
 bionic_v0/target/
 bionic_v0/runtime*/
+bionic_v0/runtime_*.log
 runtime_solitary_v0/
 
 .worktrees/

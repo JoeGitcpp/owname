@@ -221,3 +221,27 @@ fn fill_output_buffer_u16(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: a voiced organ MUST produce audible (non-zero) samples through
+    /// the real cpal synth path. begin_voicing writes non-neutral formants, which
+    /// routes the synthesizer to its v2 path; that path's glottal source is zero
+    /// unless voiced_ratio/breath_noise_ratio are set. They were not, so the body
+    /// was silent no matter how hard it breathed. This pins the fix.
+    #[test]
+    fn voiced_organ_produces_nonzero_waveform() {
+        let vp = Arc::new(Viewport::new());
+        vp.vocal_organ.write().unwrap().begin_voicing(0, 0.9, 0.5, 0.5);
+        let mut phase = 0.0;
+        let any_nonzero = (0..2000)
+            .map(|_| next_wave_sample(&vp, &mut phase, 48_000.0))
+            .any(|s| s.abs() > 1e-4);
+        assert!(
+            any_nonzero,
+            "a voiced organ must produce audible (non-zero) samples"
+        );
+    }
+}
