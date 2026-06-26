@@ -1122,6 +1122,11 @@ pub struct VocalLoopDiag {
     /// Phase 2: number of target→correction entries the recall memory has
     /// learned. >0 confirms content-addressed recall is populating live.
     pub recall_entries: u64,
+    /// Social turn-taking contingency ΔP = P(answer|voiced) − P(answer|not),
+    /// the signal now feeding the developmental clock. >0 ⟺ the body's own
+    /// vocalizations reliably elicit external answers above the ambient base
+    /// rate. 0 when solitary or when sound is non-contingent (steady noise).
+    pub last_social_contingency: f64,
 }
 
 pub struct Viewport {
@@ -1536,6 +1541,13 @@ pub struct Viewport {
     /// self-play and social responses; exploration noise is drawn here before
     /// each new vocal burst.  Checkpointed to phoneme_memory.bin.
     pub phoneme_memory: RwLock<crate::phoneme_memory::PhonemeMemory>,
+
+    /// Social turn-taking contingency estimator (ΔP). Feeds the developmental
+    /// clock so understanding+answering an external voice earns growth, not only
+    /// self-echo fidelity. RUNTIME-ONLY (never checkpointed/merged): `Default` is
+    /// the lineage reset, so a fresh/merged body inherits no social high-water-
+    /// mark. The clock it feeds (developmental_maturity) is what persists.
+    pub social_contingency: RwLock<crate::social_contingency::SocialContingencyState>,
 }
 
 impl Viewport {
@@ -1668,6 +1680,9 @@ impl Viewport {
             last_self_play_t_us: AtomicU64::new(0),
             last_imitation_closure_t_us: AtomicU64::new(0),
             phoneme_memory: RwLock::new(crate::phoneme_memory::PhonemeMemory::new()),
+            social_contingency: RwLock::new(
+                crate::social_contingency::SocialContingencyState::default(),
+            ),
         }
     }
 
@@ -4014,6 +4029,48 @@ impl Viewport {
             bands,
             target_mel64,
         );
+    }
+
+    /// Sample the social turn-taking contingency once per vocal tick and credit
+    /// its honest rise to the developmental clock.
+    ///
+    /// Estimates ΔP = P(external answer | the body recently voiced) −
+    /// P(external answer | it did not), then feeds the RISE of that contingency
+    /// into `advance_maturity_by_progress` — the SAME learning-progress clock the
+    /// self-echo path feeds, but on a DISJOINT event (external contingency, not
+    /// self-fidelity; the two never co-fire because external VIB is firewalled
+    /// from the efficacy path by the 150 ms self-hearing gate, so this is not a
+    /// double-count). Constant ambient noise raises both conditionals equally →
+    /// ΔP ≈ 0 → no credit, so noise cannot mature the body; a newborn alone sees
+    /// ΔP = 0 and matures only via self-play. MUST run every vocal tick (including
+    /// silent ones) so the ambient base rate is estimated, not just the post-
+    /// vocal rate.
+    pub fn tick_social_contingency(&self, now_us: u64) {
+        let recently_voiced = self
+            .phoneme_memory
+            .read()
+            .unwrap()
+            .recently_voiced(now_us, crate::phoneme_memory::SOCIAL_RESPONSE_WINDOW_US);
+        // External event: a fresh, non-self (self_match < 0.7) VIB this tick — the
+        // same gates tick_vocal_target_from_vib uses for its social branch.
+        let vib = self.read_ambient().vib;
+        let sound_present = vib.candidate_flag
+            && vib.event_energy >= VOCAL_TARGET_INGRESS_MIN_ENERGY
+            && now_us.saturating_sub(vib.last_event_t_us) <= QUIET_WINDOW_US;
+        let external_event = sound_present && self.vib_self_match_weight(now_us) < 0.7;
+
+        let improvement = self
+            .social_contingency
+            .write()
+            .unwrap()
+            .update(recently_voiced, external_event);
+        let contingency = self.social_contingency.read().unwrap().contingency();
+        self.vocal_diag.write().unwrap().last_social_contingency = contingency;
+        if improvement > 0.0 {
+            // Shares MATURITY_PROGRESS_STEP_MAX cap + (1−m) saturation with the
+            // vocal path: a single tick can never overshoot the clock.
+            self.advance_maturity_by_progress(improvement);
+        }
     }
 
     /// Compute match between current VIB signal and vocal_organ output prediction.

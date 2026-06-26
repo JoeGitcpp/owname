@@ -525,6 +525,16 @@ impl PhonemeMemory {
             + acoustic.envelope * EMA_ALPHA_FAST;
     }
 
+    /// Did the body voice within the last `window_us`? Drives the social-
+    /// contingency estimator's "recently voiced" conditional (the post-vocal
+    /// regime in which an external answer counts as a response, not coincidence).
+    pub fn recently_voiced(&self, now_us: u64, window_us: u64) -> bool {
+        self.recent_vocal
+            .iter()
+            .rev()
+            .any(|rv| now_us.saturating_sub(rv.t_us) <= window_us)
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // L3/L4: observe an incoming (non-self) VIB event
     // ──────────────────────────────────────────────────────────────────────────

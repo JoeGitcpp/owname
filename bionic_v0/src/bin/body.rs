@@ -511,6 +511,11 @@ fn main() {
         // 改造6: external sound is observed into the target (no voicing here),
         // then ONE unified outlet combines all drive sources and voices once.
         vp_vocal.tick_vocal_target_from_vib(t);
+        // Social turn-taking contingency → developmental clock. Runs every vocal
+        // tick (incl. silent ones) so the ambient base rate is estimated, not
+        // only the post-vocal rate. Must follow tick_vocal_target_from_vib so the
+        // VIB self/external classification for this tick is current.
+        vp_vocal.tick_social_contingency(t);
         vp_vocal.tick_vocal_drive_field(t);
         vp_vocal.tick_vocal_memory(t);
         vp_vocal.tick_vocal_sequence_boundary(t); // #8 Stage 1: decay traces + close utterances
@@ -651,7 +656,7 @@ fn main() {
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
                 let line = format!(
-                    "{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{:.6},{},{}\n",
+                    "{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{:.6},{},{},{:.6}\n",
                     now_us(),
                     d.outlet_ticks,
                     d.bursts,
@@ -680,6 +685,7 @@ fn main() {
                     d.last_breath_drive,
                     d.last_since_vocal_us,
                     d.recall_entries,
+                    d.last_social_contingency,
                 );
                 let new_file = !vocal_diag_cp.exists();
                 if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -689,7 +695,7 @@ fn main() {
                 {
                     use std::io::Write as _;
                     if new_file {
-                        let _ = f.write_all(b"t_us,outlet_ticks,bursts,closures,closures_vocalized,closures_with_evidence,drive_pressure,self_bands_sum,fit,vocal_efficacy,prediction_familiarity,action_suppression,developmental_maturity,region_b_ticks,self_voiced,shape_dist,learning_gap,target_energy,target_mel64_sum,target_bands_sum,servo_pitch_off,servo_res_off,self_match,organ_phase,breath_drive,since_vocal_us,recall_entries\n");
+                        let _ = f.write_all(b"t_us,outlet_ticks,bursts,closures,closures_vocalized,closures_with_evidence,drive_pressure,self_bands_sum,fit,vocal_efficacy,prediction_familiarity,action_suppression,developmental_maturity,region_b_ticks,self_voiced,shape_dist,learning_gap,target_energy,target_mel64_sum,target_bands_sum,servo_pitch_off,servo_res_off,self_match,organ_phase,breath_drive,since_vocal_us,recall_entries,social_contingency\n");
                     }
                     let _ = f.write_all(line.as_bytes());
                 }

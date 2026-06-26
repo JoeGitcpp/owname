@@ -119,6 +119,17 @@ impl VocalOrganState {
         self.formant_f1 = f1;
         self.formant_f2 = f2;
         self.formant_f3 = 2500.0;
+        // A voiced vowel needs a glottal SOURCE. Because begin_voicing always
+        // writes non-neutral formants (formants_from_resonance), the synthesizer
+        // routes to its v2 formant path, whose source is
+        //   voiced_ratio·pulse + (1−voiced_ratio)·breath_noise_ratio·noise.
+        // If these stay at their 0.0 defaults the source is identically zero and
+        // the body is SILENT no matter how hard it breathes (the v1 voicing path
+        // drove the v2 synth but never set its source). Set a voiced infant
+        // default: mostly voiced with a little breath. begin_voicing_v2 sets these
+        // explicitly; the held-voicing path (adjust_toward) preserves them.
+        self.voiced_ratio = 0.8;
+        self.breath_noise_ratio = 0.15;
         self.phase = VocalOrganPhase::Active;
         self.last_update_t_us = now_us;
     }

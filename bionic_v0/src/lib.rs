@@ -79,6 +79,9 @@ pub mod vpc_cross_layer;
 pub mod efference_copy;
 pub mod virtual_neck;
 
+// Social-contingency credit: turn-taking (ΔP) → developmental clock.
+pub mod social_contingency;
+
 pub const HISTORY_CAP: usize = 1024;
 
 pub const VIB_BANDS: usize = 16;
