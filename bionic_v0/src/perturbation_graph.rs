@@ -735,6 +735,12 @@ pub struct PerturbationGraph {
     /// serialized). Captured from the rest walk's evoked neighbourhood; empty
     /// (lead == None) when no scene is held.
     pub held_scene: HeldScene,
+    /// Phase C6: the FastPath relation that fired on the *previous* arbitrator
+    /// tick, awaiting its post-hoc check against the next observed anchor.
+    /// A one-slot pending-prediction buffer so `post_hoc_check` compares
+    /// "predicted last tick" against "observed now" — runtime-only, never
+    /// serialized.
+    pub pending_post_hoc: Option<RelId>,
 }
 
 impl Default for PerturbationGraph {
@@ -770,6 +776,7 @@ impl Default for PerturbationGraph {
             fast_path_query_ema: 0.0,
             post_hoc_disagree_ema: 0.0,
             held_scene: HeldScene::default(),
+            pending_post_hoc: None,
         }
     }
 }
@@ -1685,17 +1692,32 @@ impl PerturbationGraph {
         &self.held_scene
     }
 
-    /// B2.3: the held scene's lead cue + mean salience, but only while the scene
-    /// is still FRESH (within `HELD_SCENE_TTL_US` of its last capture). Returns
-    /// None once the scene has aged out — "held while idle, then released" — so a
-    /// stale scene can never bias behaviour forever.
-    pub fn held_scene_lead(&self, now_us: u64) -> Option<(NodeId, f64)> {
+    /// B2.4: the held scene PLAYED THROUGH. Recombines the held nodes into a
+    /// salience-ordered arrangement (a re-arrangement of the capture/DFS order)
+    /// and returns the element under a clock cursor that dwells `SCENE_DWELL_US`
+    /// on each, cycling through the WHOLE scene — so over time the body walks
+    /// through all its held associations, not just the lead. Returns the play
+    /// node + its salience. None while no scene is held, the scene has aged out
+    /// (`HELD_SCENE_TTL_US` — "held while idle, then released"), or it is empty.
+    pub fn held_scene_play(&self, now_us: u64) -> Option<(NodeId, f64)> {
         let s = &self.held_scene;
-        let lead = s.lead?;
+        s.lead?; // a scene is held
         if now_us.saturating_sub(s.last_update_t_us) > crate::HELD_SCENE_TTL_US {
             return None;
         }
-        Some((lead, s.mean_salience))
+        if s.nodes.is_empty() {
+            return None;
+        }
+        // Recombine: play order = held nodes by salience (most salient first).
+        let mut order: Vec<usize> = (0..s.nodes.len()).collect();
+        order.sort_by(|&a, &b| {
+            s.salience[b]
+                .partial_cmp(&s.salience[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let cursor = ((now_us / crate::SCENE_DWELL_US) as usize) % order.len();
+        let idx = order[cursor];
+        Some((s.nodes[idx], s.salience[idx]))
     }
 
     // ── FastPath ops (Phase A5: muscle memory / default cognition) ───────────
@@ -1789,6 +1811,18 @@ impl PerturbationGraph {
         const ALPHA: f64 = 0.05;
         let d = if disagreed { 1.0 } else { 0.0 };
         self.post_hoc_disagree_ema = (1.0 - ALPHA) * self.post_hoc_disagree_ema + ALPHA * d;
+    }
+
+    /// Phase C6: stash the FastPath relation that fired this tick so the next
+    /// arbitrator pass can post-hoc check it against the freshly observed
+    /// anchor. One-slot buffer — the newest firing wins; runtime-only.
+    pub fn set_pending_post_hoc(&mut self, rel_id: RelId) {
+        self.pending_post_hoc = Some(rel_id);
+    }
+
+    /// Take (and clear) the post-hoc prediction stashed on the previous tick.
+    pub fn take_pending_post_hoc(&mut self) -> Option<RelId> {
+        self.pending_post_hoc.take()
     }
 
     /// Tally a FastPath usage (called by the consumer after `default_response`
@@ -1936,6 +1970,9 @@ impl PerturbationGraph {
                 r.strength *= 0.95;
             }
         }
+        // Single post-hoc entry point also feeds the disagreement telemetry EMA
+        // (INTERO_POST_HOC_DISAGREE_RATE) — see `note_post_hoc_outcome`.
+        self.note_post_hoc_outcome(!correct);
         correct
     }
 
@@ -2935,6 +2972,7 @@ impl PerturbationGraph {
             fast_path_query_ema: 0.0,
             post_hoc_disagree_ema: 0.0,
             held_scene: HeldScene::default(), // runtime-only, never persisted
+            pending_post_hoc: None,           // runtime-only, never persisted
         })
     }
 }
@@ -3960,15 +3998,28 @@ mod tests {
     }
 
     #[test]
-    fn held_scene_lead_respects_ttl() {
+    fn held_scene_play_orders_by_salience_then_cycles() {
+        let (mut g, ids) = graph_with_salience([0.9, 0.4, 0.2, 0.1, 0.1, 0.05, 0.05, 0.05]);
+        // Capture in a DELIBERATELY unsorted order; play must re-arrange by
+        // salience: ids[0]=0.9 > ids[1]=0.4 > ids[2]=0.2.
+        g.capture_held_scene(ids[0], &[ids[2], ids[0], ids[1]], 0.5, 0);
+        // Cursor walks all three held nodes in salience order, within the TTL.
+        let node_at = |g: &PerturbationGraph, t: u64| g.held_scene_play(t).map(|(n, _)| n);
+        assert_eq!(node_at(&g, 0), Some(ids[0]), "cursor 0 = most salient (not capture order)");
+        assert_eq!(node_at(&g, crate::SCENE_DWELL_US), Some(ids[1]), "cursor 1 = next salient");
+        assert_eq!(node_at(&g, 2 * crate::SCENE_DWELL_US), Some(ids[2]), "cursor 2 = least salient");
+        // Re-capture (as quiet ticks do) refreshes the TTL; the cursor wraps.
+        g.capture_held_scene(ids[0], &[ids[2], ids[0], ids[1]], 0.5, 3 * crate::SCENE_DWELL_US);
+        assert_eq!(node_at(&g, 3 * crate::SCENE_DWELL_US), Some(ids[0]), "wraps back to the top");
+    }
+
+    #[test]
+    fn held_scene_play_respects_ttl_and_empty() {
         let (mut g, ids) = graph_with_salience([0.9, 0.4, 0.2, 0.1, 0.1, 0.05, 0.05, 0.05]);
         g.capture_held_scene(ids[0], &[ids[0], ids[1]], 0.6, 1_000);
-        assert_eq!(g.held_scene_lead(1_000), Some((ids[0], 0.6)));
-        // Still fresh exactly at the TTL boundary; aged out one tick past it.
-        assert!(g.held_scene_lead(1_000 + crate::HELD_SCENE_TTL_US).is_some());
-        assert!(g.held_scene_lead(1_000 + crate::HELD_SCENE_TTL_US + 1).is_none());
-        // An empty (never-captured) scene yields no lead.
-        assert!(PerturbationGraph::default().held_scene_lead(0).is_none());
+        assert!(g.held_scene_play(1_000 + crate::HELD_SCENE_TTL_US).is_some());
+        assert!(g.held_scene_play(1_000 + crate::HELD_SCENE_TTL_US + 1).is_none());
+        assert!(PerturbationGraph::default().held_scene_play(0).is_none());
     }
 
     #[test]
@@ -4004,7 +4055,7 @@ mod tests {
             assert!(s.nodes.contains(&expected), "scene holds the walked neighbourhood");
         }
         assert!(!s.nodes.contains(&ids[4]), "unrelated node is not in the scene");
-        assert!(g.held_scene_lead(0).is_some(), "scene is fresh right after capture");
+        assert!(g.held_scene_play(0).is_some(), "scene is fresh + playable right after capture");
     }
 
     #[test]
@@ -4352,6 +4403,54 @@ mod tests {
         assert!(
             s_after_wrong < s_after_correct,
             "wrong prediction must weaken"
+        );
+    }
+
+    #[test]
+    fn post_hoc_check_feeds_disagree_telemetry_ema() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        let n3 = g.add_node(0, sig_at(0.90));
+        let rid = g
+            .observe_relation(1_000, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur)
+            .unwrap();
+        // A correct outcome (observed == predicted target) must not raise the
+        // disagreement EMA above its starting point.
+        let before = g.post_hoc_disagree_ema;
+        let _ = g.post_hoc_check(rid, Endpoint::Node(n2));
+        assert!(
+            g.post_hoc_disagree_ema <= before + 1e-9,
+            "correct outcome keeps the disagree EMA from rising"
+        );
+        // A wrong outcome (observed far from prediction) must push it up — the
+        // strength credit and the telemetry now flow from the same call.
+        let mid = g.post_hoc_disagree_ema;
+        let _ = g.post_hoc_check(rid, Endpoint::Node(n3));
+        assert!(
+            g.post_hoc_disagree_ema > mid,
+            "wrong outcome must raise the disagree EMA"
+        );
+    }
+
+    #[test]
+    fn pending_post_hoc_buffer_roundtrips() {
+        let mut g = PerturbationGraph::default();
+        assert!(g.take_pending_post_hoc().is_none(), "buffer starts empty");
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        let rid = g
+            .observe_relation(1_000, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur)
+            .unwrap();
+        g.set_pending_post_hoc(rid);
+        assert_eq!(
+            g.take_pending_post_hoc(),
+            Some(rid),
+            "the stashed firing comes back exactly once"
+        );
+        assert!(
+            g.take_pending_post_hoc().is_none(),
+            "take clears the one-slot buffer"
         );
     }
 

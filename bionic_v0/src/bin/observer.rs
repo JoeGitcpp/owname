@@ -788,14 +788,17 @@ fn pg_summary(stats: Option<&std::collections::HashMap<String, f64>>) -> String 
     let scene_cell = if scene_lead < 0 {
         "scene:-".to_string()
     } else {
+        // ▶<play> = which held node the playthrough cursor is on right now.
+        let play = s.get("scene_play").copied().unwrap_or(-1.0) as i64;
         format!(
-            "scene:{}({}@{:.3})[{},{},{}]",
+            "scene:{}({}@{:.3})[{},{},{}]▶{}",
             scene_lead,
             n("scene_n"),
             f("scene_sal"),
             n("scene_top0"),
             n("scene_top1"),
             n("scene_top2"),
+            play,
         )
     };
     format!(

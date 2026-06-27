@@ -924,6 +924,12 @@ pub const QUIET_REPLAY_SPREAD_DEPTH: usize = 2;
 /// this elapses since the last capture.
 pub const HELD_SCENE_TTL_US: u64 = 4_000_000; // 4 s
 
+/// B2.4: how long the scene play-through dwells on each held node before the
+/// cursor advances. Aligned to INTENTION_COMMITMENT_MIN_US (2 s) so the body
+/// plays roughly one scene element per intention commitment window — over time
+/// it walks through ALL its held associations, not just the lead.
+pub const SCENE_DWELL_US: u64 = 2_000_000;
+
 // --- Phase 5D: Cross-object temporal relation substrate ---
 
 /// Number of directed relation edges in GlobalRelationState.

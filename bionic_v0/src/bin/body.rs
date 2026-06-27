@@ -762,8 +762,10 @@ fn main() {
                 let scene_top0 = scene.nodes.first().copied().unwrap_or(0);
                 let scene_top1 = scene.nodes.get(1).copied().unwrap_or(0);
                 let scene_top2 = scene.nodes.get(2).copied().unwrap_or(0);
+                // B2.4: which held node is being PLAYED right now (cursor), -1 if none.
+                let scene_play = g.held_scene_play(now_us()).map(|(n, _)| n as i64).unwrap_or(-1);
                 let stats = format!(
-                    "{{\"n_nodes\":{},\"n_edges\":{},\"n_groups\":{},\"n_relations\":{},\"n_fast_paths\":{},\"n_kinds\":{},\"n_vocal_profiles\":{},\"top_node_bind\":{:.6},\"top_group_bind\":{:.6},\"fast_path_hit_rate\":{:.6},\"graph_density\":{:.6},\"post_hoc_disagree\":{:.6},\"scene_lead\":{},\"scene_n\":{},\"scene_sal\":{:.6},\"scene_top0\":{},\"scene_top1\":{},\"scene_top2\":{}}}\n",
+                    "{{\"n_nodes\":{},\"n_edges\":{},\"n_groups\":{},\"n_relations\":{},\"n_fast_paths\":{},\"n_kinds\":{},\"n_vocal_profiles\":{},\"top_node_bind\":{:.6},\"top_group_bind\":{:.6},\"fast_path_hit_rate\":{:.6},\"graph_density\":{:.6},\"post_hoc_disagree\":{:.6},\"scene_lead\":{},\"scene_n\":{},\"scene_sal\":{:.6},\"scene_top0\":{},\"scene_top1\":{},\"scene_top2\":{},\"scene_play\":{}}}\n",
                     g.nodes.len(),
                     g.edges.len(),
                     g.groups.len(),
@@ -782,6 +784,7 @@ fn main() {
                     scene_top0,
                     scene_top1,
                     scene_top2,
+                    scene_play,
                 );
                 let pg_stats_cp = runtime_dir.join("pg_stats.json");
                 bionic_v0::atomic_write_or_warn("checkpoint pg_stats", &pg_stats_cp, stats.as_bytes());

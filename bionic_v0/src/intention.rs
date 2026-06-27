@@ -131,6 +131,26 @@ impl IntentionState {
         }
     }
 
+    /// B2.4: commit the next element of a played-through internal scene. Unlike
+    /// `try_commit` (a competitor that must DOMINATE to preempt), this is the
+    /// held scene advancing its OWN cursor — so it commits only when the slot is
+    /// OPEN (no target, or the commitment window has elapsed) and needs no
+    /// dominance, because successive scene elements have descending salience and
+    /// this is continuation, not preemption. It therefore never overrides a live
+    /// perception commitment mid-window; it only fills the idle gaps. Returns
+    /// true if it committed.
+    pub fn commit_scene(&mut self, target: Endpoint, score: f64, now_us: u64) -> bool {
+        if self.current_target.is_some() && now_us < self.commitment_until_us {
+            return false; // a live commitment still holds its window
+        }
+        self.current_target = Some(target);
+        self.target_rel = None;
+        self.origin_score = score;
+        self.commitment_until_us = now_us.saturating_add(INTENTION_COMMITMENT_MIN_US);
+        self.satisfaction = 0.0;
+        true
+    }
+
     /// Update satisfaction based on how well the body's current state
     /// (best-bound endpoint sig) matches the target sig. Caller supplies
     /// the similarity score in [0,1].
@@ -238,6 +258,26 @@ mod tests {
         assert!(ok);
         assert_eq!(s.current_target, Some(Endpoint::Node(7)));
         assert_eq!(s.commitment_until_us, 1_000_000 + INTENTION_COMMITMENT_MIN_US);
+    }
+
+    #[test]
+    fn commit_scene_fills_empty_slot() {
+        let mut s = IntentionState::default();
+        assert!(s.commit_scene(Endpoint::Node(5), 0.4, 1_000));
+        assert_eq!(s.current_target, Some(Endpoint::Node(5)));
+    }
+
+    #[test]
+    fn commit_scene_advances_after_window_without_dominance() {
+        let mut s = IntentionState::default();
+        s.commit_scene(Endpoint::Node(5), 0.9, 0); // window until COMMIT_MIN
+        // Within the window: the next (weaker) scene element cannot advance.
+        assert!(!s.commit_scene(Endpoint::Node(6), 0.3, INTENTION_COMMITMENT_MIN_US - 1));
+        assert_eq!(s.current_target, Some(Endpoint::Node(5)));
+        // After the window: it advances — no dominance needed (0.3 ≪ 0.9×1.5),
+        // because the scene is continuing, not preempting.
+        assert!(s.commit_scene(Endpoint::Node(6), 0.3, INTENTION_COMMITMENT_MIN_US));
+        assert_eq!(s.current_target, Some(Endpoint::Node(6)));
     }
 
     #[test]

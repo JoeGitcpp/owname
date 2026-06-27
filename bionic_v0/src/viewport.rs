@@ -5820,20 +5820,21 @@ impl Viewport {
                     intention.try_commit(target_ep, Some(rel_id), candidate_score, now_us);
                 }
             }
-            // 2) B2.3 held-scene candidate — INPUT-DECOUPLED. When a fresh scene
-            //    is held, its lead competes as an intention candidate scored by
-            //    the neighbourhood salience. With no live perception candidate it
-            //    fills the slot (the body forms an intention from what it holds
-            //    in mind while idle); against a live candidate it must beat
-            //    try_commit's dominance window, so perception still wins unless
-            //    the scene is markedly stronger. It can only ever offer a node
-            //    the graph itself evoked from learned relations — never a
-            //    fabricated target.
-            if let Some((lead, scene_score)) =
-                self.perturbation_graph.read().unwrap().held_scene_lead(now_us)
-            {
-                if scene_score >= ACTIVE_REASONING_MIN_SCORE {
-                    intention.try_commit(Endpoint::Node(lead), None, scene_score, now_us);
+            // 2) B2.4 held-scene PLAYTHROUGH — INPUT-DECOUPLED. When the slot is
+            //    open (no live target, or its commitment window has elapsed) the
+            //    body advances through the held scene: it commits the scene's
+            //    current play node — a salience-ordered cursor cycling ALL held
+            //    nodes over time, not just the lead. It fills the IDLE GAPS only
+            //    (never overrides a live perception commitment mid-window), and
+            //    can only ever offer a node the graph itself evoked from learned
+            //    relations — never a fabricated target.
+            if intention.commitment_open(now_us) {
+                if let Some((node, scene_score)) =
+                    self.perturbation_graph.read().unwrap().held_scene_play(now_us)
+                {
+                    if scene_score >= ACTIVE_REASONING_MIN_SCORE {
+                        intention.commit_scene(Endpoint::Node(node), scene_score, now_us);
+                    }
                 }
             }
         }
@@ -5885,25 +5886,21 @@ impl Viewport {
             g.tick_fast_paths(now_us);
         }
 
-        // Anchor-side audit hook is best-effort: if a FastPath fired AND
-        // the post-fire observed state differs from its `to` endpoint, log
-        // a disagreement. Cheap heuristic — true Phase C6 post-hoc check.
-        if let (Some(anchor), Some(anchor_ep_v)) = (anchor_sig, anchor_ep) {
-            let g_read = self.perturbation_graph.read().unwrap();
-            if let ResponseOutcome::FastPath { to, .. } = g_read.default_response(anchor_ep_v) {
-                let predicted_sig: Option<[f64; crate::perturbation_graph::PG_NODE_SIG_DIM]> = match to {
-                    Endpoint::Node(id) => g_read.node(id).map(|n| n.sig),
-                    Endpoint::Group(gid) => g_read.group(gid).map(|gg| gg.centroid_sig),
-                    Endpoint::Relation(_) => None,
-                };
-                drop(g_read);
-                if let Some(p) = predicted_sig {
-                    let d = crate::perturbation_graph::sig_distance(&anchor, &p);
-                    // > 0.4 in sig space → "wrong neighborhood" by tier-0.
-                    let disagreed = d > 0.4;
-                    let mut g = self.perturbation_graph.write().unwrap();
-                    g.note_post_hoc_outcome(disagreed);
-                }
+        // Phase C6 post-hoc check: resolve the FastPath that fired on the
+        // PREVIOUS tick against the now-observed anchor, then stash the one
+        // firing this tick for next time. This is a genuine predicted-then-
+        // observed credit signal — `post_hoc_check` strengthens the fired
+        // relation when its predicted `to` matches where the body actually
+        // landed and weakens it otherwise. Replaces the old same-tick
+        // sig-distance heuristic, which only updated telemetry and never
+        // moved any relation's strength.
+        if let Some(anchor_ep_v) = anchor_ep {
+            let mut g = self.perturbation_graph.write().unwrap();
+            if let Some(prev_rel) = g.take_pending_post_hoc() {
+                g.post_hoc_check(prev_rel, anchor_ep_v);
+            }
+            if let ResponseOutcome::FastPath { rel_id, .. } = g.default_response(anchor_ep_v) {
+                g.set_pending_post_hoc(rel_id);
             }
         }
     }
