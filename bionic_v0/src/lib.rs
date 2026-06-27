@@ -82,6 +82,13 @@ pub mod virtual_neck;
 // Social-contingency credit: turn-taking (ΔP) → developmental clock.
 pub mod social_contingency;
 
+// Cognitive middle layers (SDD 2026-06-27): L0 developmental gating + L1 shared canvas.
+pub mod developmental_gate;
+pub mod shared_canvas;
+pub mod feature_extraction;
+pub mod pattern_memory;
+pub mod context_modulation;
+
 pub const HISTORY_CAP: usize = 1024;
 
 pub const VIB_BANDS: usize = 16;
