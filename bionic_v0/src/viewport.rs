@@ -5017,30 +5017,29 @@ impl Viewport {
             babble_floor,
         );
         let replay = self.global_attention.read().unwrap().replay_intensity;
-        // P2: active surface aperture → vocal raw_urge.
-        // The active surface integrates attention focus across multiple wave sources
-        // and retains pressure between orchestrator ticks via chain memory/reentry.
-        // Including it here lets sustained perceptual focus — even after raw
-        // prediction waves have decayed — continue to drive exploratory vocalization.
-        // Coefficient 0.60 keeps the contribution subordinate to strong direct
-        // evidence while allowing surface_probe ≥ 0.60 to independently cross
-        // the 0.36 burst threshold.
         let surface_probe = self.active_surface.read().unwrap().effective_probe_pressure();
+
+        // Region B drive: read once, route through tick_drive so both
+        // spontaneous babble AND imitation share the same gate/fatigue.
+        let target = self.read_vocal_target();
+        let (region_b_drive, target_pitch, target_resonance) = if target.active_energy >= 0.01 {
+            let dd = self.read_dual_drive();
+            let bd = crate::vocal_drive_field::bond_modulated_region_b(
+                target.active_energy * 0.5,
+                dd.net_toward_bond,
+            );
+            (bd, target.pitch_hint.clamp(0.0, 1.0), target.resonance_hint.clamp(0.0, 1.0))
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
         let raw_urge = field_pressure
             .max(evidence_pressure)
             .max(gap_pressure)
             .max(surface_probe * 0.60)
             .max(baseline)
-            .max(replay * 0.25);
-        // Innate survival reflex (治本 of the silent-run starvation): the inner
-        // urge to voice yields in REAL TIME to self-preservation pressure —
-        // 饿了就少叫,吃饱了才咿呀. The pressure scales the urge BELOW the reflex's
-        // own threshold when survival is at stake, so no burst fires → no voicing
-        // exertion → reserve recovers. Continuous interoceptive modulation of the
-        // one drive field (NOT a state-named behaviour gate); fast enough to
-        // survive before the body could ever learn restraint. Only the
-        // inner-pressure self-babble is gated here; external/attachment-driven
-        // voicing (region B below) is left for the dual-drive to arbitrate.
+            .max(replay * 0.25)
+            .max(region_b_drive);
         let self_preservation = self.read_vital_core().self_preservation_pressure();
         let drive_pressure =
             crate::vocal_drive_field::survival_gated_urge(raw_urge, self_preservation);
@@ -5061,29 +5060,27 @@ impl Viewport {
         };
         {
             // 体检 telemetry: outlet cadence, raw drive, burst count.
-            // Phase 0: also snapshot the live target state here (always runs,
-            // unlike region B which is gated on energy≥0.01) so the CSV shows
-            // whether the caregiver target — and its fine mel64 fingerprint —
-            // is reaching the loop at all. Read target before taking the diag
-            // lock (read_vocal_target returns a copy; no nested lock).
-            let t = self.read_vocal_target();
             let mut diag = self.vocal_diag.write().unwrap();
             diag.outlet_ticks += 1;
             diag.last_drive_pressure = drive_pressure;
             if burst.is_some() {
                 diag.bursts += 1;
             }
-            diag.last_target_active_energy = t.active_energy;
-            diag.last_target_mel64_sum = t.target_mel64.iter().sum();
-            diag.last_target_bands_sum = t.target_bands.iter().sum();
+            diag.last_target_active_energy = target.active_energy;
+            diag.last_target_mel64_sum = target.target_mel64.iter().sum();
+            diag.last_target_bands_sum = target.target_bands.iter().sum();
             diag.recall_entries = self.vocal_target_recall.read().unwrap().entries.len() as u64;
         }
         if let Some(b) = burst {
+            // When Region B (imitation) is the dominant drive source, blend
+            // the target's pitch/resonance hints into the burst so the body
+            // imitates the caregiver's sound rather than babbling randomly.
+            let w = if raw_urge > 1e-6 { (region_b_drive / raw_urge).clamp(0.0, 1.0) } else { 0.0 };
             contribs.push(VocalDriveContribution {
                 intensity: b.breath,
                 breath: b.breath,
-                pitch: b.pitch,
-                resonance: b.resonance,
+                pitch: b.pitch * (1.0 - w) + target_pitch * w,
+                resonance: b.resonance * (1.0 - w) + target_resonance * w,
                 noise: b.noise,
             });
         }
@@ -5093,7 +5090,6 @@ impl Viewport {
         // the organ's explicit F1/F2 AFTER the outlet voices (voicing overwrites
         // formants from resonance, so the servo nudge must come last).
         let mut region_b_formant_offset: Option<(f64, f64)> = None;
-        let target = self.read_vocal_target();
         if target.active_energy >= 0.01 {
             let organ = self.read_vocal_organ();
             let pitch_gap = (target.pitch_hint - organ.pitch_tension).abs();
@@ -5407,30 +5403,6 @@ impl Viewport {
                         .store(now_us, Ordering::Relaxed);
                 }
             }
-            // A1: dual-drive confluence flows back here — and ONLY here. The
-            // arbitrated reading (already ticked each orchestrator tick) leans
-            // the external/attachment-driven voicing continuously: net>0 (bond
-            // pull wins) amplifies the cry toward the caregiver, net<0
-            // (self-preservation wins) attenuates it. Region A keeps its own
-            // survival gate untouched (no double-gating / feedback loop), and
-            // the combined survival gate below still applies. Continuous
-            // multiplicative field, NOT a behaviour gate; identity at net=0.
-            let dd = self.read_dual_drive();
-            let bond_drive = crate::vocal_drive_field::bond_modulated_region_b(
-                target.active_energy * 0.5,
-                dd.net_toward_bond,
-            );
-            // Feedforward only here: pitch from the target's pitch hint, vowel
-            // baseline from its resonance hint. The servo's correction is NOT
-            // folded into resonance any more (that kept it trapped on the 1-D
-            // line) — it is applied as an independent F1/F2 nudge after voicing.
-            contribs.push(VocalDriveContribution {
-                intensity: bond_drive,
-                breath: bond_drive,
-                pitch: target.pitch_hint.clamp(0.0, 1.0),
-                resonance: target.resonance_hint.clamp(0.0, 1.0),
-                noise: 0.0,
-            });
         }
 
         // --- Combine into one field, then ONE outlet voices ---

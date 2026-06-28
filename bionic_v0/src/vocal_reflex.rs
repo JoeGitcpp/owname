@@ -13,6 +13,17 @@
 /// 成熟体逐位回到原始无地板阻尼律。连续数值调制,非资格门、非靶子。
 pub const SUPPRESSION_DAMP_FLOOR: f64 = 0.96;
 
+/// Fatigue rise per burst: determines how fast the negative-feedback
+/// pole accumulates. Two quick bursts → fatigue ≈ 0.24, suppression
+/// ≈ 0.24×0.45 = 0.11, enough to push a newborn (margin ≈ 0.10) below
+/// the gate → silence until decay. Tuned for 2-3 burst clusters.
+pub const FATIGUE_RISE_PER_BURST: f64 = 0.12;
+/// Fatigue suppression gain: how strongly fatigue reduces reflex_pressure.
+pub const FATIGUE_SUPPRESSION_GAIN: f64 = 0.45;
+/// Fatigue decay per tick (at ~50 Hz). Half-life ≈ 3s:
+/// 0.5^(1/150) ≈ 0.9954. Creates a ~5-8s natural oscillation period.
+pub const FATIGUE_DECAY_PER_TICK: f64 = 0.9954;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VocalReflexState {
     pub reflex_pressure: f64,
@@ -25,6 +36,10 @@ pub struct VocalReflexState {
     /// Monotonic pair_seq cursor for tick_vocal_reflex_from_pairs.
     /// Engineering locator only; keeps closure processing idempotent.
     pub last_pair_cursor: u64,
+    /// Vocal fatigue: accumulates on burst, decays during silence.
+    /// Creates a limit-cycle oscillation (burst cluster → silence → burst)
+    /// replacing the hardcoded sine rhythm.
+    pub vocal_fatigue: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -57,14 +72,15 @@ impl VocalReflexState {
         let mut reflex_pressure = drive_pressure * 0.75 + sudden_delta * 0.35 - regulating_pressure
             + self.fast_gain * 0.15;
 
-        // Post-regulation babble floor: prevents regulation from crushing
-        // spontaneous drive to zero. Capped at gate×0.85 so the floor alone
-        // NEVER triggers a burst — it only makes bursting easier when real
-        // drive adds the remaining ~15%. Without the cap, efficacy lowers
-        // the gate while the floor stays high → positive feedback loop →
-        // burst every tick (23/s).
-        let gate = (0.40 - vocal_efficacy.clamp(0.0, 1.0) * 0.30).clamp(0.10, 0.40);
-        reflex_pressure = reflex_pressure.max(endogenous_floor.min(gate * 0.85));
+        // Endogenous floor: prevents regulation from crushing drive to zero.
+        reflex_pressure = reflex_pressure.max(endogenous_floor);
+
+        // Fatigue: negative feedback that creates natural burst-pause oscillation.
+        // Accumulates on burst (positive feedback, fast), decays during silence
+        // (negative feedback, slow). The ratio of rise/decay time constants
+        // determines the oscillation period (~5-8 seconds).
+        reflex_pressure -= self.vocal_fatigue * FATIGUE_SUPPRESSION_GAIN;
+        self.vocal_fatigue *= FATIGUE_DECAY_PER_TICK;
 
         let bypass = drive_pressure > 0.78 && action_suppression > 0.04;
         if bypass {
@@ -77,11 +93,13 @@ impl VocalReflexState {
         self.prior_drive = self.prior_drive * 0.65 + drive_pressure * 0.35;
         self.last_update_t_us = now_us;
 
+        let gate = (0.40 - vocal_efficacy.clamp(0.0, 1.0) * 0.30).clamp(0.10, 0.40);
         if self.reflex_pressure <= gate {
             return None;
         }
 
         self.burst_count = self.burst_count.saturating_add(1);
+        self.vocal_fatigue = (self.vocal_fatigue + FATIGUE_RISE_PER_BURST).min(1.0);
         Some(VocalReflexBurst {
             breath: (self.reflex_pressure * (0.45 + 0.35 * drive.energy)).clamp(0.0, 1.0),
             pitch: (0.46 + sudden_delta * 0.34 + self.reflex_pressure * 0.12).clamp(0.0, 1.0),
@@ -113,65 +131,20 @@ impl VocalReflexState {
         (delta_fam, delta_sup)
     }
 
-    /// Endogenous baseline rhythm: slow oscillation that drives exploratory
-    /// vocalization in the absence of external stimuli. Modulated by
-    /// prediction_familiarity and action_suppression so that experienced
-    /// systems rely less on the baseline and more on learned regulation.
-    ///
-    /// Returns a pressure value in [0.0, 0.12] — just enough to cross the
-    /// reflex threshold (0.40) when combined with other drive sources or
-    /// when the newborn has near-zero regulating pressure.
-    /// `damp_floor`: multiplicative floor for the suppression damping term,
-    /// precomputed by the caller from the developmental clock via
-    /// lib.rs::suppression_damp_floor (continuous anneal: widest at birth,
-    /// narrowing to the term's own natural lower bound 0.45 where it never
-    /// binds). Passing SUPPRESSION_DAMP_FLOOR reproduces the newborn law.
+    /// Endogenous baseline: steady-state drive level for exploratory
+    /// vocalization. Maximal for newborns, decays with familiarity.
+    /// No hardcoded rhythm — the burst-pause oscillation emerges from
+    /// vocal_fatigue dynamics (positive feedback on burst, exponential
+    /// decay during silence → limit cycle).
     pub fn endogenous_baseline(
-        now_us: u64,
+        _now_us: u64,
         prediction_familiarity: f64,
         action_suppression: f64,
         damp_floor: f64,
         babble_floor: f64,
     ) -> f64 {
-        // Slow oscillation: ~0.04 Hz (25-second period).
-        // This is the "wave" — a substrate-level numerical rhythm that,
-        // in the absence of external stimuli, creates periodic internal
-        // activation. Not a meaning-bearing clock; purely a numerical carrier.
-        //
-        // Modulo first to keep the f64 argument within precision range.
-        // UNIX epoch µs (~1.7e15) would otherwise lose 6+ decimal digits
-        // in f64, randomising the sine phase.
-        // Reduced from 25 s → 5 s: faster heartbeat gives the newborn body many
-        // more opportunities per minute to attempt a vocalization and hear itself
-        // back, accelerating the L1 babble→self-play bootstrap.  Once the
-        // phoneme pool is stable, `exploration_drive` falls toward 0 anyway.
-        let period_us: u64 = 5_000_000;
-        let phase = ((now_us % period_us) as f64 / period_us as f64)
-            * 2.0 * std::f64::consts::PI;
-        let rhythm = phase.sin() * 0.5 + 0.5; // [0, 1]
-
-        // Exploration drive: maximal for newborns, minimal for experienced.
-        // 0.60 at peak → reflex_pressure ≈ 0.60 * 0.75 = 0.45, crossing the
-        // 0.40 burst threshold with comfortable margin for a faint exploratory
-        // vocalization (breath ≈ 0.26). Fully experienced systems (familiarity=1.0)
-        // drop to zero.
-        // 可疑-1 fix: floor the exploratory drive so familiarity→1 can no longer
-        // zero spontaneous babble (the bursts=0-all-call gap). The (1−familiarity)
-        // term still QUIETS a mastered region (Moulin-Frier "redirect, don't go
-        // globally silent"); `.max(babble_floor)` installs the Warlaumont/SAC
-        // always-on floor under it. babble_floor is annealed by the developmental
-        // clock by the caller (wide at birth → thin adult floor), like damp_floor.
         let exploration_drive = ((1.0 - prediction_familiarity) * 0.60).max(babble_floor);
-
-        // Rhythm shaped by exploration drive.
-        let baseline = rhythm * exploration_drive;
-
-        // Dampened by learned suppression. High suppression → quieter baseline.
-        // B2 机制B: 阻尼项加乘性地板——消除乘性退化不动点,非发声靶子;
-        // familiarity→1 时 exploration_drive→0 仍让 baseline 整体归零。
-        // 地板值由调用方按发育时钟连续退火传入(幼态宽=自举逃逸,
-        // 成熟收窄到 0.45 后地板不再起作用,回到原始阻尼数学)。
-        baseline * (1.0 - action_suppression * 0.55).max(damp_floor)
+        exploration_drive * (1.0 - action_suppression * 0.55).max(damp_floor)
     }
 
     pub fn tick_decay(&mut self, now_us: u64) {
