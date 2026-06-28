@@ -901,7 +901,7 @@ pub fn gaze_babble_floor(maturity: f64) -> f64 {
 /// at birth, a thin-but-never-zero adult floor. Pure function over the
 /// developmental clock; a continuous local scalar, never a gate or reward.
 pub const VOCAL_BABBLE_FLOOR_NEWBORN: f64 = 0.42;
-pub const VOCAL_BABBLE_FLOOR_MATURE: f64 = 0.06;
+pub const VOCAL_BABBLE_FLOOR_MATURE: f64 = 0.20;
 pub fn vocal_babble_floor(maturity: f64) -> f64 {
     let m = maturity.clamp(0.0, 1.0);
     (1.0 - m) * VOCAL_BABBLE_FLOOR_NEWBORN + m * VOCAL_BABBLE_FLOOR_MATURE

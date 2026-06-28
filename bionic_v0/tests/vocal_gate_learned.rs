@@ -31,7 +31,7 @@ fn newborn_gate_matches_old_baseline() {
     let mut s = VocalReflexState::default();
     // familiarity = 0, suppression = 0 → gate at the old 0.40 baseline.
     // efficacy = 0 → gate at 0.40 baseline.
-    let burst = s.tick_drive(1_000_000, moderate_drive(), 0.0, 0.0, 0.0);
+    let burst = s.tick_drive(1_000_000, moderate_drive(), 0.0, 0.0, 0.0, 0.0);
     assert!(
         burst.is_none(),
         "newborn must keep the 0.40 baseline gate (silent just under it)"
@@ -44,7 +44,7 @@ fn experienced_voicing_lowers_the_gate() {
     // High vocal_efficacy → learned lower gate (last arg). The same moderate
     // drive that was silent at birth should now voice. familiarity/suppression
     // left at 0 to isolate the efficacy effect.
-    let burst = s.tick_drive(2_000_000, moderate_drive(), 0.0, 0.0, 0.9);
+    let burst = s.tick_drive(2_000_000, moderate_drive(), 0.0, 0.0, 0.9, 0.0);
     assert!(
         burst.is_some(),
         "high vocal_efficacy must lower the gate so the same drive voices"

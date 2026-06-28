@@ -49,6 +49,7 @@ impl VocalReflexState {
         prediction_familiarity: f64,
         action_suppression: f64,
         vocal_efficacy: f64,
+        endogenous_floor: f64,
     ) -> Option<VocalReflexBurst> {
         let drive_pressure = drive.drive_pressure.clamp(0.0, 1.0);
         let sudden_delta = (drive_pressure - self.prior_drive).max(0.0);
@@ -56,11 +57,13 @@ impl VocalReflexState {
         let mut reflex_pressure = drive_pressure * 0.75 + sudden_delta * 0.35 - regulating_pressure
             + self.fast_gain * 0.15;
 
-        // Refactor (plan 2026-05-28 Step2) moved suppression into learned_bias
-        // and lowered per-closure delta from ~0.10 to ≤0.01 (a slow 死后保留
-        // sediment). The bypass threshold must track that smaller scale, else
-        // it would need ~50 closures to ever trigger — the urgent-pressure
-        // safety bypass would effectively never fire. Scaled 0.40 → 0.04.
+        // Post-regulation babble floor: the endogenous baseline (rhythm ×
+        // exploration_drive, already maturity-annealed) survives regulation.
+        // Without this, regulating_pressure (dominated by pred_fam × 0.35 ≈
+        // 0.35) kills all spontaneous drive (peak ~0.18), making the system
+        // 100% reactive / 0% spontaneous.
+        reflex_pressure = reflex_pressure.max(endogenous_floor);
+
         let bypass = drive_pressure > 0.78 && action_suppression > 0.04;
         if bypass {
             reflex_pressure = reflex_pressure.max(0.56);

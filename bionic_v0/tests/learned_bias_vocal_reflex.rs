@@ -49,7 +49,7 @@ fn vocal_reflex_regulating_pressure_uses_learned_bias() {
             energy: 0.5,
         };
 
-        let burst = state.tick_drive(1_000_000, drive, 0.5, 0.5, 0.0);
+        let burst = state.tick_drive(1_000_000, drive, 0.5, 0.5, 0.0, 0.0);
 
         assert!(
             burst.is_some(),
@@ -65,7 +65,7 @@ fn vocal_reflex_regulating_pressure_uses_learned_bias() {
             energy: 0.5,
         };
 
-        let burst = state.tick_drive(2_000_000, drive, 0.8, 0.8, 0.0);
+        let burst = state.tick_drive(2_000_000, drive, 0.8, 0.8, 0.0, 0.0);
 
         assert!(
             burst.is_none(),

@@ -4962,14 +4962,13 @@ impl Viewport {
                 bias.prediction_familiarity,
                 bias.action_suppression,
                 bias.vocal_efficacy,
+                baseline,
             )
         };
         let Some(burst) = burst else {
             return;
         };
 
-        // Record that a vocal output was triggered. Downstream pair
-        // processing uses this to route closure feedback.
         self.last_vocal_output_t_us
             .store(now_us, Ordering::Relaxed);
 
@@ -5057,6 +5056,7 @@ impl Viewport {
                 bias.prediction_familiarity,
                 bias.action_suppression,
                 bias.vocal_efficacy,
+                baseline,
             )
         };
         {

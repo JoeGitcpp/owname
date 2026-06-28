@@ -179,7 +179,7 @@ fn worst_case_suppression_still_has_a_gate_crossing_phase() {
                 drive_pressure: baseline,
                 energy: 0.5,
             };
-            state.tick_drive(now_us, drive, 0.0, suppression, 0.0);
+            state.tick_drive(now_us, drive, 0.0, suppression, 0.0, 0.0);
             if state.reflex_pressure > 0.40 {
                 crossed = true;
                 break;
