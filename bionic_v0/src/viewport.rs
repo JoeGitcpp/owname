@@ -1440,6 +1440,16 @@ pub struct Viewport {
     /// vocal path draw from one global ~1/s maturity budget — vision becomes a
     /// legitimate maturity source without changing the tuned infant period.
     pub last_maturity_advance_us: AtomicU64,
+    /// Cognitive middle layers (SDD 2026-06-27): L0 developmental gating →
+    /// L1 shared canvas → L2 sparse feature extraction → L3 FiLM modulation →
+    /// L4 pattern memory. Ticked by the orchestrator at 30 Hz.
+    pub cognitive_pipeline: RwLock<crate::cognitive_pipeline::CognitivePipeline>,
+    /// Per-tick output of the cognitive middle layers, stored so downstream tick
+    /// functions in the same 30 Hz frame can read it (query_result, sparsity,
+    /// ignited_count). Written by `tick_cognitive_pipeline`; consumed by any
+    /// later tick that calls `read_cognitive_output`.
+    pub last_cognitive_output: RwLock<Option<crate::cognitive_pipeline::CognitivePipelineOutput>>,
+
     /// Slow EMA of the Gaussian-field reconstruction MSE — the baseline the
     /// pure-vision maturity closure credits IMPROVEMENT against (crediting a
     /// DROP, never the absolute value, avoids a cold-start 0×x trap). None until
@@ -1592,6 +1602,8 @@ impl Viewport {
             err_stream,
             prior_signal,
             predictors,
+            cognitive_pipeline: RwLock::new(crate::cognitive_pipeline::CognitivePipeline::new()),
+            last_cognitive_output: RwLock::new(None),
             looming_mass_ema: RwLock::new(None),
             hl: RwLock::new(HighLevelState::default()),
             ambient: AmbientChannel::new(),
@@ -4114,20 +4126,6 @@ impl Viewport {
         m
     }
 
-    fn has_recent_write_coupled_vib_caution(&self, now_us: u64) -> bool {
-        let out = self.action_output.read().unwrap();
-        if out.channels.iter().any(|ch| {
-            ch.phase != ActionOutputPhase::Idle
-                && now_us.saturating_sub(ch.last_update_t_us) <= VOCAL_TARGET_WRITE_COUPLED_GUARD_US
-        }) {
-            return true;
-        }
-        out.write_epoch_history
-            .iter()
-            .rev()
-            .any(|ep| now_us.saturating_sub(ep.start_t_us) <= VOCAL_TARGET_WRITE_COUPLED_GUARD_US)
-    }
-
     pub fn observe_vocal_target(
         &self,
         now_us: u64,
@@ -5539,6 +5537,45 @@ impl Viewport {
         self.push_observation(crate::INTERO_INTENTION_PRESSURE, now_us, 0.0);
     }
 
+    /// Cognitive middle layers (SDD 2026-06-27): run L0→L4 pipeline.
+    /// Called by the orchestrator at 30 Hz after refresh_global_attention,
+    /// before tick_perturbation_intero.
+    pub fn tick_cognitive_pipeline(&self, now_us: u64) {
+        let mut axes = [0.0f64; crate::AXIS_COUNT];
+        for i in 0..crate::AXIS_COUNT {
+            if let Some(sample) = self.read_latest_observations(i, 1).first() {
+                axes[i] = sample.value;
+            }
+        }
+
+        let mut surprise = [0.0f64; crate::AXIS_COUNT];
+        for i in 0..crate::AXIS_COUNT {
+            let ps = self.predictors[i].read().unwrap();
+            surprise[i] = ps.mean_sq_err;
+        }
+
+        let maturity = self.developmental_maturity();
+
+        let mut pipe = self.cognitive_pipeline.write().unwrap();
+        let output = pipe.tick(&axes, &surprise, maturity, now_us);
+        drop(pipe);
+        *self.last_cognitive_output.write().unwrap() = Some(output);
+    }
+
+    /// Read the cognitive pipeline's query-result summary from the most recent
+    /// tick. Returns `None` before the first tick or if the pipeline yielded no
+    /// output. Downstream tick functions call this to react to pattern-memory
+    /// recognition (Completed), novel-category birth (Separated), etc.
+    pub fn read_cognitive_output(&self) -> Option<crate::cognitive_pipeline::CognitiveQuerySummary> {
+        self.last_cognitive_output.read().unwrap().as_ref().map(|o| o.query_result)
+    }
+
+    /// Read the cognitive pipeline's sparsity and ignited_count from the most
+    /// recent tick. Returns `None` before the first tick.
+    pub fn read_cognitive_salience(&self) -> Option<(f64, usize)> {
+        self.last_cognitive_output.read().unwrap().as_ref().map(|o| (o.sparsity, o.ignited_count))
+    }
+
     /// #8 Stage 1: per-vocal-tick maintenance of the sequence layer — decay the
     /// eligibility traces and close an utterance after a silence gap (so its
     /// buffered self/target frames get a DTW seq_fit stamp before the next one
@@ -5752,11 +5789,10 @@ impl Viewport {
         // Read-only first pass: discover the anchor and whether FastPath
         // would fire on it. Held under a read lock to keep the critical
         // section short.
-        let (anchor_ep, anchor_sig, fp_fires, candidate, candidate_score) = {
+        const ROLLOUT_HORIZON: usize = 3;
+        let w_epi = crate::epistemic_weight(self.developmental_maturity());
+        let (anchor_ep, anchor_sig, fp_fires, candidate, candidate_score, rollout) = {
             let graph = self.perturbation_graph.read().unwrap();
-            // Anchor preference: most-bound node first (sharpest target),
-            // falling back to most-bound group (the design-doc "ensemble"
-            // when no single patch dominates).
             let (anchor_ep, anchor_sig): (Option<Endpoint>, Option<[f64; crate::perturbation_graph::PG_NODE_SIG_DIM]>) =
                 match graph.most_bound() {
                     Some(n) => (Some(Endpoint::Node(n.id)), Some(n.sig)),
@@ -5765,8 +5801,6 @@ impl Viewport {
                         None => (None, None),
                     },
                 };
-            // FastPath query on the anchor — the muscle-memory check that
-            // gates whether slow reasoning needs to wake.
             let fp_fires = if let Some(ep) = anchor_ep {
                 matches!(
                     graph.default_response(ep),
@@ -5775,11 +5809,9 @@ impl Viewport {
             } else {
                 false
             };
-            // Find the strongest out-relation from the anchor as the slow
-            // path's candidate. Score is the design-doc strength × expressivity.
             let (candidate, candidate_score) = if let Some(ep) = anchor_ep {
-                if let Some(r) = graph.strongest_out_relation(ep) {
-                    let score = r.strength * r.expressivity;
+                if let Some(r) = graph.strongest_out_relation_epi(ep, w_epi) {
+                    let score = r.beta_mean() * r.expressivity + w_epi * r.uncertainty();
                     (Some((r.to, r.id)), score)
                 } else {
                     (None, 0.0)
@@ -5787,7 +5819,12 @@ impl Viewport {
             } else {
                 (None, 0.0)
             };
-            (anchor_ep, anchor_sig, fp_fires, candidate, candidate_score)
+            let rollout = if let Some(ep) = anchor_ep {
+                graph.rollout_chain_epi(ep, ROLLOUT_HORIZON, w_epi)
+            } else {
+                Vec::new()
+            };
+            (anchor_ep, anchor_sig, fp_fires, candidate, candidate_score, rollout)
         };
 
         // Note the FastPath outcome (B3 EMA telemetry — also keeps the rate
@@ -5837,6 +5874,20 @@ impl Viewport {
                     }
                 }
             }
+            // 3) Prospective rollout — the REACHABILITY channel. The rollout
+            //    walked K hops from the anchor; hop 0 is the perception
+            //    candidate already offered above. Hop 1+ are genuinely
+            //    prospective: states the body hasn't perceived yet but could
+            //    reach via learned relations. Offer the furthest reachable
+            //    node (last hop) when the slot is still open — this is the
+            //    seed of forward-looking intention.
+            if intention.commitment_open(now_us) {
+                if let Some(&(target, rel_id, score)) = rollout.last() {
+                    if score >= ACTIVE_REASONING_MIN_SCORE {
+                        intention.try_commit(target, Some(rel_id), score, now_us);
+                    }
+                }
+            }
         }
 
         // Update satisfaction: how close is the current anchor's sig to
@@ -5877,13 +5928,21 @@ impl Viewport {
         drop(intention);
         self.push_observation(crate::INTERO_INTENTION_PRESSURE, now_us, pressure);
 
-        // Phase C: graph maintenance — decay marks + group members so the
-        // arbitrator's stamps don't pile up forever. Cheap and idempotent.
+        // Phase C: graph maintenance — decay marks + group members + eligibility
+        // traces so the arbitrator's stamps don't pile up forever. Cheap and
+        // idempotent.
+        //
+        // Ordering note: decay runs BEFORE the Phase C6 post-hoc + capture block
+        // below (separate write-lock acquisitions). This is intentional — decay
+        // must set synaptic tags before try_capture_*_tags can fire on them. The
+        // two blocks are safe across separate locks because run_global_refresh_cycle
+        // is serial (single-threaded orchestrator).
         {
             let mut g = self.perturbation_graph.write().unwrap();
             g.decay_marks(now_us);
             g.decay_group_members(now_us);
             g.tick_fast_paths(now_us);
+            g.maybe_decay_beta();
         }
 
         // Phase C6 post-hoc check: resolve the FastPath that fired on the
@@ -5895,14 +5954,33 @@ impl Viewport {
         // sig-distance heuristic, which only updated telemetry and never
         // moved any relation's strength.
         if let Some(anchor_ep_v) = anchor_ep {
+            let vital = self.read_vital_core();
+            let gap_p = self.read_active_reasoning_gap().gap_pressure;
+            let lp = self.self_development.read().unwrap().prediction_improvement;
+            let modulation = crate::perturbation_graph::compute_modulation(
+                lp, vital.vital_anxiety, vital.reserve, gap_p,
+            );
             let mut g = self.perturbation_graph.write().unwrap();
             if let Some(prev_rel) = g.take_pending_post_hoc() {
-                g.post_hoc_check(prev_rel, anchor_ep_v);
+                g.post_hoc_check_modulated(prev_rel, anchor_ep_v, modulation);
             }
+            g.try_capture_relation_tags(modulation);
+            g.try_capture_edge_tags(modulation);
             if let ResponseOutcome::FastPath { rel_id, .. } = g.default_response(anchor_ep_v) {
                 g.set_pending_post_hoc(rel_id);
             }
         }
+    }
+
+    /// Decay edge-level and relation-level eligibility traces in the
+    /// perturbation graph.  Without this, every fired edge/relation stays
+    /// at elig=1.0 forever, defeating the synaptic-tag capture mechanism
+    /// (tags are set only when combined elig drops below PG_ELIG_FLOOR).
+    /// Called once per orchestrator tick (30 Hz) from body.rs.
+    pub fn tick_pg_eligibility_decay(&self, now_us: u64) {
+        let mut pg = self.perturbation_graph.write().unwrap();
+        pg.decay_relation_eligibility(now_us);
+        pg.decay_eligibility(now_us);
     }
 
     pub fn read_intention(&self) -> crate::intention::IntentionState {
@@ -6003,7 +6081,8 @@ impl Viewport {
                             .wrapping_mul(6_364_136_223_846_793_005)
                             .wrapping_add(1_442_695_040_888_963_407);
                         let uu = ((rng >> 11) as f64) / ((1u64 << 52) as f64);
-                        current = g.sample_out_relation(ep, temp, uu).map(|r| r.to);
+                        let vocal_w_epi = crate::epistemic_weight(self.developmental_maturity());
+                        current = g.sample_out_relation_epi(ep, temp, uu, vocal_w_epi).map(|r| r.to);
                         depth += 1;
                     }
                     found

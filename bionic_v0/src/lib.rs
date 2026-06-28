@@ -88,6 +88,8 @@ pub mod shared_canvas;
 pub mod feature_extraction;
 pub mod pattern_memory;
 pub mod context_modulation;
+pub mod cognitive_pipeline;
+pub mod replay_engine;
 
 pub const HISTORY_CAP: usize = 1024;
 
@@ -1047,6 +1049,15 @@ pub const PERSISTENCE_MAX_CYCLES: u32 = 20;
 
 /// Threshold for "high-intensity" reasoning (surprise_load or instability above this).
 pub const REASONING_INTENSITY_THRESHOLD: f64 = 0.1;
+
+/// Maximum epistemic value weight (Friston 2015 active inference, C2 SDD).
+pub const W_EPI_MAX: f64 = 2.0;
+
+/// Epistemic value weight annealed by maturity (C2 SDD §4.2.2).
+/// Young (mat≈0) → 0.60 (explore), mature (mat≈1) → 0.10 (exploit).
+pub fn epistemic_weight(maturity: f64) -> f64 {
+    (0.30 - 0.25 * maturity.clamp(0.0, 1.0)) * W_EPI_MAX
+}
 
 // Phase 5H Semantic Readiness Contract and Phase 6A Symbolizer / Concept-ID
 // Layer were removed by cleanup spec 2026-04-20. Reason: they made naming /

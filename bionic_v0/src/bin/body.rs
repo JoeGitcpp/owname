@@ -154,6 +154,13 @@ fn run_global_refresh_cycle(
     // Phase 3 replacement for tick_familiar_objects: mirror perturbation_graph
     // most_bound + active onto INTERO_ATTACHMENT + INTERO_PRESENCE so
     // dual_drive + vpc_cross_layer keep getting their attachment/presence input.
+    // Cognitive middle layers (SDD 2026-06-27): L0→L4 pipeline.
+    // Runs AFTER refresh_global_attention (reads axis observations + surprise)
+    // and BEFORE tick_perturbation_intero (so downstream consumers can
+    // eventually read cognitive state).
+    vp.tick_cognitive_pipeline(t);
+    vp.tick_pg_eligibility_decay(t); // decay edge + relation elig traces every tick
+    vp.tick_phot_sequence_boundary(t); // visual sequence elig decay (mirrors vocal side)
     vp.tick_perturbation_intero(t);
     // C1: drive the vital core (reserve depletes with exertion, restores with
     // input continuity; bottoms out → Standby). The self-survival drive source.
@@ -307,6 +314,15 @@ fn main() {
             bionic_v0::perturbation_graph::PerturbationGraph::deserialize(&bytes)
         {
             *vp.perturbation_graph.write().unwrap() = pg;
+        }
+    }
+    // Cognitive pipeline pattern memory: restore learned L4 patterns so
+    // accumulated experiential prototypes survive restart.
+    let cognitive_patterns_path = runtime_dir.join("cognitive_patterns.bin");
+    if let Ok(bytes) = std::fs::read(&cognitive_patterns_path) {
+        let mut pipe = vp.cognitive_pipeline.write().unwrap();
+        if !pipe.restore_patterns(&bytes) {
+            // malformed cognitive_patterns.bin — continue with empty pattern memory
         }
     }
     let stop = Arc::new(AtomicBool::new(false));
@@ -641,6 +657,7 @@ fn main() {
         let vocal_recall_cp = runtime_dir.join("vocal_target_recall.bin");
         let vocal_seq_cp = runtime_dir.join("vocal_sequence.bin");
         let phot_seq_cp = runtime_dir.join("phot_sequence.bin");
+        let cognitive_patterns_cp = runtime_dir.join("cognitive_patterns.bin");
         let perturbation_graph_cp = runtime_dir.join("perturbation_graph.bin");
         let vocal_diag_cp = runtime_dir.join("vocal_diag.csv");
         spawn_ticker(vp.clone(), profile.checkpoint_hz, stop.clone(), move |_| {
@@ -795,6 +812,18 @@ fn main() {
                 &perturbation_graph_cp,
                 &pg_bytes,
             );
+            // Cognitive pipeline L4 pattern memory: persist the Hopfield-style
+            // experiential prototypes so they survive restart.
+            let cp_bytes = vp_checkpoint
+                .cognitive_pipeline
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .serialize_patterns();
+            bionic_v0::atomic_write_or_warn(
+                "checkpoint cognitive_patterns",
+                &cognitive_patterns_cp,
+                &cp_bytes,
+            );
         })
     };
 
@@ -933,6 +962,16 @@ fn main() {
             "shutdown perturbation_graph",
             &perturbation_graph_path,
             &pg_bytes,
+        );
+    }
+    // Cognitive pipeline L4 pattern memory: persist at shutdown so accumulated
+    // experiential prototypes carry over to the next session.
+    {
+        let cp_bytes = vp.cognitive_pipeline.read().unwrap().serialize_patterns();
+        bionic_v0::atomic_write_or_warn(
+            "shutdown cognitive_patterns",
+            &cognitive_patterns_path,
+            &cp_bytes,
         );
     }
 

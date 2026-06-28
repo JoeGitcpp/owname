@@ -2,9 +2,6 @@ use crate::AXIS_COUNT;
 
 pub const DEV_GATE_N_FLOOR: usize = 32;
 const DEV_GATE_SIGMOID_K: f64 = 20.0;
-const DEV_GATE_SIGMOID_M0: f64 = 0.3;
-
-const PRIORITY_1_MAX: usize = 16 + 16 + 5; // VIB(16) + VIS brightness+motion per region(16) + INTERO core 5 = 37, clamped by N_FLOOR logic
 const PRIORITY_2_THRESH: f64 = 0.15;
 const PRIORITY_3_THRESH: f64 = 0.45;
 const PRIORITY_4_THRESH: f64 = 0.70;
@@ -24,7 +21,6 @@ pub fn axis_priority(axis: usize) -> AxisPriority {
         return AxisPriority::Neonatal;
     }
     if axis >= AXIS_VIS_BASE && axis < AXIS_VIS_BASE + VIS_AXES {
-        let region = (axis - AXIS_VIS_BASE) / VIS_AXES_PER_REGION;
         let sub = (axis - AXIS_VIS_BASE) % VIS_AXES_PER_REGION;
         return match sub {
             vis_sub::BRIGHTNESS | vis_sub::MOTION => AxisPriority::Neonatal,

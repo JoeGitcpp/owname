@@ -1,15 +1,9 @@
-use crate::developmental_gate::effective_mask;
 use crate::{AXIS_COUNT, AXIS_VIS_BASE, AXIS_INTERO_BASE, AXIS_CODE_BASE, AXIS_GAUSS_BASE,
-            AXIS_DEFENSE_BASE, VIB_BANDS, VIS_AXES, INTERO_AXES, CODE_AXES,
+            VIB_BANDS, VIS_AXES, INTERO_AXES, CODE_AXES,
             GAUSS_SUMMARY_AXES, DEFENSE_SUMMARY_AXES};
 
 pub const CANVAS_DIM: usize = 64;
 
-const MODALITY_VIB: usize = 0;
-const MODALITY_VIS: usize = 1;
-const MODALITY_INTERO: usize = 2;
-const MODALITY_CODE: usize = 3;
-const MODALITY_AUX: usize = 4; // GAUSS + DEFENSE
 pub const MODALITY_COUNT: usize = 5;
 
 const MODALITY_SIZES: [usize; MODALITY_COUNT] = [
@@ -274,6 +268,8 @@ mod tests {
             surprise[i] = 0.01;
         }
         canvas.update_precision_from_surprise(&surprise);
+        const MODALITY_VIB: usize = 0;
+        const MODALITY_VIS: usize = 1;
         assert!(canvas.modality_precision[MODALITY_VIS] > canvas.modality_precision[MODALITY_VIB],
             "low surprise modality should have higher precision");
     }

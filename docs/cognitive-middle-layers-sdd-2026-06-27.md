@@ -1,9 +1,21 @@
 # 认知中间层架构 — 软件设计文档 (SDD)
 
-**日期**：2026-06-27
-**版本**：v1
-**状态**：REVIEW（锁定设计，未动工）
+**日期**：2026-06-27（Phase 1-4 落地 2026-06-28）
+**版本**：v1.1
+**状态**：Phase 1-4 已实施并通过 TDD（commit 13146e2 + body.rs 接入），Phase 5（端到端梯度）和 Phase 6（注意力统一）待做
 **前置阅读**：`perturbation-graph-phase-a-to-e-design-2026-06-18.md`、`prospection-emergence-scaffold-sdd-2026-06-27.md`
+
+### 实施偏离记录（v1 → v1.1）
+
+| 偏离项 | SDD v1 | 实际代码 | 原因 |
+|--------|--------|----------|------|
+| L0 sigmoid k | 8.0 | 20.0 | k=8 时 mature_opens_all 测试失败（sigmoid(8*(1.0-0.70-0.05))≈0.73 < 0.99 阈值），k=20 时 sigmoid(5.0)≈0.993 通过 |
+| L0 effective_mask 返回类型 | `[bool; AXIS_COUNT]` | `[f64; AXIS_COUNT]` 渐变增益 | 渐变增益优于硬切换，画布投射乘 f64 增益 |
+| L1 参数存储 | struct 字段（运行时可调） | module-level const | 简化：Phase 1 不需运行时调参 |
+| Pipeline tick 频率 | 100 Hz | 30 Hz（orchestrator 节奏） | 100Hz 是 AR-2 预测器频率，认知层在 30Hz orchestrator 串行刷新路径即可 |
+| L4 输出接入 | feed_intention / spike_surprise | `_output` 暂未读取 | Phase 5-6 工作：输出→意图/惊奇/注意力的接线待做 |
+| L4 seed_from_fast_path | SDD §7.4 接口定义 | 未实现 | Phase 5-6：L4↔perturbation_graph 交互待做 |
+| L4 PatternQueryResult | 3 variant | +Empty variant | 空库时无候选，需显式状态 |
 
 ---
 
@@ -112,8 +124,8 @@ N_eff(maturity) = N_floor + (AXIS_COUNT - N_floor) × sigmoid(k × (maturity - m
 参数:
   N_floor     = 32      # 新生期可用轴数（听觉全开 + 视觉仅亮度/运动）
   AXIS_COUNT  = 167     # 完全成熟时
-  k           = 8.0     # sigmoid 陡度
-  m₀          = 0.3     # 半开放成熟度
+  k           = 20.0    # sigmoid 陡度（v1.1: 从8.0调到20.0，见偏离记录）
+  m₀          = per-priority threshold  # 每优先级独立阈值（v1.1: 非单一m₀）
 ```
 
 ### 3.3 轴开放优先级
@@ -135,7 +147,7 @@ N_eff(maturity) = N_floor + (AXIS_COUNT - N_floor) × sigmoid(k × (maturity - m
 ```
 文件: 新建 developmental_gate.rs
 接口:
-  pub fn effective_mask(maturity: f64) -> [bool; AXIS_COUNT]
+  pub fn effective_mask(maturity: f64) -> [f64; AXIS_COUNT]  // v1.1: 返回渐变增益
   pub fn axis_gain(maturity: f64, axis: usize) -> f64   // 0.0..1.0 渐开
 被调用: L1 共享画布投射前
 ```
@@ -800,4 +812,4 @@ L3 依赖 L2 的输出存在，但可以晚于 L4 实施（L4 可以先不调制
 
 ---
 
-*文档结束。业主过目后决定是否动工、从哪个 Phase 开始。*
+*v1.1 更新：Phase 1-4 已通过 TDD 落地。Phase 5（端到端梯度 + 学习）和 Phase 6（注意力统一）待做。*

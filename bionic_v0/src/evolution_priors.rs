@@ -107,42 +107,12 @@ impl BiasPriors {
         }
     }
 
-    pub fn apply_to_claim_config(
-        &self,
-        time_w: &mut f64,
-        spatial_w: &mut f64,
-        modality_w: &mut f64,
-    ) {
-        *time_w = 0.35;
-        *spatial_w = 0.35;
-        *modality_w = 0.25;
-    }
-
-    pub fn band_converge_threshold(&self) -> f64 {
-        0.20
-    }
-
-    pub fn surprise_trigger_threshold(&self) -> f64 {
-        0.50
-    }
-
-    pub fn center_bias(&self, normalized_pos: (f64, f64)) -> f64 {
-        let center = 0.5;
-        let dist =
-            ((normalized_pos.0 - center).powi(2) + (normalized_pos.1 - center).powi(2)).sqrt();
-        0.5 * (1.0 - dist)
-    }
-
     pub fn band_sensitivity_at(&self, band_idx: usize) -> f64 {
         if band_idx < VIB_BANDS {
             self.band_sensitivity[band_idx]
         } else {
             0.5
         }
-    }
-
-    pub fn slot_growth_threshold(&self) -> f64 {
-        0.5
     }
 
     pub fn modify_rate_cap_for(&self, axis: BiasAxis) -> f64 {

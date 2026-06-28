@@ -337,7 +337,12 @@ impl Viewport {
         // axis. prediction_improvement = EMA of d(gap)/dt downward component —
         // the substrate form of "prediction is getting better". No label "good/bad";
         // it is a substrate quantity that the prediction engine will now predict.
-        let lp = self.self_development.read().unwrap().prediction_improvement;
+        let mut lp = self.self_development.read().unwrap().prediction_improvement;
+        if let Some(crate::cognitive_pipeline::CognitiveQuerySummary::Separated { .. }) =
+            self.read_cognitive_output()
+        {
+            lp = (lp + 0.1).min(1.0);
+        }
         self.push_observation(crate::INTERO_LEARNING_PROGRESS, now_us, lp);
     }
 

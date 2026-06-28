@@ -122,6 +122,11 @@ impl Viewport {
         let fp_hit_rate = self.perturbation_graph.read().unwrap().fast_path_hit_rate();
         let fp_gate = (1.0 - 0.80 * fp_hit_rate).clamp(0.20, 1.0);
         gap_pressure *= fp_gate;
+        if let Some(crate::cognitive_pipeline::CognitiveQuerySummary::Separated { .. }) =
+            self.read_cognitive_output()
+        {
+            gap_pressure += 0.15;
+        }
         gap_pressure = unit(gap_pressure);
 
         if drive > 0.05 || reentry > 0.05 || gap_pressure > 0.05 {

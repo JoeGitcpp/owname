@@ -85,9 +85,40 @@ pub const PG_EDGE_CAP: usize = 65536;
 /// 2 s is the typical persistence of an in-view patch across several frames.
 pub const PG_ACTIVE_WINDOW_US: u64 = 2_000_000;
 
-/// Eligibility-trace time constant for edge credit. Sub-second so a short
-/// chain of co-occurrences can propagate credit a few hops upstream.
+/// Legacy eligibility-trace time constant (600 ms). Superseded by the
+/// cascading fast/slow pair (PG_ELIG_TAU_FAST_US / PG_ELIG_TAU_SLOW_US)
+/// used by decay_eligibility() and decay_relation_eligibility().
+/// Kept for reference; not used by any live code path.
 pub const PG_ELIG_TAU_US: f64 = 600_000.0;
+
+// ── Cascading eligibility trace constants (supplement SDD §4.2) ──────────
+// Gerstner 2018 measured cortical elig windows 0.3–60 s; TAU_FAST is
+// a conservative cortical pick, TAU_SLOW covers multi-second causality.
+pub const PG_ELIG_TAU_FAST_US: f64 = 2_000_000.0; // 2 s
+pub const PG_ELIG_TAU_SLOW_US: f64 = 30_000_000.0; // 30 s
+pub const PG_ELIG_ALPHA: f64 = 0.7; // fast-trace weight in blend
+
+// ── Synaptic tagging & capture (Frey & Morris 1997) ─────────────────────
+pub const PG_ELIG_FLOOR: f64 = 0.05;
+pub const PG_TAG_LIFETIME_US: u64 = 60_000_000; // 60 s
+pub const PG_CAPTURE_THRESHOLD: f64 = 1.5;
+pub const PG_ELIG_REVIVE: f64 = 0.3;
+
+// ── Three-factor modulation channel gains (Hong et al. 2022) ────────────
+pub const PG_MOD_DA_GAIN: f64 = 1.0; // dopamine ≈ INTERO_LEARNING_PROGRESS
+pub const PG_MOD_NE_GAIN: f64 = 0.5; // norepinephrine ≈ INTERO_VITAL_ANXIETY
+pub const PG_MOD_5HT_GAIN: f64 = 0.3; // serotonin ≈ INTERO_RESERVE
+pub const PG_MOD_ACH_GAIN: f64 = 0.4; // acetylcholine ≈ INTERO_GAP_PRESSURE
+pub const PG_MOD_ACH_GATE: f64 = 0.3; // ACh gate threshold
+
+// ── Beta distribution relation strength (C1, Thompson 1933) ────────────
+pub const PG_BETA_FLOOR: f64 = 0.5;
+pub const PG_BETA_DECAY_RATE: f64 = 0.995;
+pub const PG_BETA_DECAY_INTERVAL: u32 = 1000;
+pub const PG_CREDIT_HIT_SCALE: f64 = 1.0;
+pub const PG_CREDIT_MISS_SCALE: f64 = 1.0;
+pub const PG_BETA_INIT_TOTAL: f64 = 2.0;
+pub const PG_OBSERVE_HIT: f64 = 0.5;
 
 /// Age-protection window — a node that has survived this long earns the full
 /// `PG_AGE_PROTECT_MAX_BONUS` to its eviction-defence score. 6 h ≈ a sleep
@@ -105,6 +136,80 @@ const PG_EDGE_SEED: f64 = 0.2;
 /// 1-minute idle decay constant used in the eviction-defence calculation. A
 /// node that has been silent for ~60 s loses most of its recency bonus.
 const PG_IDLE_DECAY_US: f64 = 60_000_000.0;
+
+// ── Cascading eligibility helpers ────────────────────────────────────────
+
+/// In-place cascading decay. `elig` = fast trace (also the combined output
+/// after this call). `elig_slow` = slow trace.  `dt_us` = elapsed since
+/// last fire.  The `elig` field is rewritten to the combined blend so
+/// downstream code that only reads `elig` gets the right number.
+fn cascading_elig_decay_edge(e: &mut PerturbationEdge, now_us: u64) {
+    let dt = now_us.saturating_sub(e.last_t_us) as f64;
+    let fast = (-dt / PG_ELIG_TAU_FAST_US).exp();
+    let slow = (-dt / PG_ELIG_TAU_SLOW_US).exp();
+    e.elig_slow = slow;
+    let combined = PG_ELIG_ALPHA * fast + (1.0 - PG_ELIG_ALPHA) * slow;
+    e.elig = combined;
+    if !e.tagged && combined < PG_ELIG_FLOOR && combined > 0.001 {
+        e.tagged = true;
+        e.tag_expiry_us = now_us + PG_TAG_LIFETIME_US;
+    }
+    if e.tagged && now_us > e.tag_expiry_us {
+        e.tagged = false;
+        e.tag_expiry_us = 0;
+    }
+}
+
+fn cascading_elig_decay_rel(r: &mut Relation, now_us: u64) {
+    let dt = now_us.saturating_sub(r.last_t_us) as f64;
+    let fast = (-dt / PG_ELIG_TAU_FAST_US).exp();
+    let slow = (-dt / PG_ELIG_TAU_SLOW_US).exp();
+    r.elig_slow = slow;
+    let combined = PG_ELIG_ALPHA * fast + (1.0 - PG_ELIG_ALPHA) * slow;
+    r.elig = combined;
+    if !r.tagged && combined < PG_ELIG_FLOOR && combined > 0.001 {
+        r.tagged = true;
+        r.tag_expiry_us = now_us + PG_TAG_LIFETIME_US;
+    }
+    if r.tagged && now_us > r.tag_expiry_us {
+        r.tagged = false;
+        r.tag_expiry_us = 0;
+    }
+}
+
+fn cascading_elig_fire_edge(e: &mut PerturbationEdge) {
+    e.elig = 1.0;
+    e.elig_slow = 1.0;
+    e.tagged = false;
+    e.tag_expiry_us = 0;
+}
+
+fn cascading_elig_fire_rel(r: &mut Relation) {
+    r.elig = 1.0;
+    r.elig_slow = 1.0;
+    r.tagged = false;
+    r.tag_expiry_us = 0;
+}
+
+/// Four-channel neuromodulation signal (Hong et al. 2022).
+/// Neutral state → M ≈ 1.0 (backward compatible with pure elig decay).
+pub fn compute_modulation(
+    learning_progress_delta: f64,
+    vital_anxiety: f64,
+    reserve: f64,
+    gap_pressure: f64,
+) -> f64 {
+    let mod_da = PG_MOD_DA_GAIN * learning_progress_delta;
+    let mod_ne = PG_MOD_NE_GAIN * vital_anxiety;
+    let mod_5ht = -PG_MOD_5HT_GAIN * (reserve - 0.5).max(0.0);
+    let base = (1.0 + mod_da + mod_ne + mod_5ht).clamp(0.0, 3.0);
+    let gate = if gap_pressure > PG_MOD_ACH_GATE {
+        1.0 + PG_MOD_ACH_GAIN * (gap_pressure - PG_MOD_ACH_GATE)
+    } else {
+        0.3
+    };
+    base * gate
+}
 
 /// Stable per-session node identifier. Edges reference nodes by id, NOT vector
 /// index, so eviction can move nodes around without silently breaking edges.
@@ -175,7 +280,15 @@ pub struct Relation {
     /// at last observation; 0.0 = no axes aligned. Multiplies strength when
     /// downstream inference picks the next hop.
     pub expressivity: f64,
+    /// Combined eligibility (fast/slow blend). This is the value downstream
+    /// code reads; the cascading state below drives it.
     pub elig: f64,
+    /// Slow-decay eligibility trace (TAU_SLOW = 30 s).
+    pub elig_slow: f64,
+    /// Synaptic tag: set when combined elig drops below PG_ELIG_FLOOR.
+    pub tagged: bool,
+    /// Wall-clock deadline for tag expiry (0 = no tag).
+    pub tag_expiry_us: u64,
     pub last_t_us: u64,
     pub last_axes_engaged: u8,
     /// A5 FastPath candidacy tracking. 0 = not currently above the promote
@@ -185,6 +298,59 @@ pub struct Relation {
     /// A drop below the threshold resets this field to 0 (a fresh climb
     /// restarts the clock — sustained presence is the qualifier).
     pub first_above_promote_t_us: u64,
+    /// Beta posterior α — "hit" pseudo-count (Thompson 1933, C1 SDD).
+    pub alpha: f64,
+    /// Beta posterior β — "miss" pseudo-count.
+    pub beta_param: f64,
+}
+
+impl Relation {
+    /// Posterior mean = α/(α+β). Equivalent to legacy strength.
+    pub fn beta_mean(&self) -> f64 {
+        self.alpha / (self.alpha + self.beta_param)
+    }
+
+    /// Uncertainty = 1/(α+β). High when few observations, low when many.
+    pub fn uncertainty(&self) -> f64 {
+        1.0 / (self.alpha + self.beta_param)
+    }
+
+    /// Posterior variance of the Beta distribution.
+    pub fn beta_variance(&self) -> f64 {
+        let s = self.alpha + self.beta_param;
+        (self.alpha * self.beta_param) / (s * s * (s + 1.0))
+    }
+
+    /// Decay both pseudo-counts toward the floor (prevents over-confidence).
+    pub fn decay_beta(&mut self) {
+        self.alpha = (self.alpha * PG_BETA_DECAY_RATE).max(PG_BETA_FLOOR);
+        self.beta_param = (self.beta_param * PG_BETA_DECAY_RATE).max(PG_BETA_FLOOR);
+        self.strength = self.beta_mean();
+    }
+
+    /// Record a positive credit observation via Beta update.
+    pub fn credit_hit(&mut self, amount: f64) {
+        self.alpha += amount * PG_CREDIT_HIT_SCALE;
+        self.strength = self.beta_mean();
+    }
+
+    /// Record a negative credit observation via Beta update.
+    pub fn credit_miss(&mut self, amount: f64) {
+        self.beta_param += amount * PG_CREDIT_MISS_SCALE;
+        self.strength = self.beta_mean();
+    }
+
+    /// Initialize Beta parameters from a legacy scalar strength value.
+    pub fn init_beta_from_strength(&mut self) {
+        self.alpha = self.strength * PG_BETA_INIT_TOTAL;
+        self.beta_param = (1.0 - self.strength) * PG_BETA_INIT_TOTAL;
+        if self.alpha < PG_BETA_FLOOR {
+            self.alpha = PG_BETA_FLOOR;
+        }
+        if self.beta_param < PG_BETA_FLOOR {
+            self.beta_param = PG_BETA_FLOOR;
+        }
+    }
 }
 
 // ── Phase A4: dynamic RelationKind discovery
@@ -648,8 +814,14 @@ pub struct PerturbationEdge {
     pub kind_byte: u8,
     /// EMA of co-occurrence/co-activation strength in [0,1].
     pub strength: f64,
-    /// Eligibility trace: 1.0 right after traversal, decays with PG_ELIG_TAU_US.
+    /// Combined eligibility (fast/slow blend).
     pub elig: f64,
+    /// Slow-decay eligibility trace (TAU_SLOW = 30 s).
+    pub elig_slow: f64,
+    /// Synaptic tag: set when combined elig drops below PG_ELIG_FLOOR.
+    pub tagged: bool,
+    /// Wall-clock deadline for tag expiry (0 = no tag).
+    pub tag_expiry_us: u64,
     pub last_t_us: u64,
 }
 
@@ -741,6 +913,7 @@ pub struct PerturbationGraph {
     /// "predicted last tick" against "observed now" — runtime-only, never
     /// serialized.
     pub pending_post_hoc: Option<RelId>,
+    beta_decay_counter: u32,
 }
 
 impl Default for PerturbationGraph {
@@ -777,6 +950,7 @@ impl Default for PerturbationGraph {
             post_hoc_disagree_ema: 0.0,
             held_scene: HeldScene::default(),
             pending_post_hoc: None,
+            beta_decay_counter: 0,
         }
     }
 }
@@ -1332,10 +1506,11 @@ impl PerturbationGraph {
             .iter_mut()
             .find(|r| r.from == from && r.to == to && r.kind_id == kind_id)
         {
-            r.strength = (r.strength + PG_REL_ALPHA * (1.0 - r.strength)).clamp(0.0, 1.0);
+            r.alpha += PG_OBSERVE_HIT;
+            r.strength = r.beta_mean();
             r.expressivity =
                 (1.0 - PG_REL_ALPHA) * r.expressivity + PG_REL_ALPHA * expr;
-            r.elig = 1.0;
+            cascading_elig_fire_rel(r);
             r.last_t_us = now_us;
             r.last_axes_engaged = engaged;
             return Some(r.id);
@@ -1352,9 +1527,14 @@ impl PerturbationGraph {
             strength: PG_REL_SEED,
             expressivity: expr,
             elig: 1.0,
+            elig_slow: 1.0,
+            tagged: false,
+            tag_expiry_us: 0,
             last_t_us: now_us,
             last_axes_engaged: engaged,
             first_above_promote_t_us: 0,
+            alpha: PG_REL_SEED * PG_BETA_INIT_TOTAL,
+            beta_param: (1.0 - PG_REL_SEED) * PG_BETA_INIT_TOTAL,
         });
         Some(id)
     }
@@ -1466,12 +1646,26 @@ impl PerturbationGraph {
         }
     }
 
-    /// Decay every relation's eligibility trace by elapsed time. Idempotent.
+    /// Decay every relation's eligibility trace by elapsed time (cascading).
     pub fn decay_relation_eligibility(&mut self, now_us: u64) {
         for r in self.relations.iter_mut() {
-            let dt = now_us.saturating_sub(r.last_t_us) as f64;
-            r.elig = (-dt / PG_ELIG_TAU_US).exp();
+            cascading_elig_decay_rel(r, now_us);
         }
+    }
+
+    /// Attempt synaptic-tag capture on all relations. Returns number captured.
+    pub fn try_capture_relation_tags(&mut self, modulation: f64) -> usize {
+        let mut count = 0;
+        for r in self.relations.iter_mut() {
+            if r.tagged && modulation > PG_CAPTURE_THRESHOLD {
+                r.elig = PG_ELIG_REVIVE;
+                r.elig_slow = PG_ELIG_REVIVE * 0.5;
+                r.tagged = false;
+                r.tag_expiry_us = 0;
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Traverse forward from an endpoint, calling `visit(endpoint, depth)` for
@@ -1518,11 +1712,56 @@ impl PerturbationGraph {
     /// Strongest outgoing relation (by strength × expressivity, the
     /// credit-weighted form the design doc specifies for inference).
     pub fn strongest_out_relation(&self, from: Endpoint) -> Option<&Relation> {
+        self.strongest_out_relation_epi(from, 0.0)
+    }
+
+    pub fn strongest_out_relation_epi(
+        &self,
+        from: Endpoint,
+        w_epi: f64,
+    ) -> Option<&Relation> {
         self.out_relations(from).max_by(|a, b| {
-            let av = a.strength * a.expressivity;
-            let bv = b.strength * b.expressivity;
+            let av = a.beta_mean() * a.expressivity + w_epi * a.uncertainty();
+            let bv = b.beta_mean() * b.expressivity + w_epi * b.uncertainty();
             av.partial_cmp(&bv).unwrap()
         })
+    }
+
+    /// Walk forward from `from` for up to `k_steps` hops via
+    /// [`strongest_out_relation`], collecting `(to, rel_id, score)`.
+    /// Stops early on dead-end or cycle.
+    pub fn rollout_chain(
+        &self,
+        from: Endpoint,
+        k_steps: usize,
+    ) -> Vec<(Endpoint, RelId, f64)> {
+        self.rollout_chain_epi(from, k_steps, 0.0)
+    }
+
+    pub fn rollout_chain_epi(
+        &self,
+        from: Endpoint,
+        k_steps: usize,
+        w_epi: f64,
+    ) -> Vec<(Endpoint, RelId, f64)> {
+        let mut chain = Vec::with_capacity(k_steps);
+        let mut cursor = from;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(from);
+        for _ in 0..k_steps {
+            if let Some(rel) = self.strongest_out_relation_epi(cursor, w_epi) {
+                let score = rel.beta_mean() * rel.expressivity
+                    + w_epi * rel.uncertainty();
+                if !visited.insert(rel.to) {
+                    break;
+                }
+                chain.push((rel.to, rel.id, score));
+                cursor = rel.to;
+            } else {
+                break;
+            }
+        }
+        chain
     }
 
     /// B2.1: temperature-sampled outgoing relation — the divergent counterpart
@@ -1539,19 +1778,27 @@ impl PerturbationGraph {
         temperature: f64,
         u: f64,
     ) -> Option<&Relation> {
-        // Cold / argmax fast path — identical result to strongest_out_relation.
+        self.sample_out_relation_epi(from, temperature, u, 0.0)
+    }
+
+    pub fn sample_out_relation_epi(
+        &self,
+        from: Endpoint,
+        temperature: f64,
+        u: f64,
+        w_epi: f64,
+    ) -> Option<&Relation> {
         if temperature <= crate::PG_WALK_TEMP_EPS {
-            return self.strongest_out_relation(from);
+            return self.strongest_out_relation_epi(from, w_epi);
         }
         let cands: Vec<&Relation> = self.out_relations(from).collect();
         if cands.is_empty() {
             return None;
         }
-        let score = |r: &Relation| (r.strength * r.expressivity).max(0.0);
+        let score = |r: &Relation| (r.beta_mean() * r.expressivity + w_epi * r.uncertainty()).max(0.0);
         let max_score = cands.iter().map(|r| score(r)).fold(0.0_f64, f64::max);
         if max_score <= 0.0 {
-            // No expressive edge yet — stay deterministic.
-            return self.strongest_out_relation(from);
+            return self.strongest_out_relation_epi(from, w_epi);
         }
         // Normalised power weights: the strongest edge is 1.0, weaker edges
         // decay with 1/temperature. Normalising by max_score avoids overflow
@@ -1563,7 +1810,7 @@ impl PerturbationGraph {
             .collect();
         let sum: f64 = weights.iter().sum();
         if sum <= 0.0 {
-            return self.strongest_out_relation(from);
+            return self.strongest_out_relation_epi(from, w_epi);
         }
         let target = u.clamp(0.0, 1.0) * sum;
         let mut acc = 0.0;
@@ -1837,6 +2084,17 @@ impl PerturbationGraph {
         }
     }
 
+    pub fn maybe_decay_beta(&mut self) {
+        self.beta_decay_counter += 1;
+        if self.beta_decay_counter < PG_BETA_DECAY_INTERVAL {
+            return;
+        }
+        self.beta_decay_counter = 0;
+        for r in self.relations.iter_mut() {
+            r.decay_beta();
+        }
+    }
+
     /// Periodic promote/demote pass. Mirrors the design-doc rules:
     /// - A relation that sustains strength > FAST_PATH_PROMOTE_TH for at
     ///   least FAST_PATH_PROMOTE_DURATION_US wall-clock, AND has expressivity
@@ -1946,6 +2204,15 @@ impl PerturbationGraph {
         fired_rel: RelId,
         observed_outcome: Endpoint,
     ) -> bool {
+        self.post_hoc_check_modulated(fired_rel, observed_outcome, 1.0)
+    }
+
+    pub fn post_hoc_check_modulated(
+        &mut self,
+        fired_rel: RelId,
+        observed_outcome: Endpoint,
+        modulation: f64,
+    ) -> bool {
         let (predicted_to, from_sig, to_sig) = match self.relation(fired_rel) {
             Some(r) => (
                 r.to,
@@ -1957,21 +2224,19 @@ impl PerturbationGraph {
         let observed_sig = self
             .endpoint_sig(observed_outcome)
             .unwrap_or([0.0; PG_NODE_SIG_DIM]);
-        // Agreement = how aligned the observed outcome's sig is to the
-        // predicted endpoint's sig. Above threshold = correct prediction.
         let _ = from_sig;
         let (_, axes_match) = relation_expressivity(&to_sig, &observed_sig);
         let agreement = axes_match as f64 / PG_NODE_SIG_DIM as f64;
         let correct = agreement > POST_HOC_AGREE_TH || predicted_to == observed_outcome;
         if let Some(r) = self.relations.iter_mut().find(|r| r.id == fired_rel) {
+            let scale = r.elig * modulation;
             if correct {
-                r.strength = (r.strength + 0.01).min(1.0);
+                r.credit_hit(scale);
             } else {
-                r.strength *= 0.95;
+                r.credit_miss(scale);
             }
+            r.strength = r.beta_mean();
         }
-        // Single post-hoc entry point also feeds the disagreement telemetry EMA
-        // (INTERO_POST_HOC_DISAGREE_RATE) — see `note_post_hoc_outcome`.
         self.note_post_hoc_outcome(!correct);
         correct
     }
@@ -2143,7 +2408,7 @@ impl PerturbationGraph {
         {
             e.strength =
                 (e.strength + PG_EDGE_SEED * (1.0 - e.strength)).clamp(0.0, 1.0);
-            e.elig = 1.0;
+            cascading_elig_fire_edge(e);
             e.last_t_us = now_us;
         } else {
             if self.edges.len() >= PG_EDGE_CAP {
@@ -2155,6 +2420,9 @@ impl PerturbationGraph {
                 kind_byte: k,
                 strength: PG_EDGE_SEED,
                 elig: 1.0,
+                elig_slow: 1.0,
+                tagged: false,
+                tag_expiry_us: 0,
                 last_t_us: now_us,
             });
         }
@@ -2171,13 +2439,26 @@ impl PerturbationGraph {
         }
     }
 
-    /// Decay edge eligibility traces (pure function of time-since-last-traversal).
-    /// Idempotent — safe to call every tick.
+    /// Decay edge eligibility traces (cascading fast+slow).
     pub fn decay_eligibility(&mut self, now_us: u64) {
         for e in self.edges.iter_mut() {
-            let dt = now_us.saturating_sub(e.last_t_us) as f64;
-            e.elig = (-dt / PG_ELIG_TAU_US).exp();
+            cascading_elig_decay_edge(e, now_us);
         }
+    }
+
+    /// Attempt synaptic-tag capture on all edges. Returns number captured.
+    pub fn try_capture_edge_tags(&mut self, modulation: f64) -> usize {
+        let mut count = 0;
+        for e in self.edges.iter_mut() {
+            if e.tagged && modulation > PG_CAPTURE_THRESHOLD {
+                e.elig = PG_ELIG_REVIVE;
+                e.elig_slow = PG_ELIG_REVIVE * 0.5;
+                e.tagged = false;
+                e.tag_expiry_us = 0;
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Outgoing edges of a node (read-only iterator).
@@ -2300,6 +2581,9 @@ impl PerturbationGraph {
                     kind_byte: oe.kind_byte,
                     strength: oe.strength,
                     elig: 0.0,
+                    elig_slow: 0.0,
+                    tagged: false,
+                    tag_expiry_us: 0,
                     last_t_us: oe.last_t_us,
                 });
             } else {
@@ -2320,6 +2604,9 @@ impl PerturbationGraph {
                             kind_byte: oe.kind_byte,
                             strength: oe.strength,
                             elig: 0.0,
+                            elig_slow: 0.0,
+                            tagged: false,
+                            tag_expiry_us: 0,
                             last_t_us: oe.last_t_us,
                         });
                     }
@@ -2376,7 +2663,9 @@ impl PerturbationGraph {
     /// persisted — they decay within MARK_DECAY_US (30 s) and reconstruct
     /// from the attention / intention subsystems each session.
     const VERSION_V1: u8 = 0x01;
-    const VERSION: u8 = 0x02;
+    const VERSION_V2: u8 = 0x02;
+    const VERSION_V3: u8 = 0x03;
+    const VERSION: u8 = 0x04; // v4: alpha + beta_param on Relation
 
     /// Bytes per node on disk. f64 = 8 bytes; u32 = 4; u64 = 8.
     const NODE_BYTES: usize = 4 // id u32
@@ -2388,9 +2677,11 @@ impl PerturbationGraph {
         + 8 // age_us
         + 8; // last_active_t_us
 
-    /// Bytes per edge on disk: from u32 + to u32 + kind u8 + strength f64 +
-    /// elig f64 + last_t_us u64 = 33.
-    const EDGE_BYTES: usize = 4 + 4 + 1 + 8 + 8 + 8;
+    /// Bytes per edge on disk (v3): from u32 + to u32 + kind u8 + strength f64
+    /// + elig f64 + elig_slow f64 + tagged u8 + tag_expiry u64 + last_t_us u64 = 50.
+    const EDGE_BYTES: usize = 4 + 4 + 1 + 8 + 8 + 8 + 1 + 8 + 8;
+    /// v2 edge size for backward-compat loading.
+    const EDGE_BYTES_V2: usize = 4 + 4 + 1 + 8 + 8 + 8;
 
     /// Endpoint on-disk size: tag u8 + id u32.
     const ENDPOINT_BYTES: usize = 1 + 4;
@@ -2407,10 +2698,14 @@ impl PerturbationGraph {
     /// Bytes per group member entry.
     const MEMBER_BYTES: usize = 4 + 8 + 8;
 
-    /// Bytes per relation: id u32 + Endpoint(5) ×2 + kind_id u32 + strength f64
-    /// + expressivity f64 + elig f64 + last_t_us u64 + last_axes_engaged u8
-    /// + first_above_promote_t_us u64.
+    /// Bytes per relation (v4): v3 fields + alpha f64 + beta_param f64.
     const REL_BYTES: usize =
+        4 + Self::ENDPOINT_BYTES + Self::ENDPOINT_BYTES + 4 + 8 + 8 + 8 + 8 + 1 + 8 + 8 + 1 + 8 + 8 + 8;
+    /// v3 relation size for backward-compat loading.
+    const REL_BYTES_V3: usize =
+        4 + Self::ENDPOINT_BYTES + Self::ENDPOINT_BYTES + 4 + 8 + 8 + 8 + 8 + 1 + 8 + 8 + 1 + 8;
+    /// v2 relation size for backward-compat loading.
+    const REL_BYTES_V2: usize =
         4 + Self::ENDPOINT_BYTES + Self::ENDPOINT_BYTES + 4 + 8 + 8 + 8 + 8 + 1 + 8;
 
     /// Bytes per RelationKind on disk.
@@ -2520,6 +2815,9 @@ impl PerturbationGraph {
             out.push(e.kind_byte);
             out.extend_from_slice(&e.strength.to_le_bytes());
             out.extend_from_slice(&e.elig.to_le_bytes());
+            out.extend_from_slice(&e.elig_slow.to_le_bytes());
+            out.push(if e.tagged { 1 } else { 0 });
+            out.extend_from_slice(&e.tag_expiry_us.to_le_bytes());
             out.extend_from_slice(&e.last_t_us.to_le_bytes());
         }
 
@@ -2571,9 +2869,14 @@ impl PerturbationGraph {
             out.extend_from_slice(&r.strength.to_le_bytes());
             out.extend_from_slice(&r.expressivity.to_le_bytes());
             out.extend_from_slice(&r.elig.to_le_bytes());
+            out.extend_from_slice(&r.elig_slow.to_le_bytes());
+            out.push(if r.tagged { 1 } else { 0 });
+            out.extend_from_slice(&r.tag_expiry_us.to_le_bytes());
             out.extend_from_slice(&r.last_t_us.to_le_bytes());
             out.push(r.last_axes_engaged);
             out.extend_from_slice(&r.first_above_promote_t_us.to_le_bytes());
+            out.extend_from_slice(&r.alpha.to_le_bytes());
+            out.extend_from_slice(&r.beta_param.to_le_bytes());
         }
 
         // ── Kinds ──────────────────────────────────────────────────────────
@@ -2618,14 +2921,14 @@ impl PerturbationGraph {
             return None;
         }
         let version = data[4];
-        if version != Self::VERSION && version != Self::VERSION_V1 {
+        if version != Self::VERSION && version != Self::VERSION_V3 && version != Self::VERSION_V2 && version != Self::VERSION_V1 {
             return None;
         }
         let mut off = 5usize;
         let next_id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
         off += 4;
-        // v2 has 3 additional next_* allocators in the header; v1 doesn't.
-        let (next_group_id, next_rel_id, next_kind_id) = if version == Self::VERSION {
+        // v2+ has 3 additional next_* allocators in the header; v1 doesn't.
+        let (next_group_id, next_rel_id, next_kind_id) = if version >= Self::VERSION_V2 {
             let ngid = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
             off += 4;
             let nrid = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
@@ -2701,7 +3004,8 @@ impl PerturbationGraph {
         if n_edges > PG_EDGE_CAP {
             return None;
         }
-        if data.len() < off + n_edges * Self::EDGE_BYTES {
+        let edge_stride = if version >= Self::VERSION { Self::EDGE_BYTES } else { Self::EDGE_BYTES_V2 };
+        if data.len() < off + n_edges * edge_stride {
             return None;
         }
         let mut edges = Vec::with_capacity(n_edges);
@@ -2716,6 +3020,17 @@ impl PerturbationGraph {
             off += 8;
             let elig = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
             off += 8;
+            let (elig_slow, tagged, tag_expiry_us) = if version >= Self::VERSION {
+                let es = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                let tg = data[off] != 0;
+                off += 1;
+                let te = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+                (es, tg, te)
+            } else {
+                (elig, false, 0)
+            };
             let last_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
             off += 8;
             edges.push(PerturbationEdge {
@@ -2724,6 +3039,9 @@ impl PerturbationGraph {
                 kind_byte,
                 strength,
                 elig,
+                elig_slow,
+                tagged,
+                tag_expiry_us,
                 last_t_us,
             });
         }
@@ -2737,7 +3055,7 @@ impl PerturbationGraph {
         let mut vocal_profiles: std::collections::HashMap<NodeId, VocalProfile> =
             std::collections::HashMap::new();
 
-        if version == Self::VERSION {
+        if version >= Self::VERSION_V2 {
             // Groups block
             if data.len() < off + 8 { return None; }
             let n_groups = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
@@ -2805,7 +3123,14 @@ impl PerturbationGraph {
             let n_relations = u64::from_le_bytes(data[off..off + 8].try_into().ok()?) as usize;
             off += 8;
             if n_relations > PG_REL_CAP { return None; }
-            if data.len() < off + n_relations * Self::REL_BYTES { return None; }
+            let rel_stride = if version >= Self::VERSION {
+                Self::REL_BYTES
+            } else if version >= Self::VERSION_V3 {
+                Self::REL_BYTES_V3
+            } else {
+                Self::REL_BYTES_V2
+            };
+            if data.len() < off + n_relations * rel_stride { return None; }
             for _ in 0..n_relations {
                 let id = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
                 off += 4;
@@ -2819,6 +3144,17 @@ impl PerturbationGraph {
                 off += 8;
                 let elig = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
                 off += 8;
+                let (elig_slow, tagged, tag_expiry_us) = if version >= Self::VERSION_V3 {
+                    let es = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                    let tg = data[off] != 0;
+                    off += 1;
+                    let te = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                    (es, tg, te)
+                } else {
+                    (elig, false, 0)
+                };
                 let last_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
                 off += 8;
                 let last_axes_engaged = data[off];
@@ -2826,6 +3162,15 @@ impl PerturbationGraph {
                 let first_above_promote_t_us =
                     u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
                 off += 8;
+                let (alpha, beta_param) = if version >= Self::VERSION {
+                    let a = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                    let b = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                    off += 8;
+                    (a, b)
+                } else {
+                    (1.0, 1.0)
+                };
                 relations.push(Relation {
                     id,
                     from,
@@ -2834,9 +3179,14 @@ impl PerturbationGraph {
                     strength,
                     expressivity,
                     elig,
+                    elig_slow,
+                    tagged,
+                    tag_expiry_us,
                     last_t_us,
                     last_axes_engaged,
                     first_above_promote_t_us,
+                    alpha,
+                    beta_param,
                 });
             }
             // Kinds block
@@ -2973,6 +3323,7 @@ impl PerturbationGraph {
             post_hoc_disagree_ema: 0.0,
             held_scene: HeldScene::default(), // runtime-only, never persisted
             pending_post_hoc: None,           // runtime-only, never persisted
+            beta_decay_counter: 0,
         })
     }
 }
@@ -3223,9 +3574,9 @@ mod tests {
         let b = g.add_node(0, sig_at(0.5));
         g.observe_edge(1_000, a, b, EdgeKind::Cooccur);
         assert!((g.edges[0].elig - 1.0).abs() < 1e-9);
-        // Decay several tau later — elig should drop to nearly 0.
-        g.decay_eligibility(1_000 + (PG_ELIG_TAU_US as u64) * 10);
-        assert!(g.edges[0].elig < 0.01, "elig must decay over many tau, got {}", g.edges[0].elig);
+        // After 10 slow-tau (300s) both fast and slow traces are near zero.
+        g.decay_eligibility(1_000 + (PG_ELIG_TAU_SLOW_US as u64) * 10);
+        assert!(g.edges[0].elig < 0.10, "elig must decay over many tau, got {}", g.edges[0].elig);
     }
 
     #[test]
@@ -3345,7 +3696,8 @@ mod tests {
         // test failure visible at compile-time of the test suite.
         // 4 + 8*24 + 8*8 + 8*6 + 8*4 + 8 + 8 + 8 = 4 + 192 + 64 + 48 + 32 + 24 = 364
         assert_eq!(PerturbationGraph::NODE_BYTES, 364);
-        assert_eq!(PerturbationGraph::EDGE_BYTES, 33);
+        assert_eq!(PerturbationGraph::EDGE_BYTES, 50); // v3: +elig_slow(8)+tagged(1)+tag_expiry(8)
+        assert_eq!(PerturbationGraph::EDGE_BYTES_V2, 33);
     }
 
     // ── Phase A1 tests: NodeGroup + soft membership ─────────────────────────
@@ -3748,6 +4100,60 @@ mod tests {
         assert_eq!(top.to, Endpoint::Node(to_a));
     }
 
+    // ── rollout_chain ────────────────────────────────────────────────────────
+
+    #[test]
+    fn rollout_chain_walks_forward_through_strongest() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.105));
+        let c = g.add_node(0, sig_at(0.11));
+        let d = g.add_node(0, sig_at(0.115));
+        for t in 0..5 {
+            g.observe_relation(t * 100, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+            g.observe_relation(t * 100, Endpoint::Node(b), Endpoint::Node(c), EdgeKind::Cooccur);
+            g.observe_relation(t * 100, Endpoint::Node(c), Endpoint::Node(d), EdgeKind::Cooccur);
+        }
+        let chain = g.rollout_chain(Endpoint::Node(a), 5);
+        assert_eq!(chain.len(), 3, "should walk a→b→c→d (3 hops)");
+        assert_eq!(chain[0].0, Endpoint::Node(b));
+        assert_eq!(chain[1].0, Endpoint::Node(c));
+        assert_eq!(chain[2].0, Endpoint::Node(d));
+    }
+
+    #[test]
+    fn rollout_chain_stops_on_cycle() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.105));
+        for t in 0..5 {
+            g.observe_relation(t * 100, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+            g.observe_relation(t * 100, Endpoint::Node(b), Endpoint::Node(a), EdgeKind::Cooccur);
+        }
+        let chain = g.rollout_chain(Endpoint::Node(a), 10);
+        assert_eq!(chain.len(), 1, "cycle a→b→a should stop at b");
+        assert_eq!(chain[0].0, Endpoint::Node(b));
+    }
+
+    #[test]
+    fn rollout_chain_stops_on_dead_end() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.105));
+        for t in 0..5 {
+            g.observe_relation(t * 100, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+        }
+        let chain = g.rollout_chain(Endpoint::Node(a), 5);
+        assert_eq!(chain.len(), 1, "b has no outgoing → stops");
+    }
+
+    #[test]
+    fn rollout_chain_empty_when_no_relations() {
+        let g = PerturbationGraph::default();
+        let chain = g.rollout_chain(Endpoint::Node(0), 3);
+        assert!(chain.is_empty());
+    }
+
     // ── B2.1: temperature-sampled walk step (sample_out_relation) ────────────
 
     #[test]
@@ -4065,8 +4471,8 @@ mod tests {
         let b = g.add_node(0, sig_at(0.11));
         let r_id = g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur).unwrap();
         assert!((g.relation(r_id).unwrap().elig - 1.0).abs() < 1e-9);
-        g.decay_relation_eligibility(1_000 + (PG_ELIG_TAU_US as u64) * 10);
-        assert!(g.relation(r_id).unwrap().elig < 0.01);
+        g.decay_relation_eligibility(1_000 + (PG_ELIG_TAU_SLOW_US as u64) * 10);
+        assert!(g.relation(r_id).unwrap().elig < 0.10);
     }
 
     #[test]
@@ -4454,6 +4860,101 @@ mod tests {
         );
     }
 
+    // ── T1-T4 temporal credit augment tests ───────────────────────────────
+
+    #[test]
+    fn cascading_elig_slow_trace_persists_after_fast_decays() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.0));
+        let b = g.add_node(0, sig_at(0.5));
+        g.observe_edge(1_000, a, b, EdgeKind::Cooccur);
+        assert!((g.edges[0].elig - 1.0).abs() < 1e-9);
+        assert!((g.edges[0].elig_slow - 1.0).abs() < 1e-9);
+        // After 3× fast tau (6s), fast trace is near zero but slow still alive.
+        let t_after_fast = 1_000 + (PG_ELIG_TAU_FAST_US as u64) * 3;
+        g.decay_eligibility(t_after_fast);
+        assert!(g.edges[0].elig > PG_ELIG_FLOOR,
+            "combined elig stays above floor thanks to slow trace, got {}", g.edges[0].elig);
+        assert!(g.edges[0].elig_slow > 0.5,
+            "slow trace still substantial after 3 fast-tau");
+    }
+
+    #[test]
+    fn three_factor_modulated_post_hoc_scales_with_elig() {
+        let mut g = PerturbationGraph::default();
+        let n1 = g.add_node(0, sig_at(0.10));
+        let n2 = g.add_node(0, sig_at(0.20));
+        let rid = g.observe_relation(1_000, Endpoint::Node(n1), Endpoint::Node(n2), EdgeKind::Cooccur).unwrap();
+        let s0 = g.relation(rid).unwrap().strength;
+        // High modulation + full elig → large delta.
+        g.post_hoc_check_modulated(rid, Endpoint::Node(n2), 2.0);
+        let s_high = g.relation(rid).unwrap().strength;
+        let delta_high = s_high - s0;
+        // Reset full beta state and decay elig to ~0, then check again.
+        let r_reset = g.relations.iter_mut().find(|r| r.id == rid).unwrap();
+        r_reset.strength = s0;
+        r_reset.init_beta_from_strength();
+        g.decay_relation_eligibility(1_000 + (PG_ELIG_TAU_SLOW_US as u64) * 20);
+        g.post_hoc_check_modulated(rid, Endpoint::Node(n2), 2.0);
+        let s_low_elig = g.relation(rid).unwrap().strength;
+        let delta_low = s_low_elig - s0;
+        assert!(delta_high > delta_low * 2.0,
+            "high elig should produce much larger strength change: high={delta_high} low={delta_low}");
+    }
+
+    #[test]
+    fn synaptic_tag_capture_revives_decayed_relation() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.20));
+        let rid = g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur).unwrap();
+        // Fire starts at elig=1.0, tagged=false. Tag is set when elig drops below floor.
+        assert!(!g.relation(rid).unwrap().tagged, "freshly fired = not yet tagged");
+        // Decay ~55s: combined drops below PG_ELIG_FLOOR, planting a tag.
+        let tag_t = 1_000 + 55_000_000;
+        g.decay_relation_eligibility(tag_t);
+        let r = g.relation(rid).unwrap();
+        assert!(r.tagged, "elig below floor plants a tag (elig={})", r.elig);
+        let elig_before_capture = r.elig;
+        // Deliver a strong surprise → try_capture should revive elig.
+        g.try_capture_relation_tags(PG_CAPTURE_THRESHOLD + 0.1);
+        let elig_after_capture = g.relation(rid).unwrap().elig;
+        assert!(elig_after_capture > elig_before_capture,
+            "tag capture must revive elig: before={elig_before_capture} after={elig_after_capture}");
+        assert!(!g.relation(rid).unwrap().tagged, "tag consumed after capture");
+    }
+
+    #[test]
+    fn synaptic_tag_expires_and_capture_has_no_effect() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, sig_at(0.10));
+        let b = g.add_node(0, sig_at(0.20));
+        let rid = g.observe_relation(1_000, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur).unwrap();
+        // Decay 55s to plant tag, then jump past tag_expiry (+ 60s more).
+        g.decay_relation_eligibility(1_000 + 55_000_000);
+        assert!(g.relation(rid).unwrap().tagged);
+        let expired_t = 1_000 + 55_000_000 + PG_TAG_LIFETIME_US + 1;
+        g.decay_relation_eligibility(expired_t);
+        assert!(!g.relation(rid).unwrap().tagged, "tag expired by decay");
+        let elig_before = g.relation(rid).unwrap().elig;
+        g.try_capture_relation_tags(PG_CAPTURE_THRESHOLD + 0.5);
+        let elig_after = g.relation(rid).unwrap().elig;
+        assert!((elig_after - elig_before).abs() < 1e-9,
+            "expired tag must not revive elig");
+    }
+
+    #[test]
+    fn compute_modulation_combines_four_channels() {
+        let m = compute_modulation(0.5, 0.3, 0.8, 0.6);
+        assert!(m > 0.0, "modulation must be positive with active signals");
+        let m_zero = compute_modulation(0.0, 0.0, 0.0, 0.0);
+        assert!(m_zero < m, "zero input gives lower modulation");
+        // ACh below gate → no ACh contribution.
+        let m_low_ach = compute_modulation(0.5, 0.3, 0.8, PG_MOD_ACH_GATE - 0.01);
+        let m_high_ach = compute_modulation(0.5, 0.3, 0.8, PG_MOD_ACH_GATE + 0.3);
+        assert!(m_high_ach > m_low_ach, "ACh above gate adds modulation");
+    }
+
     #[test]
     fn note_fast_path_usage_increments_counter_and_timestamp() {
         let mut g = PerturbationGraph::default();
@@ -4775,14 +5276,17 @@ mod tests {
     }
 
     #[test]
-    fn persistence_v2_stride_constants_pinned() {
+    fn persistence_v3_stride_constants_pinned() {
         assert_eq!(PerturbationGraph::NODE_BYTES, 364);
-        assert_eq!(PerturbationGraph::EDGE_BYTES, 33);
+        assert_eq!(PerturbationGraph::EDGE_BYTES, 50); // v3: +elig_slow(8)+tagged(1)+tag_expiry(8)
+        assert_eq!(PerturbationGraph::EDGE_BYTES_V2, 33);
         assert_eq!(PerturbationGraph::ENDPOINT_BYTES, 5);
         assert_eq!(PerturbationGraph::GROUP_HEADER_BYTES, 4 + 1 + 8 + 8 * PG_NODE_SIG_DIM + 8 + 8 + 8 + 8);
         assert_eq!(PerturbationGraph::MEMBER_BYTES, 20);
-        assert_eq!(PerturbationGraph::REL_BYTES, 4 + 5 + 5 + 4 + 8 + 8 + 8 + 8 + 1 + 8);
-        assert_eq!(PerturbationGraph::REL_BYTES, 59);
+        assert_eq!(PerturbationGraph::REL_BYTES, 4 + 5 + 5 + 4 + 8 + 8 + 8 + 8 + 1 + 8 + 8 + 1 + 8 + 8 + 8);
+        assert_eq!(PerturbationGraph::REL_BYTES, 92);
+        assert_eq!(PerturbationGraph::REL_BYTES_V3, 76);
+        assert_eq!(PerturbationGraph::REL_BYTES_V2, 59);
         assert_eq!(PerturbationGraph::KIND_BYTES, 4 + 8 * PG_NODE_SIG_DIM * 2 + 8 + 8 + 8);
         assert_eq!(PerturbationGraph::KIND_BYTES, 412);
         assert_eq!(PerturbationGraph::FAST_PATH_BYTES, 28);
@@ -4867,5 +5371,165 @@ mod tests {
         for (_, list) in &g.fast_paths.by_from {
             assert!(!list.is_empty());
         }
+    }
+
+    // ── C1 Beta distribution tests ─────────────────────────────────────────
+
+    fn make_test_relation_ab(alpha: f64, beta: f64) -> Relation {
+        Relation {
+            id: 1,
+            from: Endpoint::Node(1),
+            to: Endpoint::Node(2),
+            kind_id: 0,
+            strength: alpha / (alpha + beta),
+            expressivity: 1.0,
+            elig: 1.0,
+            elig_slow: 1.0,
+            tagged: false,
+            tag_expiry_us: 0,
+            last_t_us: 0,
+            last_axes_engaged: 0,
+            first_above_promote_t_us: 0,
+            alpha,
+            beta_param: beta,
+        }
+    }
+
+    #[test]
+    fn beta_mean_equals_strength() {
+        let r = make_test_relation_ab(1.0, 1.0);
+        assert!((r.beta_mean() - 0.5).abs() < 1e-9);
+        assert!((r.beta_mean() - r.strength).abs() < 1e-9);
+    }
+
+    #[test]
+    fn beta_credit_hit_raises_mean() {
+        let mut r = make_test_relation_ab(1.0, 1.0);
+        for _ in 0..10 {
+            r.credit_hit(1.0);
+        }
+        assert!(r.beta_mean() > 0.8, "10 hits should push mean above 0.8, got {}", r.beta_mean());
+    }
+
+    #[test]
+    fn beta_credit_miss_lowers_mean() {
+        let mut r = make_test_relation_ab(1.0, 1.0);
+        for _ in 0..10 {
+            r.credit_miss(1.0);
+        }
+        assert!(r.beta_mean() < 0.2, "10 misses should push mean below 0.2, got {}", r.beta_mean());
+    }
+
+    #[test]
+    fn beta_uncertainty_decreases_with_evidence() {
+        let r_new = make_test_relation_ab(1.0, 1.0);
+        let init_unc = r_new.uncertainty();
+        let mut r = make_test_relation_ab(1.0, 1.0);
+        for _ in 0..100 {
+            r.credit_hit(1.0);
+        }
+        assert!(r.uncertainty() < init_unc / 50.0,
+            "100 observations should shrink uncertainty by >50x: init={}, now={}", init_unc, r.uncertainty());
+    }
+
+    #[test]
+    fn beta_decay_prevents_overconfidence() {
+        let mut r = make_test_relation_ab(1.0, 1.0);
+        for _ in 0..100 {
+            r.credit_hit(1.0);
+        }
+        for _ in 0..10_000 {
+            r.decay_beta();
+        }
+        assert!((r.alpha - PG_BETA_FLOOR).abs() < 0.01,
+            "alpha should decay to floor, got {}", r.alpha);
+        assert!((r.beta_param - PG_BETA_FLOOR).abs() < 0.01,
+            "beta should decay to floor, got {}", r.beta_param);
+    }
+
+    #[test]
+    fn beta_init_from_legacy_strength() {
+        let mut r = make_test_relation_ab(1.0, 1.0);
+        r.strength = 0.7;
+        r.init_beta_from_strength();
+        let expected_alpha = 0.7 * PG_BETA_INIT_TOTAL;
+        let expected_beta = 0.3 * PG_BETA_INIT_TOTAL;
+        assert!((r.alpha - expected_alpha).abs() < 1e-9);
+        assert!((r.beta_param - expected_beta).abs() < 1e-9);
+        assert!((r.beta_mean() - 0.7).abs() < 1e-9);
+    }
+
+    // ── C2 Epistemic value tests ──────────────────────────────────────────
+
+    #[test]
+    fn epistemic_weight_decreases_with_maturity() {
+        let w_young = crate::epistemic_weight(0.0);
+        let w_mature = crate::epistemic_weight(1.0);
+        assert!(w_young > w_mature,
+            "young w={} should exceed mature w={}", w_young, w_mature);
+        assert!((w_young - 0.60).abs() < 1e-9);
+        assert!((w_mature - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn strongest_epi_prefers_uncertain_at_equal_strength() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, [0.5; PG_NODE_SIG_DIM]);
+        let b = g.add_node(0, [0.6; PG_NODE_SIG_DIM]);
+        let c = g.add_node(0, [0.7; PG_NODE_SIG_DIM]);
+        let r1 = g.observe_relation(0, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur).unwrap();
+        let r2 = g.observe_relation(0, Endpoint::Node(a), Endpoint::Node(c), EdgeKind::Cooccur).unwrap();
+        // Make r1 have same mean=0.5 but much more evidence → low uncertainty
+        if let Some(r) = g.relations.iter_mut().find(|r| r.id == r1) {
+            r.alpha = 500.0;
+            r.beta_param = 500.0;
+            r.strength = r.beta_mean();
+        }
+        // r2 stays at α=5,β=5 → mean=0.5, high uncertainty
+        let chosen = g.strongest_out_relation_epi(Endpoint::Node(a), 1.0).unwrap();
+        assert_eq!(chosen.id, r2, "should prefer less-observed (more uncertain) relation");
+    }
+
+    #[test]
+    fn strongest_epi_reverts_to_pragmatic_when_w0() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, [0.5; PG_NODE_SIG_DIM]);
+        let b = g.add_node(0, [0.6; PG_NODE_SIG_DIM]);
+        let c = g.add_node(0, [0.7; PG_NODE_SIG_DIM]);
+        g.observe_relation(0, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur);
+        g.observe_relation(0, Endpoint::Node(a), Endpoint::Node(c), EdgeKind::Cooccur);
+        let old = g.strongest_out_relation(Endpoint::Node(a)).map(|r| r.id);
+        let epi0 = g.strongest_out_relation_epi(Endpoint::Node(a), 0.0).map(|r| r.id);
+        assert_eq!(old, epi0, "w_epi=0 should match old API");
+    }
+
+    #[test]
+    fn rollout_epi_explores_uncertain_branch() {
+        let mut g = PerturbationGraph::default();
+        let root = g.add_node(0, [0.5; PG_NODE_SIG_DIM]);
+        let strong = g.add_node(0, [0.8; PG_NODE_SIG_DIM]);
+        let weak = g.add_node(0, [0.3; PG_NODE_SIG_DIM]);
+        for i in 0..50 {
+            g.observe_relation(i, Endpoint::Node(root), Endpoint::Node(strong), EdgeKind::Cooccur);
+        }
+        g.observe_relation(0, Endpoint::Node(root), Endpoint::Node(weak), EdgeKind::Cooccur);
+        let chain = g.rollout_chain_epi(Endpoint::Node(root), 1, 5.0);
+        assert!(!chain.is_empty());
+        assert_eq!(chain[0].0, Endpoint::Node(weak),
+            "high w_epi should prefer uncertain branch");
+    }
+
+    #[test]
+    fn post_hoc_modulated_uses_beta() {
+        let mut g = PerturbationGraph::default();
+        let a = g.add_node(0, [0.0; PG_NODE_SIG_DIM]);
+        let b = g.add_node(0, [1.0; PG_NODE_SIG_DIM]);
+        let rid = g.observe_relation(0, Endpoint::Node(a), Endpoint::Node(b), EdgeKind::Cooccur)
+            .expect("relation created");
+        let r_before = *g.relation(rid).unwrap();
+        g.post_hoc_check_modulated(rid, Endpoint::Node(b), 1.0);
+        let r_after = *g.relation(rid).unwrap();
+        assert!(r_after.alpha > r_before.alpha, "hit should increase alpha");
+        assert!((r_after.strength - r_after.beta_mean()).abs() < 1e-9, "strength must track beta_mean");
     }
 }

@@ -33,7 +33,14 @@ impl PatternEntry {
 }
 
 pub enum PatternQueryResult {
-    Completed { pattern: [f64; PATTERN_DIM], confidence: f64, index: usize },
+    Completed {
+        pattern: [f64; PATTERN_DIM],
+        confidence: f64,
+        index: usize,
+        /// L4 match error: retrieved_pattern[i] - query[i].
+        /// Positive = L4 expected more than L3 sent; drives FiLM weight update.
+        residual: [f64; PATTERN_DIM],
+    },
     Separated { new_id: usize },
     Ambiguous { top_candidates: Vec<(usize, f64)> },
     Empty,
@@ -83,10 +90,15 @@ impl PatternMemory {
             entry.strength = (entry.strength + 0.01).min(1.0);
 
             let retrieved = self.hopfield_retrieve(q);
+            let mut residual = [0.0f64; PATTERN_DIM];
+            for d in 0..PATTERN_DIM {
+                residual[d] = retrieved[d] - q[d];
+            }
             PatternQueryResult::Completed {
                 pattern: retrieved,
                 confidence: best_sim,
                 index: best_idx,
+                residual,
             }
         } else if best_sim < self.theta_separate {
             // Separation: new pattern
@@ -232,6 +244,104 @@ impl PatternMemory {
             }
         }
         self.entries.swap_remove(weakest);
+    }
+
+    // ── Persistence (hand-rolled binary, matches perturbation_graph pattern) ──
+
+    const MAGIC: [u8; 4] = *b"PMEM";
+    const VERSION: u8 = 0x01;
+
+    /// Bytes per entry on disk: PATTERN_DIM * 8 (f64s) + 4 (u32 access_count)
+    /// + 8 (u64 last_access_t_us) + 8 (f64 strength).
+    const ENTRY_BYTES: usize = PATTERN_DIM * 8 + 4 + 8 + 8;
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let cap = 4 + 1 // magic + version
+            + 8 + 8 + 8  // theta_complete, theta_separate, temperature
+            + 4           // n_entries (u32)
+            + self.entries.len() * Self::ENTRY_BYTES;
+        let mut out = Vec::with_capacity(cap);
+
+        // Header
+        out.extend_from_slice(&Self::MAGIC);
+        out.push(Self::VERSION);
+
+        // Adaptive thresholds + temperature
+        out.extend_from_slice(&self.theta_complete.to_le_bytes());
+        out.extend_from_slice(&self.theta_separate.to_le_bytes());
+        out.extend_from_slice(&self.temperature.to_le_bytes());
+
+        // Entries
+        out.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
+        for entry in &self.entries {
+            for &v in &entry.pattern {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&entry.access_count.to_le_bytes());
+            out.extend_from_slice(&entry.last_access_t_us.to_le_bytes());
+            out.extend_from_slice(&entry.strength.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        // Minimum: magic(4) + version(1) + 3 f64s(24) + n_entries u32(4) = 33
+        if data.len() < 33 {
+            return None;
+        }
+        if data[0..4] != Self::MAGIC {
+            return None;
+        }
+        if data[4] != Self::VERSION {
+            return None;
+        }
+        let mut off = 5usize;
+
+        let theta_complete = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+        off += 8;
+        let theta_separate = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+        off += 8;
+        let temperature = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+        off += 8;
+
+        let n_entries = u32::from_le_bytes(data[off..off + 4].try_into().ok()?) as usize;
+        off += 4;
+
+        if n_entries > PATTERN_CAP {
+            return None;
+        }
+        if data.len() < off + n_entries * Self::ENTRY_BYTES {
+            return None;
+        }
+
+        let mut entries = Vec::with_capacity(n_entries);
+        for _ in 0..n_entries {
+            let mut pattern = [0.0f64; PATTERN_DIM];
+            for v in pattern.iter_mut() {
+                *v = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+                off += 8;
+            }
+            let access_count = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+            off += 4;
+            let last_access_t_us = u64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+            off += 8;
+            let strength = f64::from_le_bytes(data[off..off + 8].try_into().ok()?);
+            off += 8;
+            entries.push(PatternEntry {
+                pattern,
+                access_count,
+                last_access_t_us,
+                strength,
+            });
+        }
+
+        Some(Self {
+            entries,
+            theta_complete,
+            theta_separate,
+            temperature,
+            tick_counter: 0,
+        })
     }
 }
 
@@ -415,5 +525,79 @@ mod tests {
         b[1] = 1.0;
         let sim = cosine_similarity(&a, &b);
         assert!(sim.abs() < 1e-10, "orthogonal similarity should be ~0, got {sim}");
+    }
+
+    // ── Serialization round-trip tests ─────────────────────────────────
+
+    #[test]
+    fn serialize_empty_round_trips() {
+        let pm = PatternMemory::new();
+        let bytes = pm.serialize();
+        let restored = PatternMemory::deserialize(&bytes).expect("deserialize empty should succeed");
+        assert_eq!(restored.pattern_count(), 0);
+        assert!((restored.theta_complete - pm.theta_complete).abs() < 1e-15);
+        assert!((restored.theta_separate - pm.theta_separate).abs() < 1e-15);
+        assert!((restored.temperature - pm.temperature).abs() < 1e-15);
+    }
+
+    #[test]
+    fn serialize_with_entries_round_trips() {
+        let mut pm = PatternMemory::new();
+        // Insert orthogonal patterns directly to guarantee multiple entries
+        for i in 0..5 {
+            let mut p = [0.0f64; PATTERN_DIM];
+            p[i % PATTERN_DIM] = 1.0;
+            pm.entries.push(PatternEntry {
+                pattern: p,
+                access_count: (i as u32) + 1,
+                last_access_t_us: i as u64 * 100_000,
+                strength: 0.5 + (i as f64) * 0.1,
+            });
+        }
+        pm.update_thresholds(0.6);
+        assert!(pm.pattern_count() >= 2, "should have accumulated patterns");
+
+        let bytes = pm.serialize();
+        let restored = PatternMemory::deserialize(&bytes).expect("deserialize should succeed");
+
+        assert_eq!(restored.pattern_count(), pm.pattern_count());
+        assert!((restored.theta_complete - pm.theta_complete).abs() < 1e-15);
+        assert!((restored.theta_separate - pm.theta_separate).abs() < 1e-15);
+
+        // Verify each entry matches exactly
+        for (orig, rest) in pm.entries.iter().zip(restored.entries.iter()) {
+            for d in 0..PATTERN_DIM {
+                assert!((orig.pattern[d] - rest.pattern[d]).abs() < 1e-15,
+                    "pattern dim {d} mismatch");
+            }
+            assert_eq!(orig.access_count, rest.access_count);
+            assert_eq!(orig.last_access_t_us, rest.last_access_t_us);
+            assert!((orig.strength - rest.strength).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_bad_magic() {
+        let pm = PatternMemory::new();
+        let mut bytes = pm.serialize();
+        bytes[0] = b'X'; // corrupt magic
+        assert!(PatternMemory::deserialize(&bytes).is_none());
+    }
+
+    #[test]
+    fn deserialize_rejects_truncated() {
+        let mut pm = PatternMemory::new();
+        let p = make_pattern_varied(42);
+        pm.query(&p, 1000);
+        let bytes = pm.serialize();
+        // Truncate mid-entry
+        let truncated = &bytes[..bytes.len() - 10];
+        assert!(PatternMemory::deserialize(truncated).is_none());
+    }
+
+    #[test]
+    fn deserialize_rejects_too_short() {
+        assert!(PatternMemory::deserialize(&[]).is_none());
+        assert!(PatternMemory::deserialize(&[0u8; 10]).is_none());
     }
 }
