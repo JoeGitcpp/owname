@@ -140,6 +140,38 @@ pub struct PredictorState {
     pub last_err: f64,
     pub total_updates: u64,
     pub mean_sq_err: f64,
+    pub last_ctx: usize,
+}
+
+// ── Modality-level anomaly detection (HTM-inspired, SDD 2026-06-28 §2) ──
+
+pub const ANOMALY_MODALITY_COUNT: usize = 5;
+const ANOMALY_EMA_ALPHA: f64 = 0.1;
+const ANOMALY_SIGMA_THRESHOLD: f64 = 2.0;
+const ANOMALY_SIGMA_WARMUP: u64 = 30;
+pub const ANOMALY_MATURITY_GATE: f64 = 0.4;
+pub const ANOMALY_ROLLOUT_TRIGGER: f64 = 0.3;
+
+const MODALITY_RANGES: [(usize, usize); ANOMALY_MODALITY_COUNT] = [
+    (0, crate::VIB_BANDS),
+    (crate::AXIS_VIS_BASE, crate::VIS_AXES),
+    (crate::AXIS_INTERO_BASE, crate::INTERO_AXES),
+    (crate::AXIS_CODE_BASE, crate::CODE_AXES),
+    (crate::AXIS_GAUSS_BASE, crate::GAUSS_SUMMARY_AXES + crate::DEFENSE_SUMMARY_AXES),
+];
+
+pub struct ModalityAnomalyState {
+    pub unpredicted_frac: [f64; ANOMALY_MODALITY_COUNT],
+    pub err_sigma: [f64; crate::AXIS_COUNT],
+}
+
+impl Default for ModalityAnomalyState {
+    fn default() -> Self {
+        Self {
+            unpredicted_frac: [0.0; ANOMALY_MODALITY_COUNT],
+            err_sigma: [0.0; crate::AXIS_COUNT],
+        }
+    }
 }
 
 impl PredictorState {
@@ -151,6 +183,7 @@ impl PredictorState {
             last_err: 0.0,
             total_updates: 0,
             mean_sq_err: 0.0,
+            last_ctx: 0,
         }
     }
 }
@@ -1558,6 +1591,10 @@ pub struct Viewport {
     /// the lineage reset, so a fresh/merged body inherits no social high-water-
     /// mark. The clock it feeds (developmental_maturity) is what persists.
     pub social_contingency: RwLock<crate::social_contingency::SocialContingencyState>,
+
+    /// HTM-inspired modality-level anomaly detection (SDD 2026-06-28 §2).
+    /// Tracks per-modality fraction of axes whose prediction error exceeds 2σ.
+    pub modality_anomaly: RwLock<ModalityAnomalyState>,
 }
 
 impl Viewport {
@@ -1695,6 +1732,7 @@ impl Viewport {
             social_contingency: RwLock::new(
                 crate::social_contingency::SocialContingencyState::default(),
             ),
+            modality_anomaly: RwLock::new(ModalityAnomalyState::default()),
         }
     }
 
@@ -2446,6 +2484,9 @@ impl Viewport {
         if c <= 0.0 {
             return;
         }
+        if self.modality_anomaly_blocks_maturity() {
+            return;
+        }
         let mut m = self.developmental_maturity.write().unwrap();
         *m = (*m + c * crate::MATURITY_GAIN * (1.0 - *m)).clamp(0.0, 1.0);
     }
@@ -2469,8 +2510,59 @@ impl Viewport {
         if imp <= 0.0 {
             return;
         }
+        if self.modality_anomaly_blocks_maturity() {
+            return;
+        }
         let mut m = self.developmental_maturity.write().unwrap();
         *m = (*m + imp * crate::MATURITY_PROGRESS_GAIN * (1.0 - *m)).clamp(0.0, 1.0);
+    }
+
+    /// HTM-inspired modality-level anomaly detection (SDD 2026-06-28 §2).
+    /// Computes per-modality fraction of axes whose |err| > 2σ.
+    pub fn tick_modality_anomaly(&self, _now_us: u64) {
+        let mut state = self.modality_anomaly.write().unwrap();
+        for (m_idx, &(base, size)) in MODALITY_RANGES.iter().enumerate() {
+            let mut unpredicted_count = 0usize;
+            let mut active_count = 0usize;
+            for i in base..(base + size) {
+                let ps = self.predictors[i].read().unwrap();
+                if ps.total_updates < ANOMALY_SIGMA_WARMUP {
+                    continue;
+                }
+                active_count += 1;
+                let err_abs = ps.last_err.abs();
+                state.err_sigma[i] = 0.98 * state.err_sigma[i] + 0.02 * err_abs;
+                if state.err_sigma[i] > 1e-12
+                    && err_abs > ANOMALY_SIGMA_THRESHOLD * state.err_sigma[i]
+                {
+                    unpredicted_count += 1;
+                }
+            }
+            let raw_frac = if active_count > 0 {
+                unpredicted_count as f64 / active_count as f64
+            } else {
+                0.0
+            };
+            state.unpredicted_frac[m_idx] =
+                (1.0 - ANOMALY_EMA_ALPHA) * state.unpredicted_frac[m_idx]
+                    + ANOMALY_EMA_ALPHA * raw_frac;
+        }
+    }
+
+    /// Returns true if any modality's anomaly fraction exceeds the maturity gate.
+    pub fn modality_anomaly_blocks_maturity(&self) -> bool {
+        let state = self.modality_anomaly.read().unwrap();
+        state.unpredicted_frac.iter().any(|&f| f > ANOMALY_MATURITY_GATE)
+    }
+
+    /// Returns true if any modality's anomaly fraction exceeds the rollout trigger.
+    pub fn modality_anomaly_triggers_rollout(&self) -> bool {
+        let state = self.modality_anomaly.read().unwrap();
+        state.unpredicted_frac.iter().any(|&f| f > ANOMALY_ROLLOUT_TRIGGER)
+    }
+
+    pub fn read_modality_anomaly(&self) -> [f64; ANOMALY_MODALITY_COUNT] {
+        self.modality_anomaly.read().unwrap().unpredicted_frac
     }
 
     /// Restore the developmental clock from a checkpoint. Boot-only; clamps to
@@ -2685,13 +2777,22 @@ impl Viewport {
             }
         }
 
-        // Compute raw scores: confidence * recency (attention_bias = 1).
+        // Phase 6: canvas ignition modulates attention scores.
+        // Canvas salience = fraction of ignited dims (0..1). Higher ignition
+        // means the cognitive pipeline has strong multi-modal signal → boost
+        // the focused slot's score proportionally.
+        let canvas_salience = self.read_cognitive_salience()
+            .map(|(_, ignited)| ignited as f64 / crate::shared_canvas::CANVAS_DIM as f64)
+            .unwrap_or(0.0);
+
+        // Compute raw scores: confidence * recency * (1 + canvas_boost).
+        let canvas_boost = 1.0 + canvas_salience;
         let mut raw = [0.0f64; N_OBJECT_SLOTS];
         for i in 0..N_OBJECT_SLOTS {
             if let Some((conf, last_t)) = info[i] {
                 let dt = now_us.saturating_sub(last_t);
                 let recency = (1.0 - dt as f64 / SLOT_IDLE_US as f64).clamp(0.0, 1.0);
-                raw[i] = conf * recency;
+                raw[i] = conf * recency * canvas_boost;
             }
         }
 
@@ -3669,6 +3770,17 @@ impl Viewport {
         ps.a = a;
         ps.b = b;
         ps.last_err = last_err;
+        ps.total_updates = ps.total_updates.wrapping_add(1);
+        let alpha = 0.02_f64;
+        ps.mean_sq_err = (1.0 - alpha) * ps.mean_sq_err + alpha * last_err * last_err;
+    }
+
+    pub fn update_predictor_ctx(&self, axis: usize, a: f64, b: f64, last_err: f64, ctx: usize) {
+        let mut ps = self.predictors[axis].write().unwrap();
+        ps.a = a;
+        ps.b = b;
+        ps.last_err = last_err;
+        ps.last_ctx = ctx;
         ps.total_updates = ps.total_updates.wrapping_add(1);
         let alpha = 0.02_f64;
         ps.mean_sq_err = (1.0 - alpha) * ps.mean_sq_err + alpha * last_err * last_err;
@@ -5541,6 +5653,9 @@ impl Viewport {
     /// Called by the orchestrator at 30 Hz after refresh_global_attention,
     /// before tick_perturbation_intero.
     pub fn tick_cognitive_pipeline(&self, now_us: u64) {
+        use crate::cognitive_pipeline::CognitiveQuerySummary;
+        use crate::perturbation_graph::{Endpoint, MarkChannel, MarkRef};
+
         let mut axes = [0.0f64; crate::AXIS_COUNT];
         for i in 0..crate::AXIS_COUNT {
             if let Some(sample) = self.read_latest_observations(i, 1).first() {
@@ -5556,10 +5671,68 @@ impl Viewport {
 
         let maturity = self.developmental_maturity();
 
+        // §4.3 Phase 6: ActiveFocusTrace pressure/resonance → L3 FiLM context
+        let (attention_pressure, attention_resonance) = {
+            let aft = self.active_surface.read().unwrap();
+            let idx = aft.aperture_trace_index;
+            if idx >= 0 && (idx as usize) < aft.traces.len() {
+                (aft.traces[idx as usize].pressure, aft.traces[idx as usize].resonance)
+            } else {
+                (0.0, 0.0)
+            }
+        };
+
         let mut pipe = self.cognitive_pipeline.write().unwrap();
-        let output = pipe.tick(&axes, &surprise, maturity, now_us);
+        let output = pipe.tick(&axes, &surprise, maturity, now_us,
+            attention_pressure, attention_resonance);
+        let query = output.query_result;
+
+        // §7.4: seed L4 from PG FastPath sigs (aligns with consolidation interval)
+        if pipe.patterns.pattern_count() == 0 || pipe.patterns.tick_count() % 10_000 == 0 {
+            let graph = self.perturbation_graph.read().unwrap();
+            let sigs = graph.fast_path_dest_sigs();
+            drop(graph);
+            if !sigs.is_empty() {
+                pipe.seed_from_fast_paths(&sigs, now_us);
+            }
+        }
+
         drop(pipe);
         *self.last_cognitive_output.write().unwrap() = Some(output);
+
+        // §8: L4 output → perturbation_graph actions
+        match query {
+            CognitiveQuerySummary::Completed { confidence, .. } => {
+                // feed_intention: recognized pattern drives intention toward anchor
+                let mut graph = self.perturbation_graph.write().unwrap();
+                let anchor = graph.most_bound().map(|n| MarkRef::Node(n.id))
+                    .or_else(|| graph.most_bound_group().map(|g| MarkRef::Group(g.id)));
+                if let Some(target) = anchor {
+                    graph.stamp_mark(MarkChannel::Attention, target, confidence, now_us);
+                }
+            }
+            CognitiveQuerySummary::Separated { .. } => {
+                // spike_surprise: novel pattern → boost attention entropy
+                let mut graph = self.perturbation_graph.write().unwrap();
+                if let Some(n) = graph.most_bound() {
+                    let ep = Endpoint::Node(n.id);
+                    graph.observe_relation_emergent(
+                        now_us,
+                        ep,
+                        ep,
+                    );
+                }
+            }
+            CognitiveQuerySummary::Ambiguous { .. } => {
+                // request_attention_focus: competing candidates → sharpen attention
+                let mut graph = self.perturbation_graph.write().unwrap();
+                let anchor = graph.most_bound().map(|n| MarkRef::Node(n.id));
+                if let Some(target) = anchor {
+                    graph.stamp_mark(MarkChannel::Attention, target, 0.5, now_us);
+                }
+            }
+            CognitiveQuerySummary::Empty => {}
+        }
     }
 
     /// Read the cognitive pipeline's query-result summary from the most recent
@@ -5847,10 +6020,13 @@ impl Viewport {
         // Decide whether to actively commit a new intention this tick.
         // Three gates: silent run long enough, candidate exists, candidate
         // score above the minimum bar.
+        // Fourth gate (SDD 2026-06-28 §2.3.2): modality anomaly triggers
+        // rollout even when FastPath is firing — "the world changed, re-evaluate".
         const ACTIVE_REASONING_FAST_PATH_SILENT_TICKS: u32 = 3;
         const ACTIVE_REASONING_MIN_SCORE: f64 = 0.05;
+        let anomaly_trigger = self.modality_anomaly_triggers_rollout();
         let mut intention = self.intention.write().unwrap();
-        if silent >= ACTIVE_REASONING_FAST_PATH_SILENT_TICKS {
+        if silent >= ACTIVE_REASONING_FAST_PATH_SILENT_TICKS || anomaly_trigger {
             // 1) Perception-derived candidate: the live anchor's strongest relation.
             if let Some((target_ep, rel_id)) = candidate {
                 if candidate_score >= ACTIVE_REASONING_MIN_SCORE {

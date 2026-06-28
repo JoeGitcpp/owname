@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use bionic_v0::predictor::Ar2Predictor;
+use bionic_v0::predictor::ContextGatedPredictor;
 use bionic_v0::viewport::Viewport;
 use bionic_v0::AXIS_VIB;
 
@@ -54,7 +54,7 @@ fn injected_prior_shifts_prediction() {
     t += 10_000;
     push_obs(&vp, axis, t, 0.0);
 
-    let mut p = Ar2Predictor::new(axis);
+    let mut p = ContextGatedPredictor::new(axis);
     p.tick(&vp);
     let pred_no_prior = vp.latest_prediction(axis).unwrap_or(f64::NAN);
 
@@ -63,7 +63,7 @@ fn injected_prior_shifts_prediction() {
     push_obs(&vp, axis, t, 0.0);
     t += 10_000;
     push_obs(&vp, axis, t, 0.0);
-    let mut p2 = Ar2Predictor::new(axis);
+    let mut p2 = ContextGatedPredictor::new(axis);
     p2.tick(&vp);
     let pred_with_prior = vp.latest_prediction(axis).unwrap_or(f64::NAN);
 
@@ -80,7 +80,7 @@ fn low_layer_never_writes_its_own_prior() {
     // with no high layer present, the prior stays exactly where it started.
     let vp = Arc::new(Viewport::new());
     let axis = AXIS_VIB;
-    let mut p = Ar2Predictor::new(axis);
+    let mut p = ContextGatedPredictor::new(axis);
 
     let standing = 0.15;
     vp.push_prior(axis, standing); // pretend a high layer set it once
@@ -112,7 +112,7 @@ fn correct_prior_reduces_error() {
     // --- no prior ---
     let vp0 = Arc::new(Viewport::new());
     let axis = AXIS_VIB;
-    let mut p0 = Ar2Predictor::new(axis);
+    let mut p0 = ContextGatedPredictor::new(axis);
     let mut t = 1_000u64;
     push_obs(&vp0, axis, t, offset);
     t += 10_000;
@@ -125,7 +125,7 @@ fn correct_prior_reduces_error() {
 
     // --- with a prior equal to the offset ---
     let vp1 = Arc::new(Viewport::new());
-    let mut p1 = Ar2Predictor::new(axis);
+    let mut p1 = ContextGatedPredictor::new(axis);
     vp1.push_prior(axis, offset);
     let mut t1 = 1_000u64;
     push_obs(&vp1, axis, t1, offset);

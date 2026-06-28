@@ -2317,6 +2317,21 @@ impl PerturbationGraph {
         self.vocal_profiles.retain(|nid, _| live_ids.contains(nid));
     }
 
+    /// §7.4: Collect FastPath destination node signatures for L4 seeding.
+    pub fn fast_path_dest_sigs(&self) -> Vec<[f64; PG_NODE_SIG_DIM]> {
+        let mut sigs = Vec::new();
+        for fp in self.fast_paths.by_endpoints.values() {
+            if let Some(rel) = self.relation(fp.rel_id) {
+                if let Endpoint::Node(nid) = rel.to {
+                    if let Some(n) = self.node(nid) {
+                        sigs.push(n.sig);
+                    }
+                }
+            }
+        }
+        sigs
+    }
+
     // ── Mark ops (Phase A7: the "指向/标记" operator) ───────────────────────
 
     /// Returns true if the MarkRef target still resolves to a live entity.

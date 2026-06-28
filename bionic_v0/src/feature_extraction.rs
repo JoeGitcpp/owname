@@ -8,6 +8,7 @@ const ISTA_STEPS: usize = 5;
 const ISTA_STEP_SIZE: f64 = 0.02;
 const SPARSE_LAMBDA: f64 = 0.1;
 const DICT_LR: f64 = 0.001;
+const TOPDOWN_DICT_LR: f64 = 0.001;
 const DICT_UPDATE_INTERVAL: u32 = 100;
 const DIV_NORM_SIGMA_SQ: f64 = 0.01;
 
@@ -147,6 +148,36 @@ impl FeatureExtractor {
         active as f64 / N_FEATURES as f64
     }
 
+    pub fn update_from_topdown(&mut self, grad_pools: &[f64; N_POOLS], canvas: &[f64; CANVAS_DIM]) {
+        let mut grad_coeff = [0.0f64; N_FEATURES];
+        for j in 0..N_FEATURES {
+            let g = self.pool_assignment[j];
+            if self.pooled[g] > 1e-10 {
+                grad_coeff[j] = grad_pools[g] * self.coefficients[j] / self.pooled[g];
+            }
+        }
+        for i in 0..CANVAS_DIM {
+            for j in 0..N_FEATURES {
+                if self.coefficients[j].abs() > 1e-8 {
+                    self.dictionary[i][j] -= TOPDOWN_DICT_LR * grad_coeff[j] * canvas[i];
+                }
+            }
+        }
+        normalize_dictionary_columns(&mut self.dictionary);
+    }
+
+    pub fn reconstruction_residual(&self, canvas: &[f64; CANVAS_DIM]) -> [f64; CANVAS_DIM] {
+        let mut residual = [0.0f64; CANVAS_DIM];
+        for i in 0..CANVAS_DIM {
+            let mut recon = 0.0f64;
+            for j in 0..N_FEATURES {
+                recon += self.dictionary[i][j] * self.coefficients[j];
+            }
+            residual[i] = canvas[i] - recon;
+        }
+        residual
+    }
+
     pub fn reconstruction_error(&self, canvas: &[f64; CANVAS_DIM]) -> f64 {
         let mut mse = 0.0f64;
         for i in 0..CANVAS_DIM {
@@ -273,6 +304,53 @@ mod tests {
             let norm = norm_sq.sqrt();
             assert!((norm - 1.0).abs() < 1e-6,
                 "dictionary column {j} norm should be ~1.0, got {norm}");
+        }
+    }
+
+    #[test]
+    fn topdown_update_changes_dictionary() {
+        let mut fe = FeatureExtractor::new(0xDEAD_BEEF);
+        let mut canvas = zero_canvas();
+        for i in 0..CANVAS_DIM { canvas[i] = 0.5; }
+        fe.step(&canvas);
+        let dict_before = fe.dictionary.clone();
+
+        let mut grad = [0.0f64; N_POOLS];
+        grad[0] = 1.0;
+        fe.update_from_topdown(&grad, &canvas);
+
+        let mut changed = false;
+        for i in 0..CANVAS_DIM {
+            for j in 0..N_FEATURES {
+                if (fe.dictionary[i][j] - dict_before[i][j]).abs() > 1e-12 {
+                    changed = true;
+                    break;
+                }
+            }
+            if changed { break; }
+        }
+        assert!(changed, "topdown gradient should change dictionary");
+    }
+
+    #[test]
+    fn topdown_update_preserves_column_norms() {
+        let mut fe = FeatureExtractor::new(0xDEAD_BEEF);
+        let mut canvas = zero_canvas();
+        for i in 0..CANVAS_DIM { canvas[i] = 0.3; }
+        fe.step(&canvas);
+
+        let mut grad = [0.1f64; N_POOLS];
+        grad[0] = 1.0;
+        fe.update_from_topdown(&grad, &canvas);
+
+        for j in 0..N_FEATURES {
+            let mut norm_sq = 0.0f64;
+            for i in 0..CANVAS_DIM {
+                norm_sq += fe.dictionary[i][j] * fe.dictionary[i][j];
+            }
+            let norm = norm_sq.sqrt();
+            assert!((norm - 1.0).abs() < 1e-6,
+                "column {j} norm should be ~1.0 after topdown update, got {norm}");
         }
     }
 

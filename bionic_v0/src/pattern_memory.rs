@@ -122,6 +122,10 @@ impl PatternMemory {
         self.entries.len()
     }
 
+    pub fn tick_count(&self) -> u32 {
+        self.tick_counter
+    }
+
     fn insert_new(&mut self, q: &[f64; PATTERN_DIM], t_us: u64) -> usize {
         if self.entries.len() >= PATTERN_CAP {
             self.evict_weakest();
@@ -244,6 +248,30 @@ impl PatternMemory {
             }
         }
         self.entries.swap_remove(weakest);
+    }
+
+    /// §7.4: Seed L4 from perturbation_graph FastPath signature (24-D → 32-D).
+    /// Only inserts if no existing pattern is close enough (avoids duplicates).
+    pub fn seed_from_fast_path(&mut self, sig: &[f64; 24], t_us: u64) -> bool {
+        let mut pattern = [0.0f64; PATTERN_DIM];
+        let copy_len = 24.min(PATTERN_DIM);
+        pattern[..copy_len].copy_from_slice(&sig[..copy_len]);
+
+        let norm: f64 = pattern.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if norm < 1e-10 { return false; }
+        for d in 0..PATTERN_DIM {
+            pattern[d] /= norm;
+        }
+
+        if !self.entries.is_empty() {
+            let (_, best_sim) = self.nearest(&pattern);
+            if best_sim >= self.theta_separate {
+                return false;
+            }
+        }
+
+        self.insert_new(&pattern, t_us);
+        true
     }
 
     // ── Persistence (hand-rolled binary, matches perturbation_graph pattern) ──
@@ -599,5 +627,36 @@ mod tests {
     fn deserialize_rejects_too_short() {
         assert!(PatternMemory::deserialize(&[]).is_none());
         assert!(PatternMemory::deserialize(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn seed_from_fast_path_inserts_normalized() {
+        let mut pm = PatternMemory::new();
+        let mut sig = [0.0f64; 24];
+        sig[0] = 3.0;
+        sig[1] = 4.0;
+        assert!(pm.seed_from_fast_path(&sig, 1_000_000));
+        assert_eq!(pm.pattern_count(), 1);
+        let p = &pm.entries[0].pattern;
+        let norm: f64 = p.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "seeded pattern should be unit-normalized, got {norm}");
+    }
+
+    #[test]
+    fn seed_from_fast_path_rejects_duplicate() {
+        let mut pm = PatternMemory::new();
+        let mut sig = [0.0f64; 24];
+        sig[0] = 1.0;
+        assert!(pm.seed_from_fast_path(&sig, 1_000_000));
+        assert!(!pm.seed_from_fast_path(&sig, 2_000_000));
+        assert_eq!(pm.pattern_count(), 1);
+    }
+
+    #[test]
+    fn seed_from_fast_path_rejects_zero() {
+        let mut pm = PatternMemory::new();
+        let sig = [0.0f64; 24];
+        assert!(!pm.seed_from_fast_path(&sig, 1_000_000));
+        assert_eq!(pm.pattern_count(), 0);
     }
 }

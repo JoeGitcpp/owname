@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bionic_v0::predictor::Ar2Predictor;
+use bionic_v0::predictor::ContextGatedPredictor;
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::vpc::{ObservationDomainKind, PublicationStatus, VpcContractState};
@@ -24,7 +24,7 @@ fn viewport_exposes_empty_vpc_contract_state_by_default() {
 #[test]
 fn ar2_predictor_only_emits_err_after_later_observation_arrives() {
     let vp = Arc::new(Viewport::new());
-    let mut p = Ar2Predictor::new(0);
+    let mut p = ContextGatedPredictor::new(0);
 
     vp.push_observation(0, 10_000, 0.10);
     vp.push_observation(0, 20_000, 0.20);
@@ -61,7 +61,7 @@ fn ar2_predictor_only_emits_err_after_later_observation_arrives() {
 #[test]
 fn ar2_predictor_contract_state_stays_axis_local() {
     let vp = Arc::new(Viewport::new());
-    let mut p = Ar2Predictor::new(0);
+    let mut p = ContextGatedPredictor::new(0);
 
     vp.push_observation(0, 10_000, 0.10);
     vp.push_observation(0, 20_000, 0.20);
@@ -85,7 +85,7 @@ fn ar2_predictor_contract_state_stays_axis_local() {
 #[test]
 fn snapshot_and_observer_expose_vpc_contract_as_trace_not_world_truth() {
     let vp = Arc::new(Viewport::new());
-    let mut p = Ar2Predictor::new(0);
+    let mut p = ContextGatedPredictor::new(0);
 
     vp.push_observation(0, 10_000, 0.10);
     vp.push_observation(0, 20_000, 0.20);
@@ -143,7 +143,7 @@ fn vpc_contract_source_contains_no_semantic_or_observer_backflow() {
 #[test]
 fn predictor_publications_do_not_write_observation_truth() {
     let vp = Arc::new(Viewport::new());
-    let mut p = Ar2Predictor::new(0);
+    let mut p = ContextGatedPredictor::new(0);
 
     vp.push_observation(0, 10_000, 0.10);
     vp.push_observation(0, 20_000, 0.20);

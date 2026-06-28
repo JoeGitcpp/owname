@@ -2,7 +2,7 @@
 
 **日期**：2026-06-27（Phase 1-4 落地 2026-06-28）
 **版本**：v1.1
-**状态**：Phase 1-4 已实施并通过 TDD（commit 13146e2 + body.rs 接入），Phase 5（端到端梯度）和 Phase 6（注意力统一）待做
+**状态**：Phase 1-6 已实施并通过 TDD（409 tests, commit TBD）
 **前置阅读**：`perturbation-graph-phase-a-to-e-design-2026-06-18.md`、`prospection-emergence-scaffold-sdd-2026-06-27.md`
 
 ### 实施偏离记录（v1 → v1.1）
@@ -13,9 +13,13 @@
 | L0 effective_mask 返回类型 | `[bool; AXIS_COUNT]` | `[f64; AXIS_COUNT]` 渐变增益 | 渐变增益优于硬切换，画布投射乘 f64 增益 |
 | L1 参数存储 | struct 字段（运行时可调） | module-level const | 简化：Phase 1 不需运行时调参 |
 | Pipeline tick 频率 | 100 Hz | 30 Hz（orchestrator 节奏） | 100Hz 是 AR-2 预测器频率，认知层在 30Hz orchestrator 串行刷新路径即可 |
-| L4 输出接入 | feed_intention / spike_surprise | `_output` 暂未读取 | Phase 5-6 工作：输出→意图/惊奇/注意力的接线待做 |
-| L4 seed_from_fast_path | SDD §7.4 接口定义 | 未实现 | Phase 5-6：L4↔perturbation_graph 交互待做 |
+| L4 输出接入 | feed_intention / spike_surprise | Completed→stamp_mark Attention / Separated→observe_relation_emergent / Ambiguous→stamp_mark 0.5 | Phase 5-6 已实现（viewport.rs §8 output wiring） |
+| L4 seed_from_fast_path | SDD §7.4 接口定义 | 已实现：PG FastPath 24-D sig → L4 32-D 零填充归一化去重 | Phase 5-6：每 10000 tick 或空库时从 PG 种入 |
+| L3 FiLM context 维度 | CTX_DIM=8（6 intero + maturity + arousal） | CTX_DIM=10（+attention_pressure, +attention_resonance） | Phase 6 §4.3：ActiveFocusTrace pressure/resonance 作为画布侧抑制上下文输入 |
+| Phase 6 PPF 画布调制 | SDD 未明确定义接口 | PPF wave amplitude × (1 + canvas_salience) | Phase 6 §4.3：画布点火强度调制 PPF 波幅选择 |
+| Phase 6 GlobalAttention 画布调制 | SDD 未明确定义接口 | raw score × (1 + canvas_salience) | Phase 6 §4.3：画布点火强度调制注意力分配 |
 | L4 PatternQueryResult | 3 variant | +Empty variant | 空库时无候选，需显式状态 |
+| L1 竞争传递函数 | ReLU | sigmoid(gain=20) | ReLU + w_self>1 导致激活无界增长（NaN）；sigmoid 有上界=1.0，匹配 Dehaene & Changeux 2011 原版 GNW 模型 |
 
 ---
 
@@ -761,7 +765,7 @@ L3 依赖 L2 的输出存在，但可以晚于 L4 实施（L4 可以先不调制
 | `CANVAS_DIM` | 64 | L1 | 6 模态汇聚空间，64 够覆盖主要变异 |
 | `N_FEATURES` | 128 | L2 | 过完备字典（> CANVAS_DIM）促进稀疏性 |
 | `N_POOLS` | 32 | L2 | 池化后特征数 = 模式维度 |
-| `CTX_DIM` | 8 | L3 | 8 个 INTERO + 发育状态 |
+| `CTX_DIM` | 10 | L3 | 6 INTERO + maturity + arousal + attention_pressure + attention_resonance (Phase 6 扩展) |
 | `FILM_HIDDEN` | 16 | L3 | 调制网络隐藏层（小 = 防过拟合） |
 | `PATTERN_CAP` | 2048 | L4 | 模式库容量上限 |
 | `w_self` | 1.2 | L1 | 自激强度（> 1 才能点火） |
@@ -808,8 +812,8 @@ L3 依赖 L2 的输出存在，但可以晚于 L4 实施（L4 可以先不调制
 | **计算开销** | 5 步 ISTA + 画布竞争 + attention 检索 → 100Hz 可能来不及 | ISTA 步数可降到 3；画布竞争一步欧拉足够；attention 只对 top-K 模式算（非全库） |
 | **稀疏编码收敛** | 字典可能坍缩到少数高频使用的基 | 加字典列归一化（每列 L2=1）+ 未使用列随机重置 |
 | **灾难性遗忘** | 新模式覆写旧模式 | CLS 双速学习 + 慢整合间隔 |
-| **注意力统一（Phase 6）** | 改动现有三套系统风险大 | 最后做；先让 L1-L4 与现有系统并行跑，确认稳定后再切换 |
+| **注意力统一（Phase 6）** | 改动现有三套系统风险大 | 增量式：画布 salience 调制 GlobalAttention + PPF 波幅 + AFT→L3 FiLM context；三套系统并行跑，画布作为统一信号源渐进替代 |
 
 ---
 
-*v1.1 更新：Phase 1-4 已通过 TDD 落地。Phase 5（端到端梯度 + 学习）和 Phase 6（注意力统一）待做。*
+*v1.2 更新（2026-06-28）：Phase 1-6 全部通过 TDD 落地（409 tests）。Phase 5 = sigmoid 传递函数 + L1 投射学习 + L4→L2 梯度 + L4 output wiring + seed_from_fast_path。Phase 6 = GlobalAttention/PPF/L3 FiLM 三路画布 salience 统一。*

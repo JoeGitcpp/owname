@@ -1,6 +1,6 @@
 use crate::feature_extraction::N_POOLS;
 
-pub const CTX_DIM: usize = 8;
+pub const CTX_DIM: usize = 10;
 const FILM_HIDDEN: usize = 16;
 const FILM_LR: f64 = 0.0001;
 
@@ -107,13 +107,21 @@ impl ContextModulator {
             self.b1[h] -= FILM_LR * grad_hidden[h];
         }
     }
+
+    pub fn grad_features(&self, grad_output: &[f64; N_POOLS]) -> [f64; N_POOLS] {
+        let mut grad = [0.0f64; N_POOLS];
+        for g in 0..N_POOLS {
+            grad[g] = self.gamma[g] * grad_output[g];
+        }
+        grad
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn zero_ctx() -> [f64; CTX_DIM] { [0.0; CTX_DIM] }
+    fn zero_ctx() -> [f64; CTX_DIM] { [0.0f64; CTX_DIM] }
     fn zero_features() -> [f64; N_POOLS] { [0.0; N_POOLS] }
 
     #[test]
@@ -151,9 +159,9 @@ mod tests {
         cm.w1[0][0] = 1.0;
         cm.b1[0] = 0.1;
 
-        let ctx = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut ctx = [0.0f64; CTX_DIM];
+        ctx[0] = 1.0;
         let output = cm.modulate(&zero_features(), &ctx);
-        // output[0] = gamma[0] * 0 + beta[0] = beta[0]
         assert!(output[0].abs() > 0.0, "nonzero beta should produce nonzero output even with zero features");
     }
 
@@ -170,8 +178,9 @@ mod tests {
         }
 
         let features = [1.0f64; N_POOLS];
-        let ctx_a = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let ctx_b = [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let ctx_a = [0.0f64; CTX_DIM];
+        let mut ctx_b = [0.0f64; CTX_DIM];
+        ctx_b[0] = 5.0;
 
         let out_a = cm.modulate(&features, &ctx_a);
         let out_b = cm.modulate(&features, &ctx_b);
@@ -187,7 +196,7 @@ mod tests {
     fn update_changes_weights() {
         let mut cm = ContextModulator::new();
         let features = [1.0f64; N_POOLS];
-        let ctx = [1.0f64; CTX_DIM];
+        let ctx = [1.0f64; CTX_DIM]; // all ones context for update test
         let grad = [1.0f64; N_POOLS];
 
         // Need nonzero hidden for gradient to flow
@@ -211,10 +220,39 @@ mod tests {
         cm.b1[0] = 0.0;
 
         let features = [3.0f64; N_POOLS];
-        let ctx = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut ctx = [0.0f64; CTX_DIM];
+        ctx[0] = 1.0;
         let output = cm.modulate(&features, &ctx);
         // gamma = 1 + 1.0 * (1.0*1.0+0.0) = 2.0, beta = 0
         // output = 2.0 * 3.0 = 6.0
         assert!((output[0] - 6.0).abs() < 1e-6, "gamma=2 * feature=3 should = 6, got {}", output[0]);
+    }
+
+    #[test]
+    fn grad_features_scales_by_gamma() {
+        let mut cm = ContextModulator::new();
+        cm.w2_gamma[0][0] = 1.0;
+        cm.w1[0][0] = 1.0;
+        let mut ctx = [0.0f64; CTX_DIM];
+        ctx[0] = 1.0;
+        let features = [1.0f64; N_POOLS];
+        cm.modulate(&features, &ctx);
+        // gamma[0] = 1 + hidden[0] = 1 + 1.0 = 2.0
+
+        let grad_output = [1.0f64; N_POOLS];
+        let grad = cm.grad_features(&grad_output);
+        assert!((grad[0] - 2.0).abs() < 1e-6,
+            "grad_features[0] should = gamma[0] * grad_output[0] = 2.0, got {}", grad[0]);
+    }
+
+    #[test]
+    fn grad_features_identity_at_init() {
+        let cm = ContextModulator::new();
+        let grad_output = [0.5f64; N_POOLS];
+        let grad = cm.grad_features(&grad_output);
+        for g in 0..N_POOLS {
+            assert!((grad[g] - 0.5).abs() < 1e-10,
+                "at init gamma=1, grad should pass through");
+        }
     }
 }

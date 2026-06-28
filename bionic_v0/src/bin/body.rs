@@ -16,7 +16,7 @@ use bionic_v0::learned_bias::{
 use bionic_v0::live_byte_carrier::spawn_live_byte_ingress;
 use bionic_v0::live_byte_closure::LiveByteClosureDriver;
 use bionic_v0::phot_camera::{RealCameraFrameProvider, StubRealCameraFrameProvider};
-use bionic_v0::predictor::Ar2Predictor;
+use bionic_v0::predictor::ContextGatedPredictor;
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::vpc_cross_layer::{axis_predictor_bank, CrossLayerPredictor};
@@ -193,6 +193,10 @@ fn run_global_refresh_cycle(
     vp.tick_auditory_visual_from_fusion(t);
     vp.tick_auditory_visual_expression(t);
     vp.tick_self_development_from_substrate(t);
+    // HTM-inspired modality-level anomaly detection (SDD 2026-06-28 §2).
+    // Runs AFTER all predictors have ticked and BEFORE the snapshot write.
+    // Gates maturity advancement when any modality is in population-anomaly.
+    vp.tick_modality_anomaly(t);
     vp.refresh_probe_law(t);
     vp.tick_probe_output_from_law(t);
     if write_snapshot(vp, paths).is_err() {
@@ -413,8 +417,8 @@ fn main() {
     // covering all AXIS_COUNT (162) axes means every tier-0 axis is predicted —
     // each produces err signals, feeds the relation graph, and enters the
     // abstraction tower. The predictors simply observe whatever each axis holds.
-    let predictors: Arc<Mutex<Vec<Ar2Predictor>>> =
-        Arc::new(Mutex::new((0..bionic_v0::AXIS_COUNT).map(Ar2Predictor::new).collect()));
+    let predictors: Arc<Mutex<Vec<ContextGatedPredictor>>> =
+        Arc::new(Mutex::new((0..bionic_v0::AXIS_COUNT).map(ContextGatedPredictor::new).collect()));
 
     // A2 (VPC mechanism 5): the axis-level cross-layer bank — the high-layer
     // half of the keystone loop, built from a hard-coded SPARSE prior table
@@ -659,6 +663,7 @@ fn main() {
         let phot_seq_cp = runtime_dir.join("phot_sequence.bin");
         let cognitive_patterns_cp = runtime_dir.join("cognitive_patterns.bin");
         let perturbation_graph_cp = runtime_dir.join("perturbation_graph.bin");
+        let convergence_csv_cp = runtime_dir.join("convergence.csv");
         let vocal_diag_cp = runtime_dir.join("vocal_diag.csv");
         spawn_ticker(vp.clone(), profile.checkpoint_hz, stop.clone(), move |_| {
             let state = vp_checkpoint.read_learned_bias();
@@ -824,6 +829,26 @@ fn main() {
                 &cognitive_patterns_cp,
                 &cp_bytes,
             );
+            // Convergence telemetry (SDD 2026-06-28 §2.4): VFE aggregate from
+            // perturbation graph + modality anomaly → append-only CSV (~1 Hz).
+            {
+                let pg = vp_checkpoint
+                    .perturbation_graph
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let anomaly = vp_checkpoint.read_modality_anomaly();
+                let avg_anomaly: f64 =
+                    anomaly.iter().sum::<f64>() / anomaly.len() as f64;
+                let snap = bionic_v0::convergence_metric::vfe_aggregate_at(
+                    &pg,
+                    avg_anomaly,
+                    vp_checkpoint.master_tick.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                let _ = bionic_v0::convergence_metric::append_csv(
+                    &convergence_csv_cp,
+                    &snap,
+                );
+            }
         })
     };
 

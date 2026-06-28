@@ -90,6 +90,7 @@ pub mod pattern_memory;
 pub mod context_modulation;
 pub mod cognitive_pipeline;
 pub mod replay_engine;
+pub mod convergence_metric;
 
 pub const HISTORY_CAP: usize = 1024;
 

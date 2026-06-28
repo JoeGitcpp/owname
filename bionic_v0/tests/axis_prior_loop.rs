@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use bionic_v0::predictor::Ar2Predictor;
+use bionic_v0::predictor::ContextGatedPredictor;
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::vpc_cross_layer::{axis_predictor_bank, CrossLayerPredictor};
@@ -75,7 +75,7 @@ fn closing_the_loop_lowers_target_err_ema_vs_control() {
     fn run(with_high_layer: bool) -> f64 {
         let vp = Arc::new(Viewport::new());
         let (axis_a, axis_b) = (AXIS_VIB, AXIS_VIB + 1);
-        let mut low = Ar2Predictor::new(axis_a);
+        let mut low = ContextGatedPredictor::new(axis_a);
         let mut high = CrossLayerPredictor::new(axis_a, &[axis_b]);
 
         let mut err_ema = 0.0f64;

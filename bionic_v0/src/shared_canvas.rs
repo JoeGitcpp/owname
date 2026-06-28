@@ -26,8 +26,10 @@ const W_SELF: f64 = 1.2;
 const W_INHIB: f64 = 0.15;
 const THETA: f64 = 0.3;
 const TAU_MS: f64 = 50.0;
+const SIGMOID_GAIN: f64 = 20.0;
 const PRECISION_EPSILON: f64 = 1e-6;
 const IGNITION_CAPACITY: usize = 16;
+const PROJ_LR: f64 = 0.001;
 
 pub struct ModalityProjection {
     pub weights: Vec<[f64; CANVAS_DIM]>,
@@ -138,8 +140,8 @@ impl SharedCanvas {
         let mean_a: f64 = self.activation.iter().copied().sum::<f64>() / CANVAS_DIM as f64;
         for i in 0..CANVAS_DIM {
             let drive = W_SELF * self.activation[i] - W_INHIB * mean_a + z_fused[i] - THETA;
-            let drive_rect = drive.max(0.0);
-            self.activation[i] = (1.0 - decay) * self.activation[i] + decay * drive_rect;
+            let transfer = 1.0 / (1.0 + (-SIGMOID_GAIN * drive).exp());
+            self.activation[i] = (1.0 - decay) * self.activation[i] + decay * transfer;
         }
 
         // 3. Ignition: top-K dimensions broadcast
@@ -170,6 +172,31 @@ impl SharedCanvas {
     pub fn broadcast_state(&self) -> &[f64; CANVAS_DIM] {
         &self.activation
     }
+
+    /// §4.5: Update projection matrices from L2 reconstruction error.
+    /// dW_m/dt = -α · ∂E_sparse / ∂W_m
+    pub fn update_projections(
+        &mut self,
+        l2_residual: &[f64; CANVAS_DIM],
+        axes: &[f64; AXIS_COUNT],
+        dev_mask: &[f64; AXIS_COUNT],
+    ) {
+        let precision_sum: f64 = self.modality_precision.iter().sum();
+        if precision_sum < PRECISION_EPSILON { return; }
+
+        for m in 0..MODALITY_COUNT {
+            let p_scale = self.modality_precision[m] / precision_sum;
+            let proj = &mut self.projections[m];
+            for k in 0..proj.size {
+                let axis_idx = proj.base + k;
+                let x = axes[axis_idx] * dev_mask[axis_idx];
+                if x.abs() < 1e-12 { continue; }
+                for d in 0..CANVAS_DIM {
+                    proj.weights[k][d] -= PROJ_LR * p_scale * l2_residual[d] * x;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -193,11 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn zero_input_stays_zero() {
+    fn zero_input_no_ignition() {
         let mut canvas = SharedCanvas::new();
-        let output = canvas.step(&zero_axes(), &ones_mask(), 10.0);
-        let sum: f64 = output.iter().sum();
-        assert!(sum.abs() < 1e-6, "zero input should produce ~zero output, got {sum}");
+        for _ in 0..50 {
+            canvas.step(&zero_axes(), &ones_mask(), 10.0);
+        }
+        assert_eq!(canvas.ignited_count, 0,
+            "zero input should not ignite any dimension");
     }
 
     #[test]
@@ -244,15 +273,14 @@ mod tests {
             axes[i] = 1.0;
         }
         let mut mask = ones_mask();
-        // Zero out all hearing
         for i in 0..crate::VIB_BANDS {
             mask[i] = 0.0;
         }
         for _ in 0..20 {
             canvas.step(&axes, &mask, 10.0);
         }
-        let sum: f64 = canvas.activation.iter().sum();
-        assert!(sum.abs() < 1e-6, "masked-out modality should not activate canvas, got {sum}");
+        assert_eq!(canvas.ignited_count, 0,
+            "masked-out modality should not ignite canvas");
     }
 
     #[test]
@@ -287,5 +315,65 @@ mod tests {
                 "modality {m} base should be {}, got {}",
                 MODALITY_BASES[m-1] + MODALITY_SIZES[m-1], MODALITY_BASES[m]);
         }
+    }
+
+    #[test]
+    fn activation_bounded_under_strong_input() {
+        let mut canvas = SharedCanvas::new();
+        let mut axes = [2.0f64; AXIS_COUNT];
+        let mask = ones_mask();
+        for _ in 0..500 {
+            canvas.step(&axes, &mask, 10.0);
+        }
+        for (i, &a) in canvas.activation.iter().enumerate() {
+            assert!(a.is_finite(), "activation[{i}] must be finite, got {a}");
+            assert!(a <= 1.0 + 1e-6, "activation[{i}] must be <= 1.0 (sigmoid bound), got {a}");
+        }
+    }
+
+    #[test]
+    fn ignition_stabilizes_with_consistent_input() {
+        let mut canvas = SharedCanvas::new();
+        let mut axes = [0.0f64; AXIS_COUNT];
+        for i in 0..crate::VIB_BANDS { axes[i] = 1.5; }
+        for i in crate::AXIS_VIS_BASE..crate::AXIS_VIS_BASE + crate::VIS_AXES {
+            axes[i] = 0.8;
+        }
+        let mask = ones_mask();
+        let mut counts = Vec::new();
+        for t in 0..200 {
+            canvas.step(&axes, &mask, 10.0);
+            if t >= 150 {
+                counts.push(canvas.ignited_count);
+            }
+        }
+        let min_c = *counts.iter().min().unwrap();
+        let max_c = *counts.iter().max().unwrap();
+        assert!(max_c - min_c <= 2,
+            "ignited count should stabilize (range {min_c}..{max_c} over last 50 ticks)");
+    }
+
+    #[test]
+    fn projection_learning_changes_weights() {
+        let mut canvas = SharedCanvas::new();
+        let axes = ones_mask();
+        let mask = ones_mask();
+        for _ in 0..50 {
+            canvas.step(&axes, &mask, 10.0);
+        }
+        let w_before = canvas.projections[0].weights[0].clone();
+
+        let mut residual = [0.0f64; CANVAS_DIM];
+        residual[0] = 0.5;
+        canvas.update_projections(&residual, &axes, &mask);
+
+        let mut changed = false;
+        for d in 0..CANVAS_DIM {
+            if (canvas.projections[0].weights[0][d] - w_before[d]).abs() > 1e-15 {
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed, "L2 reconstruction residual should update L1 projection weights");
     }
 }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bionic_v0::predictor::Ar2Predictor;
+use bionic_v0::predictor::ContextGatedPredictor;
 use bionic_v0::snapshot::{read_snapshot, write_snapshot, SnapshotPaths};
 use bionic_v0::viewport::Viewport;
 use bionic_v0::vpc::{
@@ -163,7 +163,7 @@ fn predictor_contract_retains_bounded_open_predictions_and_resolves_recent_indic
 #[test]
 fn ar2_predictor_emits_shared_family_trace_with_distinct_lifecycle_states() {
     let vp = Arc::new(Viewport::new());
-    let mut p = Ar2Predictor::new(0);
+    let mut p = ContextGatedPredictor::new(0);
 
     vp.push_observation(0, 10_000, 0.10);
     p.tick(&vp);
@@ -303,7 +303,7 @@ fn relation_predictor_contract_resolves_same_cycle_edge_publication() {
 #[test]
 fn predictor_contract_snapshot_roundtrips_family_traces_without_semantics() {
     let vp = Arc::new(Viewport::new());
-    let mut p = Ar2Predictor::new(0);
+    let mut p = ContextGatedPredictor::new(0);
 
     vp.push_observation(0, 10_000, 0.10);
     p.tick(&vp);

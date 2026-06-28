@@ -64,6 +64,7 @@ test-support = []
 # Self-dependency enables `test-support` on the lib when building this crate's
 # own integration tests (debug or release), without exposing it in production.
 bionic_v0 = { path = ".", features = ["test-support"] }
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

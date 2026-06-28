@@ -10,9 +10,9 @@ use bionic_v0::{
     INTERO_RESERVE, INTERO_VITAL_ANXIETY, INTERO_PAIN, AXIS_COUNT,
 };
 use bionic_v0::viewport::Viewport;
-use bionic_v0::predictor::Ar2Predictor;
+use bionic_v0::predictor::ContextGatedPredictor;
 
-fn run_predictors(vp: &Arc<Viewport>, predictors: &mut Vec<Ar2Predictor>, t: u64) {
+fn run_predictors(vp: &Arc<Viewport>, predictors: &mut Vec<ContextGatedPredictor>, t: u64) {
     for p in predictors.iter_mut() {
         p.tick(vp);
     }
@@ -26,8 +26,8 @@ fn run_predictors(vp: &Arc<Viewport>, predictors: &mut Vec<Ar2Predictor>, t: u64
 fn interoceptive_axes_produce_prediction_and_err() {
     let vp = Arc::new(Viewport::new());
     // Build predictors for ALL axes (mirrors what body.rs now does).
-    let mut predictors: Vec<Ar2Predictor> =
-        (0..AXIS_COUNT).map(Ar2Predictor::new).collect();
+    let mut predictors: Vec<ContextGatedPredictor> =
+        (0..AXIS_COUNT).map(ContextGatedPredictor::new).collect();
 
     let t0 = 5_000_000u64;
 
@@ -64,8 +64,8 @@ fn interoceptive_axes_produce_prediction_and_err() {
 /// must not panic and must produce a vector of the right length.
 #[test]
 fn predictor_count_matches_axis_count() {
-    let predictors: Vec<Ar2Predictor> =
-        (0..AXIS_COUNT).map(Ar2Predictor::new).collect();
+    let predictors: Vec<ContextGatedPredictor> =
+        (0..AXIS_COUNT).map(ContextGatedPredictor::new).collect();
     assert_eq!(predictors.len(), AXIS_COUNT,
         "must build exactly AXIS_COUNT predictors, got {}", predictors.len());
     assert_eq!(AXIS_COUNT, 167, "AXIS_COUNT must be 167 (16 hearing + 128 vision + 15 intero + 5 code + 2 gauss-summary + 1 defense-summary)");

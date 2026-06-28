@@ -420,6 +420,19 @@ impl Viewport {
             });
         }
 
+        // §4.3 Phase 6: canvas ignition modulates PPF wave amplitudes.
+        // Strong canvas ignition = coherent multi-modal representation →
+        // amplify pressure waves proportionally.
+        let canvas_salience = self.read_cognitive_salience()
+            .map(|(_, ignited)| ignited as f64 / crate::shared_canvas::CANVAS_DIM as f64)
+            .unwrap_or(0.0);
+        if canvas_salience > 0.0 {
+            let boost = 1.0 + canvas_salience;
+            for inp in &mut inputs {
+                inp.amplitude = unit(inp.amplitude * boost);
+            }
+        }
+
         self.refresh_prediction_pressure_field(now_us, &inputs);
     }
 

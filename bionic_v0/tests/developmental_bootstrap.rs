@@ -18,7 +18,7 @@ use bionic_v0::learned_bias::{
     read_learned_bias_checkpoint, write_learned_bias_checkpoint, LearnedBiasCheckpointPaths,
     LearnedBiasState,
 };
-use bionic_v0::predictor::Ar2Predictor;
+use bionic_v0::predictor::ContextGatedPredictor;
 use bionic_v0::viewport::Viewport;
 use bionic_v0::{
     ar2_lr_scale, binding_align_min, binding_deviate_max, vpc_prior_gain_scale,
@@ -381,18 +381,17 @@ fn naive_body_takes_coarser_ar2_steps_than_mature_body() {
     let run = |maturity: f64| -> f64 {
         let vp = Arc::new(Viewport::new());
         vp.restore_maturity(maturity);
-        vp.set_surprise(0, 1.0); // identical nonzero surprise for both bodies
-        let mut p = Ar2Predictor::new(0);
+        vp.set_surprise(0, 1.0);
+        let mut p = ContextGatedPredictor::new(0);
 
         vp.push_observation(0, 10_000, 0.10);
-        p.tick(&vp); // insufficient context
+        p.tick(&vp);
         vp.push_observation(0, 20_000, 0.20);
-        p.tick(&vp); // open publication (horizon 10ms → target 30_000)
+        p.tick(&vp);
         vp.push_observation(0, 30_000, 0.50);
-        p.tick(&vp); // resolves → one Widrow-Hoff step scaled by ar2_lr_scale(m)
+        p.tick(&vp);
 
-        let (a, b, _, _, _, _) = vp.read_predictor(0);
-        a.abs() + b.abs()
+        p.coeffs.iter().flat_map(|c| c.iter()).map(|v| v.abs()).sum()
     };
 
     let naive_step = run(0.0);
