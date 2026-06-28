@@ -57,12 +57,14 @@ impl VocalReflexState {
         let mut reflex_pressure = drive_pressure * 0.75 + sudden_delta * 0.35 - regulating_pressure
             + self.fast_gain * 0.15;
 
-        // Post-regulation babble floor: the endogenous baseline (rhythm ×
-        // exploration_drive, already maturity-annealed) survives regulation.
-        // Without this, regulating_pressure (dominated by pred_fam × 0.35 ≈
-        // 0.35) kills all spontaneous drive (peak ~0.18), making the system
-        // 100% reactive / 0% spontaneous.
-        reflex_pressure = reflex_pressure.max(endogenous_floor);
+        // Post-regulation babble floor: prevents regulation from crushing
+        // spontaneous drive to zero. Capped at gate×0.85 so the floor alone
+        // NEVER triggers a burst — it only makes bursting easier when real
+        // drive adds the remaining ~15%. Without the cap, efficacy lowers
+        // the gate while the floor stays high → positive feedback loop →
+        // burst every tick (23/s).
+        let gate = (0.40 - vocal_efficacy.clamp(0.0, 1.0) * 0.30).clamp(0.10, 0.40);
+        reflex_pressure = reflex_pressure.max(endogenous_floor.min(gate * 0.85));
 
         let bypass = drive_pressure > 0.78 && action_suppression > 0.04;
         if bypass {
@@ -75,13 +77,6 @@ impl VocalReflexState {
         self.prior_drive = self.prior_drive * 0.65 + drive_pressure * 0.35;
         self.last_update_t_us = now_us;
 
-        // 改造1: the voicing gate is LEARNED, not the hardcoded 0.40 wall.
-        // It lowers as vocal_efficacy grows — i.e. as voicing has proven to
-        // bring real external closure, the body gets easier to voice (爱叫).
-        // A newborn (efficacy=0) keeps the 0.40 baseline (backward-compatible).
-        // This is independent of prediction_familiarity/action_suppression,
-        // which still RAISE the bar to damp self-excitation/habituation (闭嘴).
-        let gate = (0.40 - vocal_efficacy.clamp(0.0, 1.0) * 0.30).clamp(0.10, 0.40);
         if self.reflex_pressure <= gate {
             return None;
         }
